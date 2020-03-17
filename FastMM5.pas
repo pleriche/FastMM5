@@ -12,8 +12,11 @@ Copyright:
 Sponsored by:
   gs-soft AG
 
+Homepage:
+  https://github.com/pleriche/FastMM5
+
 Licence:
-  GPL v3. FastMM 5 is free for non-commercial use.  Commercial licences are available at US$99 per developer, or US$499
+  GPL v3.  FastMM 5 is free for non-commercial use.  Commercial licences are available at US$99 per developer, or US$499
   for an unlimited user site licence.  Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org),
   please send an e-mail to fastmm@leriche.org for confirmation.  Support is available for registered users via the same
   e-mail address.
@@ -279,6 +282,9 @@ AWalkBlockTypes = [] then all block types is assumed.  Note that pending free bl
 enumeration.}
 procedure FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
   AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil);
+
+{Returns a THeapStatus structure with information about the current memory usage.}
+function FastMM_GetHeapStatus: THeapStatus;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -5316,6 +5322,15 @@ begin
     end;
 
   end;
+
+end;
+
+{Returns a THeapStatus structure with information about the current memory usage.}
+function FastMM_GetHeapStatus: THeapStatus;
+begin
+  Result := Default(THeapStatus);
+
+{ TODO : Still to be implemented }
 
 end;
 
