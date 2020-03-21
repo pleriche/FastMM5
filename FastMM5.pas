@@ -115,6 +115,9 @@ type
     mmetUnexpectedMemoryLeakDetail,
     {Summary of memory leaks}
     mmetUnexpectedMemoryLeakSummary,
+    {When an attempt to free or reallocate a debug block that has already been freed is detected.}
+    mmetDebugBlockDoubleFree,
+    mmetDebugBlockReallocOfFreedBlock,
     {When a corruption of the memory pool is detected.}
     mmetDebugBlockHeaderCorruption,
     mmetDebugBlockFooterCorruption,
@@ -370,16 +373,19 @@ var
   FastMM_DebugSupportLibraryName: PWideChar = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
 
   {The events that are passed to OutputDebugString.}
-  FastMM_OutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockHeaderCorruption,
-    mmetDebugBlockFooterCorruption, mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+  FastMM_OutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
+    mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
+    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {The events that are logged to file.}
-  FastMM_LogToFileEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockHeaderCorruption,
-    mmetDebugBlockFooterCorruption, mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+  FastMM_LogToFileEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
+    mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
+    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {The events that are displayed in a message box.}
-  FastMM_MessageBoxEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockHeaderCorruption,
-    mmetDebugBlockFooterCorruption, mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+  FastMM_MessageBoxEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
+    mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
+    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {All debug blocks are tagged with the current value of this variable when the block is allocated.  This may be used
   by the application to track memory issues.}
@@ -436,6 +442,19 @@ var
     + '{12}'#13#10'{13}'#13#10;
   FastMM_MemoryLeakSummaryMessage: PWideChar = 'This application has leaked memory. The leaks ordered by size are:'#13#10'{14}';
   FastMM_MemoryLeakMessageBoxCaption: PWideChar = 'Unexpected Memory Leak';
+  {Attempts to free or reallocate a debug block that has alredy been freed.}
+  FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
+    + 'The block size is {3}.'#13#10#13#10
+    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + '{7}'#13#10#13#10
+    + 'The allocation number is: {9}'#13#10;
+  FastMM_DebugBlockReallocOfFreedBlock: PWideChar = 'An attempt was made to resize a block that has already been freed.'#13#10#13#10
+    + 'The block size is {3}.'#13#10#13#10
+    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + '{7}'#13#10#13#10
+    + 'The allocation number is: {9}'#13#10;
   {Memory pool corruption messages.}
   FastMM_BlockModifiedAfterFreeMessage: PWideChar = 'A memory block was modified after it was freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
@@ -612,7 +631,7 @@ const
   CEventLogTokenHexDump = 12;
   CEventLogTokenASCIIDump = 13;
   CEventLogTokenLeakSummaryEntries = 14;
-  CEventLogModifyAfterFreeDetail = 15;
+  CEventLogTokenModifyAfterFreeDetail = 15;
 
   {The highest ID of an event log token.}
   CEventLogMaxTokenID = 99;
@@ -2227,6 +2246,18 @@ begin
       LPMessageBoxCaption := FastMM_MemoryLeakMessageBoxCaption;
     end;
 
+    mmetDebugBlockDoubleFree:
+    begin
+      LPTextTemplate := FastMM_DebugBlockDoubleFree;
+      LPMessageBoxCaption := FastMM_MemoryCorruptionMessageBoxCaption;
+    end;
+
+    mmetDebugBlockReallocOfFreedBlock:
+    begin
+      LPTextTemplate := FastMM_DebugBlockReallocOfFreedBlock;
+      LPMessageBoxCaption := FastMM_MemoryCorruptionMessageBoxCaption;
+    end;
+
     mmetDebugBlockHeaderCorruption:
     begin
       LPTextTemplate := FastMM_BlockHeaderCorruptedMessage;
@@ -2474,7 +2505,7 @@ begin
   LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
   LLogCount := 0;
   LOffset := 0;
-  LTokenValues[CEventLogModifyAfterFreeDetail] := LPBufferPos;
+  LTokenValues[CEventLogTokenModifyAfterFreeDetail] := LPBufferPos;
   while LOffset < APDebugBlockHeader.UserSize do
   begin
     if LPUserArea[LOffset] <> CDebugFillPattern1B then
@@ -4588,6 +4619,43 @@ begin
   end;
 end;
 
+{----------------------------------------------------}
+{------------Invalid Free/realloc handling-----------}
+{----------------------------------------------------}
+
+procedure HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
+const
+  CTokenBufferSize = 65536;
+var
+  LPDebugBlockHeader: PFastMM_DebugBlockHeader;
+  LHeaderChecksum: NativeUInt;
+  LTokenValues: TEventLogTokenValues;
+  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LPBufferPos, LPBufferEnd: PWideChar;
+begin
+  {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
+  not much that can be done to provide additional error information.}
+  if PWord(PByte(APointer) - CBlockStatusWordSize)^ <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
+    Exit;
+
+  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
+  LPDebugBlockHeader := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
+  if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
+    Exit;
+
+  LTokenValues := Default(TEventLogTokenValues);
+
+  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
+  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
+  AddTokenValues_BlockTokens(LTokenValues, APointer, LPBufferPos, LPBufferEnd);
+
+  if AIsReallocMemCall then
+    LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
+  else
+    LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
+end;
+
 {--------------------------------------------------------}
 {-------Core memory manager interface: Normal mode-------}
 {--------------------------------------------------------}
@@ -4644,9 +4712,14 @@ begin
       else
       begin
         if LBlockHeader = CIsDebugBlockFlag then
-          Result := FastMM_FreeMem_FreeDebugBlock(APointer)
+        begin
+          Result := FastMM_FreeMem_FreeDebugBlock(APointer);
+        end
         else
+        begin
+          HandleInvalidFreeMemOrReallocMem(APointer, False);
           Result := -1;
+        end;
       end;
     end;
   end;
@@ -4680,9 +4753,14 @@ begin
       else
       begin
         if LBlockHeader = CIsDebugBlockFlag then
+        begin
           Result := FastMM_ReallocMem_ReallocDebugBlock(APointer, ANewSize)
+        end
         else
+        begin
+          HandleInvalidFreeMemOrReallocMem(APointer, True);
           Result := nil;
+        end;
       end;
 
     end;
@@ -4755,6 +4833,13 @@ begin
   end
   else
   begin
+    {Catch an attempt to reallocate a freed block.}
+    if LBlockHeader and CBlockIsFreeFlag <> 0 then
+    begin
+      HandleInvalidFreeMemOrReallocMem(APointer, True);
+      Exit(nil);
+    end;
+
     {The old block is not a debug block, so we need to allocate a new debug block and copy the data across.}
     Result := FastMM_DebugGetMem_GetDebugBlock(ANewSize, False);
 
