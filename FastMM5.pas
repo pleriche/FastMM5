@@ -82,11 +82,19 @@ uses
   {$align 4}
 {$endif}
 
-{$ifndef CPUX86}
-{$ifndef CPUX64}
-  {x86/x64 CPUs do not reorder writes, but ARM CPUs do.}
-  {$define WeakMemoryOrdering}
-{$endif}
+{$ifdef CPUX86}
+  {$ifndef PurePascal}
+    {$define X86ASM}
+  {$endif}
+{$else}
+  {$ifdef CPUX64}
+    {$ifndef PurePascal}
+      {$define X64ASM}
+    {$endif}
+  {$else}
+    {x86/x64 CPUs do not reorder writes, but ARM CPUs do.}
+    {$define WeakMemoryOrdering}
+  {$endif}
 {$endif}
 
 const
@@ -208,9 +216,7 @@ type
     {If this is the sequential feed span for the medium block arena then this will contain the number of bytes
     currently unused.}
     MediumBlockSequentialFeedSpanUnusedBytes: Integer;
-    {----Medium blocks only-----}
-    {Medium blocks may be a small block span, in which case this variable will be True.}
-    IsSmallBlockSpan: Boolean;
+    {----Small block spans only-----}
     {If True this is the current sequential feed small block span for ArenaIndex and the block size}
     IsSequentialFeedSmallBlockSpan: Boolean;
     {If IsSmallBlockSpan = True then this will contain the size of the small block.}
@@ -5168,7 +5174,6 @@ begin
     {Clear the fields that are not applicable to large blocks.}
     LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
     LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-    LBlockInfo.IsSmallBlockSpan := False;
     LBlockInfo.SmallBlockSpanBlockSize := 0;
     LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
 
@@ -5251,7 +5256,6 @@ begin
             LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
             LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
           end;
-          LBlockInfo.IsSmallBlockSpan := False;
           LBlockInfo.SmallBlockSpanBlockSize := 0;
           LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
           LBlockInfo.DebugInformation := nil;
@@ -5329,7 +5333,6 @@ begin
   { TODO : Also subtract the partial last block from the usable size.}
                     LBlockInfo.UsableSize := LMediumBlockSize - CMediumBlockHeaderSize - CSmallBlockSpanHeaderSize;
 
-                    LBlockInfo.IsSmallBlockSpan := True;
                     LBlockInfo.SmallBlockSpanBlockSize := LPSmallBlockManager.BlockSize;
                     LBlockInfo.IsSequentialFeedSmallBlockSpan := LSmallBlockOffset > CSmallBlockSpanHeaderSize;
                     if LBlockInfo.IsSequentialFeedSmallBlockSpan then
@@ -5346,7 +5349,6 @@ begin
                   begin
                     LBlockInfo.BlockType := btMediumBlock;
                     LBlockInfo.UsableSize := LMediumBlockSize - CMediumBlockHeaderSize;
-                    LBlockInfo.IsSmallBlockSpan := False;
                     LBlockInfo.SmallBlockSpanBlockSize := 0;
                     LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                     LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
@@ -5378,7 +5380,6 @@ begin
                       LBlockInfo.BlockType := btSmallBlock;
                       LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                       LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-                      LBlockInfo.IsSmallBlockSpan := False;
                       LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                       LBlockInfo.SmallBlockSpanBlockSize := 0;
                       LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
@@ -5410,13 +5411,73 @@ begin
 
 end;
 
+procedure FastMM_GetHeapStatus_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+var
+  LPHeapStatus: ^THeapStatus;
+begin
+  LPHeapStatus := ABlockInfo.UserData;
+
+  case ABlockInfo.BlockType of
+
+    btLargeBlock:
+    begin
+      Inc(LPHeapStatus.TotalAddrSpace, ABlockInfo.BlockSize);
+      Inc(LPHeapStatus.TotalCommitted, ABlockInfo.BlockSize);
+      Inc(LPHeapStatus.TotalAllocated, ABlockInfo.UsableSize);
+      Inc(LPHeapStatus.Overhead, ABlockInfo.BlockSize - ABlockInfo.UsableSize);
+    end;
+
+    btMediumBlockSpan:
+    begin
+      Inc(LPHeapStatus.TotalAddrSpace, ABlockInfo.BlockSize);
+      Inc(LPHeapStatus.TotalCommitted, ABlockInfo.BlockSize);
+      Inc(LPHeapStatus.Overhead, ABlockInfo.BlockSize);
+      if ABlockInfo.IsSequentialFeedMediumBlockSpan then
+      begin
+        Inc(LPHeapStatus.Unused, ABlockInfo.MediumBlockSequentialFeedSpanUnusedBytes);
+        Dec(LPHeapStatus.Overhead, ABlockInfo.MediumBlockSequentialFeedSpanUnusedBytes);
+      end;
+    end;
+
+    btMediumBlock:
+    begin
+      Dec(LPHeapStatus.Overhead, ABlockInfo.UsableSize);
+      if ABlockInfo.BlockIsFree then
+        Inc(LPHeapStatus.FreeBig, ABlockInfo.UsableSize)
+      else
+        Inc(LPHeapStatus.TotalAllocated, ABlockInfo.UsableSize);
+    end;
+
+    btSmallBlockSpan:
+    begin
+      if ABlockInfo.IsSequentialFeedSmallBlockSpan then
+      begin
+        Inc(LPHeapStatus.Unused, ABlockInfo.SmallBlockSequentialFeedSpanUnusedBytes);
+        Dec(LPHeapStatus.Overhead, ABlockInfo.SmallBlockSequentialFeedSpanUnusedBytes);
+      end;
+    end;
+
+    btSmallBlock:
+    begin
+      Dec(LPHeapStatus.Overhead, ABlockInfo.UsableSize);
+      if ABlockInfo.BlockIsFree then
+        Inc(LPHeapStatus.FreeSmall, ABlockInfo.UsableSize)
+      else
+        Inc(LPHeapStatus.TotalAllocated, ABlockInfo.UsableSize);
+    end;
+
+  end;
+end;
+
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
 begin
   Result := Default(THeapStatus);
 
-{ TODO : Still to be implemented }
+  FastMM_WalkBlocks(FastMM_GetHeapStatus_CallBack,
+    [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result);
 
+  Result.TotalFree := Result.FreeSmall + Result.FreeBig + Result.Unused;
 end;
 
 {Returns True if there are live pointers using this memory manager.}
@@ -6052,7 +6113,7 @@ begin
   if (LLeakSummary.LeakCount > 0)
     and (mmetUnexpectedMemoryLeakSummary in (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents)) then
   begin
-      FastMM_PerformMemoryLeakCheck_LogLeakSummary(LLeakSummary);
+    FastMM_PerformMemoryLeakCheck_LogLeakSummary(LLeakSummary);
   end;
 end;
 
