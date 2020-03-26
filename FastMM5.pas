@@ -287,10 +287,17 @@ be released.  Returns False if there were locked (currently in use) managers wit
 function FastMM_ProcessAllPendingFrees: Boolean;
 
 {Walks the block types indicated by the AWalkBlockTypes set, calling ACallBack for each allocated block.  If
-AWalkBlockTypes = [] then all block types is assumed.  Note that pending free blocks are *not* excluded from the
-enumeration.}
+AWalkBlockTypes = [] then all block types is assumed.  Note that pending free blocks are treated as used blocks for the
+purpose of the AWalkUsedBlocksOnly parameter.  Call FastMM_ProcessAllPendingFrees first in order to process all pending
+frees if this is a concern.}
 procedure FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
   AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil);
+
+{Walks all debug mode blocks (blocks that were allocated between a FastMM_EnterDebugMode and FastMM_ExitDebugMode call),
+checking for corruption of the debug header, footer, and in the case of freed blocks whether the block content was
+modified after the block was freed.  If a corruption is encountered an error message will be logged and/or displayed
+(as per the error logging configuration) and an invalid pointer exception will be raised.}
+procedure FastMM_ScanDebugBlocksForCorruption;
 
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
@@ -5409,6 +5416,26 @@ begin
 
   end;
 
+end;
+
+procedure FastMM_ScanDebugBlocksForCorruption_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+begin
+  {If it is not a debug mode block then there's nothing to check.}
+  if ABlockInfo.DebugInformation = nil then
+    Exit;
+
+  {Check the block header and footer for corruption}
+  if not CheckDebugBlockHeaderAndFooterCheckSumsValid(ABlockInfo.DebugInformation) then
+    System.Error(reInvalidPtr);
+
+  {If it is a free block, check whether it has been modified after being freed.}
+  if ABlockInfo.BlockIsFree and (not CheckDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
+    System.Error(reInvalidPtr);
+end;
+
+procedure FastMM_ScanDebugBlocksForCorruption;
+begin
+  FastMM_WalkBlocks(FastMM_ScanDebugBlocksForCorruption_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], False);
 end;
 
 procedure FastMM_GetHeapStatus_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
