@@ -61,7 +61,7 @@ unit FastMM5;
 interface
 
 uses
-  Windows;
+  Winapi.Windows;
 
 {$RangeChecks Off}
 {$BoolEval Off}
