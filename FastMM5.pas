@@ -67,6 +67,7 @@ uses
 {$BoolEval Off}
 {$OverflowChecks Off}
 {$Optimization On}
+{$StackFrames Off}
 {$TypedAddress Off}
 {$LongStrings On}
 
