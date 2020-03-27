@@ -4385,12 +4385,12 @@ begin
     Result := nil;
 end;
 
-function FastMM_GetMem_GetSmallBlock(ASize: Integer): Pointer;
+function FastMM_GetMem_GetSmallBlock(ASize: NativeInt): Pointer;
 var
   LPSmallBlockManager: PSmallBlockManager;
-  LArenaIndex, LSmallBlockTypeIndex: Integer;
+  LSmallBlockTypeIndex: Integer;
 begin
-  LSmallBlockTypeIndex := SmallBlockTypeLookup[(ASize + (CSmallBlockHeaderSize - 1)) div CSmallBlockGranularity];
+  LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ASize) + (CSmallBlockHeaderSize - 1)) div CSmallBlockGranularity];
 
   {Get a pointer to the small block manager for the first arena.}
   LPSmallBlockManager := @SmallBlockArenas[0][LSmallBlockTypeIndex];
@@ -4398,38 +4398,62 @@ begin
   while True do
   begin
 
-    {--------Step 1: Try to get a block from the first arena with an available block---------}
+    {--------------Attempt 1--------------
+    Try to get a block from the first arena with an available block.  During the first attempt only memory that has
+    already been reserved for use by the block type will be used - no new spans will be allocated.
 
-    {We check for available blocks in this order:
+    Try to obtain a block in this sequence:
       1) The pending free list
       2) From a partially free span
       3) From the sequential feed span}
 
-    {Walk the arenas for this small block type until we find an arena that can be used to obtain a block.}
-    for LArenaIndex := 0 to CSmallBlockArenaCount - 1 do
+    {Walk the arenas for this small block type until we find an unlocked arena that can be used to obtain a block.}
+    while True do
     begin
 
-      {In order to use the pending free list or reuse a block from a span with free blocks the block manager must be
-      locked.}
-      if ((NativeInt(LPSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(LPSmallBlockManager))
-          or (LPSmallBlockManager.PendingFreeList <> nil))
-        and (LPSmallBlockManager.SmallBlockManagerLocked = 0)
-        and (AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0) then
+      {In order to obtain a block from the pending free list or from a partially free span the arena must be locked.}
+      if LPSmallBlockManager.SmallBlockManagerLocked = 0 then
       begin
 
-        {Try to reuse a pending free block.}
-        Result := FastMM_GetMem_GetSmallBlock_TryReusePendingFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
-        if Result <> nil then
-          Exit;
+        if LPSmallBlockManager.PendingFreeList = nil then
+        begin
 
-        {Try to get a block from the first partially free span.}
-        Result := FastMM_GetMem_GetSmallBlock_TryAllocateFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
-        if Result <> nil then
-          Exit;
+          {The pending free list is empty, so check whether there are any partially free spans.}
+          if (NativeInt(LPSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(LPSmallBlockManager))
+            and (AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0) then
+          begin
 
-        {Another thread must have processed the free list, or used the last free block before the arena could be
-        locked.}
-        LPSmallBlockManager.SmallBlockManagerLocked := 0;
+            {Try to get a block from the first partially free span.}
+            Result := FastMM_GetMem_GetSmallBlock_TryAllocateFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
+            if Result <> nil then
+              Exit;
+
+            {Another thread must allocated the last free block before the arena could be locked.}
+            LPSmallBlockManager.SmallBlockManagerLocked := 0;
+
+          end;
+
+        end
+        else
+        begin
+
+          if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
+          begin
+
+            Result := FastMM_GetMem_GetSmallBlock_TryReusePendingFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
+            if Result <> nil then
+              Exit;
+
+            {The small block manager is already blocked, so try to allocate a block from the first partially free span.}
+            Result := FastMM_GetMem_GetSmallBlock_TryAllocateFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
+            if Result <> nil then
+              Exit;
+
+            {Another thread must have processed the free list, and there are also no spans with free blocks.}
+            LPSmallBlockManager.SmallBlockManagerLocked := 0;
+          end;
+
+        end;
 
       end;
 
@@ -4440,27 +4464,38 @@ begin
         Exit;
 
       {There are no available blocks in this arena:  Move on to the next arena.}
-      Inc(LPSmallBlockManager, CSmallBlockTypeCount);
+      if NativeUInt(LPSmallBlockManager) < NativeUInt(@SmallBlockArenas[CSmallBlockArenaCount - 1]) then
+        Inc(LPSmallBlockManager, CSmallBlockTypeCount)
+      else
+        Break;
 
     end;
-    Dec(LPSmallBlockManager, CSmallBlockTypeCount * CSmallBlockArenaCount);
+    Dec(LPSmallBlockManager, CSmallBlockTypeCount * (CSmallBlockArenaCount - 1));
 
-    {------Step 2: Try again: Lock the first unlocked arena and allocate a new sequential feed span if needed--------}
+    {--------------Attempt 2--------------
+    Lock the first unlocked arena and try again.  During the second attempt a new sequential feed span will be allocated
+    if there are no available blocks in the arena.
 
-    for LArenaIndex := 0 to CSmallBlockArenaCount - 1 do
+    Try to obtain a block in this sequence:
+      1) The pending free list
+      2) From a partially free span
+      3) From the sequential feed span
+      4) By allocating a new sequential feed span and splitting off a block from it}
+
+    while True do
     begin
 
       if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
       begin
 
-        {Try to get a block from the first partially free span.}
-        Result := FastMM_GetMem_GetSmallBlock_TryAllocateFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
-        if Result <> nil then
-          Exit;
-
         {Check if there is a pending free list.  If so the first pending free block is returned and the rest are
         freed.}
         Result := FastMM_GetMem_GetSmallBlock_TryReusePendingFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
+        if Result <> nil then
+          Exit;
+
+        {Try to get a block from the first partially free span.}
+        Result := FastMM_GetMem_GetSmallBlock_TryAllocateFreeBlockAndUnlockArenaOnSuccess(LPSmallBlockManager);
         if Result <> nil then
           Exit;
 
@@ -4480,11 +4515,15 @@ begin
       end;
 
       {Try the next small block arena}
-      Inc(LPSmallBlockManager, CSmallBlockTypeCount);
+      if NativeUInt(LPSmallBlockManager) < NativeUInt(@SmallBlockArenas[CSmallBlockArenaCount - 1]) then
+        Inc(LPSmallBlockManager, CSmallBlockTypeCount)
+      else
+        Break;
     end;
-    Dec(LPSmallBlockManager, CSmallBlockTypeCount * CSmallBlockArenaCount);
+    Dec(LPSmallBlockManager, CSmallBlockTypeCount * (CSmallBlockArenaCount - 1));
 
-    {--------Step 3: Back off and start again at the first arena---------}
+    {--------------Backoff--------------
+    All arenas are currently locked:  Back off and start again at the first arena}
 
     OS_AllowOtherThreadToRun;
 
