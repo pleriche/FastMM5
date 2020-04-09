@@ -7,7 +7,13 @@ interface
 uses
   FastMM5;
 
+var
+  FastMM_DebugSupportLibraryNotAvailableError: PWideChar = 'The debug support library could not be loaded.';
+
 implementation
+
+uses
+  System.SysUtils;
 
 initialization
   {$ifdef Align16Bytes}
@@ -28,8 +34,21 @@ initialization
   FastMM_MessageBoxEvents := [];
   {$endif}
 
+  {$ifdef FullDebugModeWhenDLLAvailable}
+  {$define FullDebugMode}
+  {$endif}
+
   {$ifdef FullDebugMode}
-  FastMM_EnterDebugMode;
+  if FastMM_LoadDebugSupportLibrary then
+  begin
+    FastMM_EnterDebugMode;
+  end
+  else
+  begin
+    {$ifndef FullDebugModeWhenDLLAvailable}
+    raise Exception.Create(FastMM_DebugSupportLibraryNotAvailableError);
+    {$endif}
+  end;
   {$endif}
 
   {$ifdef ShareMM}
