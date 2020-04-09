@@ -16,10 +16,15 @@ Homepage:
   https://github.com/pleriche/FastMM5
 
 Licence:
-  GPL v3.  FastMM 5 is free for non-commercial use.  Commercial licences are available at US$99 per developer, or US$499
-  for an unlimited user site licence.  Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org),
-  please send an e-mail to fastmm@leriche.org for confirmation.  Support is available for registered users via the same
-  e-mail address.
+  GPL v3.  FastMM 5 is free for non-commercial use.  Commercial licences are available at the following prices:
+    1 User = $99
+    2 Users = $189
+    3 Users = $269
+    4 Users = $339
+    5 Users = $399
+    Additional users beyond 5 = $50 per user.
+  Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to
+  fastmm@leriche.org for confirmation.  Support is available for registered users via the same e-mail address.
 
 Usage Instructions:
   Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup,
@@ -341,10 +346,10 @@ function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignme
 
 {Attempts to load the debug support library specified by FastMM_DebugSupportLibraryName.  On success it will set the
 FastMM_GetStackTrace and FastMM_ConvertStackTraceToText handlers to point to the routines in the debug library, provided
-alternate handlers have not yet been assigned by the application.  Returns True if the library was loaded successfully.
-FastMM_EnterDebugMode will call FastMM_LoadDebugSupportLibrary the first time it is called, unless the debug support
-library has already been loaded or handlers for both FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have been
-set by the application.}
+alternate handlers have not yet been assigned by the application.  Returns True if the library was loaded successfully,
+or was already loaded successfully prior to this call.  FastMM_EnterDebugMode will call FastMM_LoadDebugSupportLibrary
+the first time it is called, unless the debug support library has already been loaded or handlers for both
+FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have been set by the application.}
 function FastMM_LoadDebugSupportLibrary: Boolean;
 {Frees the debug support library, pointing the stack trace handlers currently using the debug support library back to
 the default no-op handlers.}
@@ -1476,7 +1481,7 @@ var
       Result := False;
   end;
 
-  {Returns true if AClassPointer points to a class VMT}
+  {Returns True if AClassPointer points to a class VMT}
   function InternalIsValidClass(AClassPointer: Pointer; ADepth: Integer = 0): Boolean;
   var
     LParentClassSelfPointer: PPointer;
@@ -3832,7 +3837,7 @@ var
   LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPMediumBlockManager: PMediumBlockManager;
 begin
-  {Process the pending free lists?}
+  {TODO : Process the pending free lists?}
 
   {What is the available size in the block being reallocated?}
   LBlockSize := GetMediumBlockSize(APointer);
@@ -6609,9 +6614,9 @@ end;
 
 function FastMM_LoadDebugSupportLibrary: Boolean;
 begin
-  {Already loaded?}
+  {Already loaded?  If so, return success.}
   if DebugSupportLibraryHandle <> 0 then
-    Exit(False);
+    Exit(True);
 
   DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
@@ -6778,6 +6783,12 @@ initialization
   FastMM_InstallMemoryManager;
 
 finalization
+
+  {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
+  FastMM has been uninstalled:  https://quality.embarcadero.com/browse/RSP-16796}
+  if CurrentInstallationState = mmisInstalled then
+    SetLocaleOverride('');
+
   {All pending frees must be released before we can do a leak check.}
   FastMM_ProcessAllPendingFrees;
 
