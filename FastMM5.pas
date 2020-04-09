@@ -16,15 +16,17 @@ Homepage:
   https://github.com/pleriche/FastMM5
 
 Licence:
-  GPL v3.  FastMM 5 is free for non-commercial use.  Commercial licences are available at the following prices:
+  FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the GPL v3 licence at no cost, or you
+  may purchase a commercial licence.  The commercial licence pricing is as follows:
     1 User = $99
     2 Users = $189
     3 Users = $269
     4 Users = $339
     5 Users = $399
-    Additional users beyond 5 = $50 per user.
+    >5 Users = $399 + $50 per user from the 6th onwards
   Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to
-  fastmm@leriche.org for confirmation.  Support is available for registered users via the same e-mail address.
+  fastmm@leriche.org for confirmation.  Support is available for users with a commercial licence via the same e-mail
+  address.
 
 Usage Instructions:
   Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup,
@@ -236,6 +238,17 @@ type
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
 
+  {The formats in which the event log file may be written.  Controlled via the FastMM_EventLogTextEncoding variable.}
+  TFastMM_EventLogTextEncoding = (
+    {UTF-8 with no byte-order mark}
+    teUTF8,
+    {UTF-8 with a byte-order mark}
+    teUTF8_BOM,
+    {UTF-16 little endian, with no byte-order mark}
+    teUTF16LE,
+    {UTF-16 little endian, with a byte-order mark}
+    teUTF16LE_BOM);
+
   {A routine used to obtain the current stack trace up to AMaxDepth levels deep.  The first ASkipFrames frames in the
   stack trace are skipped.  Unused entries will be set to 0.}
   TFastMM_GetStackTrace = procedure(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
@@ -415,6 +428,9 @@ var
 
   {---------Message and log file text configuration--------}
 
+
+  FastMM_EventLogTextEncoding: TFastMM_EventLogTextEncoding;
+
   {Pointer to the name of the file to which the event log is written.}
   FastMM_EventLogFilename: PWideChar;
 
@@ -439,7 +455,7 @@ var
   }
 
   {This entry precedes every entry in the event log.}
-  FastMM_LogFileEntryHeader: PWideChar = #13#10'--------------------------------{1} {2}--------------------------------'#13#10;
+  FastMM_LogFileEntryHeader: PWideChar = '--------------------------------{1} {2}--------------------------------'#13#10;
   {Memory manager installation errors}
   FastMM_CannotInstallAfterDefaultMemoryManagerHasBeenUsedMessage: PWideChar = 'FastMM cannot be installed, because the '
     + 'default memory manager has already been used to allocate memory.';
@@ -459,7 +475,7 @@ var
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
-  FastMM_MemoryLeakSummaryMessage: PWideChar = 'This application has leaked memory. The leaks ordered by size are:'#13#10'{14}';
+  FastMM_MemoryLeakSummaryMessage: PWideChar = 'This application has leaked memory. The leaks ordered by size are:'#13#10'{14}'#13#10;
   FastMM_MemoryLeakMessageBoxCaption: PWideChar = 'Unexpected Memory Leak';
   {Attempts to free or reallocate a debug block that has alredy been freed.}
   FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
@@ -655,10 +671,25 @@ const
   {The highest ID of an event log token.}
   CEventLogMaxTokenID = 99;
 
+  {The maximum size of an event message, in wide characters.}
+  CMaximumEventMessageSize = 32768;
+
   CFilenameMaxLength = 1024;
 
   {The size of the memory block reserved for maintaining the list of registered memory leaks.}
   CExpectedMemoryLeaksListSize = 64 * 1024;
+
+  CHexDigits: array[0..15] of Char = '0123456789ABCDEF';
+
+  {The maximum size of hexadecimal and ASCII dumps.}
+  CMemoryDumpMaxBytes = 256;
+  CMemoryDumpMaxBytesPerLine = 32;
+
+  {The debug block fill pattern, in several sizes.}
+  CDebugFillPattern8B = $8080808080808080;
+  CDebugFillPattern4B = $80808080;
+  CDebugFillPattern2B = $8080;
+  CDebugFillPattern1B = $80;
 
 type
 
@@ -1002,18 +1033,6 @@ procedure MoveMultipleOf16Plus14(const ASource; var ADest; ACount: NativeInt); f
 procedure MoveMultipleOf32Plus30(const ASource; var ADest; ACount: NativeInt); forward;
 
 const
-  CHexDigits: array[0..15] of Char = '0123456789ABCDEF';
-
-  {The maximum size of hexadecimal and ASCII dumps.}
-  CMemoryDumpMaxBytes = 256;
-  CMemoryDumpMaxBytesPerLine = 32;
-
-  {The debug block fill pattern, in several sizes.}
-  CDebugFillPattern8B = $8080808080808080;
-  CDebugFillPattern4B = $80808080;
-  CDebugFillPattern2B = $8080;
-  CDebugFillPattern1B = $80;
-
   {Structure size constants}
   CSmallBlockHeaderSize = SizeOf(TSmallBlockHeader);
   CMediumBlockHeaderSize = SizeOf(TMediumBlockHeader);
@@ -1154,6 +1173,7 @@ var
   SharingFileMappingObjectHandle: NativeUInt;
 {$endif}
 
+
 {------------------------------------------}
 {--------------Move routines---------------}
 {------------------------------------------}
@@ -1281,11 +1301,13 @@ begin
   PSmallIntArray(LPDest)[14] := PSmallIntArray(LPSource)[14];
 end;
 
+
 {------------------------------------------}
 {---------Operating system calls-----------}
 {------------------------------------------}
 
 procedure ReleaseEmergencyReserveAddressSpace; forward;
+function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 
 {Allocates a block of memory from the operating system.  The block is assumed to be aligned to at least a 64 byte
 boundary, and is assumed to be zero initialized.  Returns nil on error.}
@@ -1294,11 +1316,11 @@ function OS_AllocateVirtualMemory(ABlockSize: NativeInt; AAllocateTopDown: Boole
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := VirtualAlloc(nil, ABlockSize, MEM_RESERVE, PAGE_NOACCESS);
+    Result := Winapi.Windows.VirtualAlloc(nil, ABlockSize, MEM_RESERVE, PAGE_NOACCESS);
   end
   else
   begin
-    Result := VirtualAlloc(nil, ABlockSize, MEM_COMMIT, PAGE_READWRITE);
+    Result := Winapi.Windows.VirtualAlloc(nil, ABlockSize, MEM_COMMIT, PAGE_READWRITE);
     {The emergency address space reserve is released when address space runs out for the first time.  This allows some
     subsequent memory allocation requests to succeed in order to allow the application to allocate some memory for error
     handling, etc. in response to the EOutOfMemory exception.  This only applies to 32-bit applications.}
@@ -1312,19 +1334,19 @@ function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: Nativ
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_NOACCESS) <> nil;
+    Result := Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_NOACCESS) <> nil;
   end
   else
   begin
-    Result := (VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_READWRITE) <> nil)
-      and (VirtualAlloc(APAddress, ABlockSize, MEM_COMMIT, PAGE_READWRITE) <> nil);
+    Result := (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_READWRITE) <> nil)
+      and (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_COMMIT, PAGE_READWRITE) <> nil);
   end;
 end;
 
 {Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
 function OS_FreeVirtualMemory(APointer: Pointer): Integer;
 begin
-  if VirtualFree(APointer, 0, MEM_RELEASE) then
+  if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
     Result := 0
   else
     Result := -1;
@@ -1336,7 +1358,7 @@ procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegio
 var
   LMemInfo: TMemoryBasicInformation;
 begin
-  VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo));
+  Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo));
 
   AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
   AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
@@ -1357,13 +1379,13 @@ end;
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun;
 begin
-  SwitchToThread;
+  Winapi.Windows.SwitchToThread;
 end;
 
 {Returns the thread ID for the calling thread.}
 function OS_GetCurrentThreadID: Cardinal;
 begin
-  Result := GetCurrentThreadID;
+  Result := Winapi.Windows.GetCurrentThreadID;
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
@@ -1371,7 +1393,7 @@ procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond
 var
   LSystemTime: TSystemTime;
 begin
-  GetLocalTime(LSystemTime);
+  Winapi.Windows.GetLocalTime(LSystemTime);
   AYear := LSystemTime.wYear;
   AMonth := LSystemTime.wMonth;
   ADay := LSystemTime.wDay;
@@ -1393,7 +1415,7 @@ begin
   if AReturnLibraryFilename and IsLibrary then
     LModuleHandle := HInstance;
 
-  LNumChars := GetModuleFileName(LModuleHandle, Result, (NativeInt(APBufferEnd) - NativeInt(APFilenameBuffer)) div SizeOf(Char));
+  LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, CharCount(APBufferEnd, APFilenameBuffer));
   Inc(Result, LNumChars);
 end;
 
@@ -1407,9 +1429,23 @@ begin
     Exit;
 
   LBufferSize := (NativeInt(APBufferEnd) - NativeInt(Result)) div SizeOf(WideChar);
-  LNumChars := GetEnvironmentVariable(APEnvironmentVariableName, Result, LBufferSize);
+  LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
+end;
+
+{Returns True if the given file exists.  APFileName must be a #0 terminated.}
+function OS_FileExists(APFileName: PWideChar): Boolean;
+begin
+  {This will return True for folders and False for files that are locked by another process, but is "good enough" for
+  the purpose for which it will be used.}
+  Result := Winapi.Windows.GetFileAttributesW(APFileName) <> INVALID_FILE_ATTRIBUTES;
+end;
+
+{Attempts to delete the file.  Returns True if it was successfully deleted.}
+function OS_DeleteFile(APFileName: PWideChar): Boolean;
+begin
+  Result := Winapi.Windows.DeleteFileW(APFileName);
 end;
 
 {Creates the given file if it does not exist yet, and then appends the given data to it.}
@@ -1422,14 +1458,14 @@ begin
     Exit(True);
 
   {Try to open/create the log file in read/write mode.}
-  LFileHandle := CreateFile(FastMM_EventLogFilename, GENERIC_READ or GENERIC_WRITE, 0, nil, OPEN_ALWAYS,
+  LFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, 0, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
   if LFileHandle = INVALID_HANDLE_VALUE then
     Exit(False);
 
   {Add the data to the end of the file}
   SetFilePointer(LFileHandle, 0, nil, FILE_END);
-  WriteFile(LFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
+  Winapi.Windows.WriteFile(LFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
   Result := LBytesWritten = Cardinal(ADataSizeInBytes);
 
   CloseHandle(LFileHandle);
@@ -1437,13 +1473,13 @@ end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar);
 begin
-  OutputDebugString(APDebugMessage);
+  Winapi.Windows.OutputDebugString(APDebugMessage);
 end;
 
 {Shows a message box if the program is not showing one already.}
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
-  MessageBox(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+  Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
 end;
 
 
@@ -1454,6 +1490,80 @@ end;
 function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; inline;
 begin
   Result := (NativeInt(APFirstFreeChar) - NativeInt(APBufferStart)) div SizeOf(WideChar);
+end;
+
+{Converts the UTF-16 text pointed to by APWideText to UTF-8 in the buffer provided.  Returns a pointer to the byte
+after the last output character.}
+function ConvertUTF16toUTF8(APWideText: PWideChar; ANumWideChars: Integer; APOutputBuffer: PByte): PByte;
+var
+  LPIn, LPEnd: PWord;
+  LCode: Cardinal;
+begin
+  Result := Pointer(APOutputBuffer);
+
+  LPIn := Pointer(APWideText);
+  LPEnd := LPIn;
+  Inc(LPEnd, ANumWideChars);
+
+  while NativeUInt(LPIn) < NativeUInt(LPEnd) do
+  begin
+    LCode := PCardinal(LPIn)^;
+    if Word(LCode) <= $7f then
+    begin
+      if LCode <= $7fffff then
+      begin
+        {Both characters are single byte}
+        PWord(Result)^ := Word(LCode or (LCode shr 8));
+        Inc(Result, 2);
+        Inc(LPIn, 2);
+      end
+      else
+      begin
+        {The second character is not single byte}
+        Result[0] := Byte(LCode);
+        Inc(Result);
+        Inc(LPIn);
+      end;
+    end
+    else
+    begin
+      if Word(LCode) <= $7ff then
+      begin
+        {Two byte encoding}
+        Result[0] := Byte(LCode shr 6) or $c0;
+        Result[1] := Byte(LCode and $3f) or $80;
+        Inc(Result, 2);
+        Inc(LPIn);
+      end
+      else
+      begin
+        if (LCode and $fc00fc00) <> $dc00d800 then
+        begin
+          {Three byte encoding}
+          Result[0] := Byte((LCode shr 12) and $0f) or $e0;
+          Result[1] := Byte((LCode shr 6) and $3f) or $80;
+          Result[2] := Byte(LCode and $3f) or $80;
+          Inc(Result, 3);
+          Inc(LPIn);
+        end
+        else
+        begin
+          {It is a surrogate pair (4 byte) encoding:  Surrogate pairs are encoded in four bytes, with the high word
+          first}
+          LCode := ((LCode and $3ff) shl 10) + ((LCode shr 16) and $3ff) + $10000;
+          Result[0] := Byte((LCode shr 18) and $07) or $e0;
+          Result[1] := Byte((LCode shr 12) and $3f) or $80;
+          Result[2] := Byte((LCode shr 6) and $3f) or $80;
+          Result[3] := Byte(LCode and $3f) or $80;
+          Inc(Result, 4);
+          Inc(LPIn, 2);
+        end;
+      end;
+    end;
+  end;
+  {Did we convert past the end?}
+  if NativeUInt(LPIn) > NativeUInt(LPEnd) then
+    Dec(Result);
 end;
 
 {Returns the class for a memory block.  Returns nil if it is not a valid class.  Used by the leak detection code.}
@@ -2209,10 +2319,61 @@ begin
   end;
 end;
 
+procedure LogEvent_WriteEventLogFile(APEventMessage: PWideChar; AWideCharCount: Integer);
+const
+  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
+  maximum event message size.}
+  CBufferSize = (CMaximumEventMessageSize + 4) * SizeOf(WideChar);
+var
+  LBuffer: array[0..CBufferSize] of Byte;
+  LPBuffer: PByte;
+begin
+  LPBuffer := @LBuffer;
+
+  if OS_FileExists(FastMM_EventLogFilename) then
+  begin
+    {The log file exists:  Add a line break after the previous event.}
+    if FastMM_EventLogTextEncoding in [teUTF8, teUTF8_BOM] then
+    begin
+      PWord(LPBuffer)^ := $0A0D;
+      Inc(LPBuffer, 2);
+    end
+    else
+    begin
+      PCardinal(LPBuffer)^ := $000A000D;
+      Inc(LPBuffer, 4);
+    end;
+  end
+  else
+  begin
+    {The file does not exist, so add the BOM if required.}
+    if FastMM_EventLogTextEncoding = teUTF8_BOM then
+    begin
+      PCardinal(LPBuffer)^ := $BFBBEF;
+      Inc(LPBuffer, 3);
+    end else if FastMM_EventLogTextEncoding = teUTF16LE_BOM then
+    begin
+      PWord(LPBuffer)^ := $FEFF;
+      Inc(LPBuffer, 2);
+    end;
+  end;
+
+  {Copy the text across to the buffer, converting it as appropriate.}
+  if FastMM_EventLogTextEncoding in [teUTF8, teUTF8_BOM] then
+  begin
+    LPBuffer := ConvertUTF16toUTF8(APEventMessage, AWideCharCount, LPBuffer);
+  end
+  else
+  begin
+    System.Move(APEventMessage^, LPBuffer^, AWideCharCount * 2);
+    Inc(LPBuffer, AWideCharCount * 2);
+  end;
+
+  OS_CreateOrAppendFile(FastMM_EventLogFilename, @LBuffer, NativeInt(LPBuffer) - NativeInt(@LBuffer));
+end;
+
 {Logs an event to OutputDebugString, file or the display (or any combination thereof) depending on configuration.}
 procedure LogEvent(AEventType: TFastMM_MemoryManagerEventType; const ATokenValues: TEventLogTokenValues);
-const
-  CMaximumEventMessageSize = 32768;
 var
   LPTextTemplate, LPMessageBoxCaption: PWideChar;
   LTextBuffer: array[0..CMaximumEventMessageSize] of WideChar;
@@ -2313,7 +2474,7 @@ begin
   {Log the message to file, if needed.}
   if AEventType in FastMM_LogToFileEvents then
   begin
-    OS_CreateOrAppendFile(FastMM_EventLogFilename, LPLogHeaderStart, NativeInt(LPBuffer) - NativeInt(@LTextBuffer));
+    LogEvent_WriteEventLogFile(LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
   end;
 
   if AEventType in FastMM_OutputDebugStringEvents then
@@ -6132,7 +6293,7 @@ var
   LCurrentLeakSize: NativeInt;
   LLeakIndex: Integer;
   LLeakEntriesText, LTokenValueBuffer: array[0..CLeakTextMaxSize] of WideChar;
-  LPBufferPos, LPBufferEnd: PWideChar;
+  LPBufferPos, LPBufferEnd, LPTokenBufferPos: PWideChar;
   LTokenValues: TEventLogTokenValues;
 begin
   {Sort the leaks in ascending size and descending type order.}
@@ -6166,8 +6327,10 @@ begin
 
   {Build the token dictionary for the leak summary.}
   LTokenValues := Default(TEventLogTokenValues);
+  LPTokenBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer,
+    @LTokenValueBuffer[High(LTokenValueBuffer)]);
   AddTokenValue(LTokenValues, CEventLogTokenLeakSummaryEntries, @LLeakEntriesText,
-    CharCount(LPBufferPos, @LLeakEntriesText), @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
+    CharCount(LPBufferPos, @LLeakEntriesText), LPTokenBufferPos, @LTokenValueBuffer[High(LTokenValueBuffer)]);
 
   LogEvent(mmetUnexpectedMemoryLeakSummary, LTokenValues);
 end;
