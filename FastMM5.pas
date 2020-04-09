@@ -452,6 +452,7 @@ var
     13: ASCII dump of block (each line is followed by #13#10)
     14: Leak summary entries
     15: The size and offsets for modifications to a block after it was freed.
+    16: The full path and filename of the event log.
   }
 
   {This entry precedes every entry in the event log.}
@@ -475,7 +476,11 @@ var
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
-  FastMM_MemoryLeakSummaryMessage: PWideChar = 'This application has leaked memory. The leaks ordered by size are:'#13#10'{14}'#13#10;
+  FastMM_MemoryLeakSummaryMessage_LeakDetailNotLogged: PWideChar = 'This application has leaked memory. '
+    + 'The leaks ordered by size are:'#13#10'{14}'#13#10;
+  FastMM_MemoryLeakSummaryMessage_LeakDetailLoggedToEventLog: PWideChar = 'This application has leaked memory. '
+    + 'The leaks ordered by size are:'#13#10'{14}'#13#10#13#10
+    + 'Memory leak detail was logged to {16}'#13#10;
   FastMM_MemoryLeakMessageBoxCaption: PWideChar = 'Unexpected Memory Leak';
   {Attempts to free or reallocate a debug block that has alredy been freed.}
   FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
@@ -667,6 +672,7 @@ const
   CEventLogTokenASCIIDump = 13;
   CEventLogTokenLeakSummaryEntries = 14;
   CEventLogTokenModifyAfterFreeDetail = 15;
+  CEventLogTokenEventLogFilename = 16;
 
   {The highest ID of an event log token.}
   CEventLogMaxTokenID = 99;
@@ -1723,6 +1729,21 @@ begin
   Result := Ord(LStringType);
 end;
 
+{Counts the number of characters up to the trailing #0}
+function GetStringLength(APWideText: PWideChar): Integer;
+begin
+  Result := 0;
+
+  if APWideText = nil then
+    Exit;
+
+  while APWideText^ <> #0 do
+  begin
+    Inc(Result);
+    Inc(APWideText);
+  end;
+end;
+
 {Adds text to a buffer, returning the new buffer position.}
 function AppendTextToBuffer(APSource: PWideChar; ACharCount: Integer;
   APTarget, APTargetBufferEnd: PWideChar): PWideChar; overload;
@@ -2184,6 +2205,8 @@ function AddTokenValues_GeneralTokens(var ATokenValues: TEventLogTokenValues;
   APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 begin
   Result := AddTokenValues_CurrentDateAndTime(ATokenValues, APTokenValueBufferPos, APBufferEnd);
+  Result := AddTokenValue(ATokenValues, CEventLogTokenEventLogFilename, FastMM_EventLogFilename,
+    GetStringLength(FastMM_EventLogFilename), Result, APBufferEnd);
 end;
 
 function AddTokenValues_BlockTokens(var ATokenValues: TEventLogTokenValues; APBlock: Pointer;
@@ -2422,7 +2445,10 @@ begin
 
     mmetUnexpectedMemoryLeakSummary:
     begin
-      LPTextTemplate := FastMM_MemoryLeakSummaryMessage;
+      if mmetUnexpectedMemoryLeakDetail in FastMM_LogToFileEvents then
+        LPTextTemplate := FastMM_MemoryLeakSummaryMessage_LeakDetailLoggedToEventLog
+      else
+        LPTextTemplate := FastMM_MemoryLeakSummaryMessage_LeakDetailNotLogged;
       LPMessageBoxCaption := FastMM_MemoryLeakMessageBoxCaption;
     end;
 
