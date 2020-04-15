@@ -269,6 +269,18 @@ type
   end;
   TFastMM_RegisteredMemoryLeaks = array of TFastMM_RegisteredMemoryLeak;
 
+  TFastMM_UsageSummary = record
+    {The total number of bytes allocated by the application.}
+    AllocatedBytes: NativeUInt;
+    {The committed virtual address space less AllocatedBytes:  The total number of address space bytes used by control
+    structures, or lost due to fragmentation and other overhead.  Blocks that have been freed by the application but
+    not yet released back to the operating system are included in this total.}
+    OverheadBytes: NativeUInt;
+    {The efficiency of the memory manager expressed as a percentage.  This is:
+    100 * AllocatedBytes / (AllocatedBytes + OverheadBytes).}
+    EfficiencyPercentage: Double;
+  end;
+
 {------------------------Core memory manager interface------------------------}
 function FastMM_GetMem(ASize: NativeInt): Pointer;
 function FastMM_FreeMem(APointer: Pointer): Integer;
@@ -320,6 +332,13 @@ procedure FastMM_ScanDebugBlocksForCorruption;
 
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
+
+{Returns the number of allocated bytes, the number of overhead bytes (wastage due to management structures and internal
+fragmentation), as well as the efficiency percentage.  The efficiency percentage is the total allocated bytes divided
+by the total address space committed (whether in use or reserved for future use) multiplied by 100.  Note that freed
+blocks not yet released to the operating system are included in the overhead, which differs from FastMM_GetHeapStatus
+that exposes freed blocks in separate fields.}
+function FastMM_GetUsageSummary: TFastMM_UsageSummary;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -5391,7 +5410,7 @@ var
   LArenaIndex: Integer;
   LBlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
   LPLargeBlockManager: PLargeBlockManager;
-  LPLargeBlock: PLargeBlockHeader;
+  LPLargeBlockHeader: PLargeBlockHeader;
   LPMediumBlockManager: PMediumBlockManager;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPMediumBlock: Pointer;
@@ -5429,17 +5448,17 @@ begin
         OS_AllowOtherThreadToRun;
       end;
 
-      LPLargeBlock := LPLargeBlockManager.FirstLargeBlockHeader;
-      while NativeUInt(LPLargeBlock) <> NativeUInt(LPLargeBlockManager) do
+      LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
+      while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
       begin
-        LBlockInfo.BlockAddress := LPLargeBlock;
-        LBlockInfo.BlockSize := LPLargeBlock.ActualBlockSize;
-        LBlockInfo.UsableSize := LPLargeBlock.UserAllocatedSize;
+        LBlockInfo.BlockAddress := @PByte(LPLargeBlockHeader)[CLargeBlockHeaderSize];
+        LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
+        LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
 
         FastMM_WalkBlocks_AdjustForDebugSubBlock(LBlockInfo);
         ACallBack(LBlockInfo);
 
-        LPLargeBlock := LPLargeBlock.NextLargeBlockHeader;
+        LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
       end;
 
       LPLargeBlockManager.LargeBlockManagerLocked := 0;
@@ -5537,7 +5556,7 @@ begin
                   if LPSmallBlockManager.CurrentSequentialFeedSpan = LPMediumBlock then
                   begin
                     LSmallBlockOffset := LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue;
-                    if LSmallBlockOffset < LSmallBlockOffset then
+                    if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
                       LSmallBlockOffset := CSmallBlockSpanHeaderSize;
                   end
                   else
@@ -5568,10 +5587,7 @@ begin
                   if btSmallBlockSpan in AWalkBlockTypes then
                   begin
                     LBlockInfo.BlockType := btSmallBlockSpan;
-
-  { TODO : Also subtract the partial last block from the usable size.}
-                    LBlockInfo.UsableSize := LMediumBlockSize - CMediumBlockHeaderSize - CSmallBlockSpanHeaderSize;
-
+                    LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize * PSmallBlockSpanHeader(LPMediumBlock).TotalBlocksInSpan;
                     LBlockInfo.SmallBlockSpanBlockSize := LPSmallBlockManager.BlockSize;
                     LBlockInfo.IsSequentialFeedSmallBlockSpan := LSmallBlockOffset > CSmallBlockSpanHeaderSize;
                     if LBlockInfo.IsSequentialFeedSmallBlockSpan then
@@ -5680,27 +5696,19 @@ begin
 
     btLargeBlock:
     begin
-      Inc(LPHeapStatus.TotalAddrSpace, ABlockInfo.BlockSize);
       Inc(LPHeapStatus.TotalCommitted, ABlockInfo.BlockSize);
       Inc(LPHeapStatus.TotalAllocated, ABlockInfo.UsableSize);
-      Inc(LPHeapStatus.Overhead, ABlockInfo.BlockSize - ABlockInfo.UsableSize);
     end;
 
     btMediumBlockSpan:
     begin
-      Inc(LPHeapStatus.TotalAddrSpace, ABlockInfo.BlockSize);
       Inc(LPHeapStatus.TotalCommitted, ABlockInfo.BlockSize);
-      Inc(LPHeapStatus.Overhead, ABlockInfo.BlockSize);
       if ABlockInfo.IsSequentialFeedMediumBlockSpan then
-      begin
         Inc(LPHeapStatus.Unused, ABlockInfo.MediumBlockSequentialFeedSpanUnusedBytes);
-        Dec(LPHeapStatus.Overhead, ABlockInfo.MediumBlockSequentialFeedSpanUnusedBytes);
-      end;
     end;
 
     btMediumBlock:
     begin
-      Dec(LPHeapStatus.Overhead, ABlockInfo.UsableSize);
       if ABlockInfo.BlockIsFree then
         Inc(LPHeapStatus.FreeBig, ABlockInfo.UsableSize)
       else
@@ -5710,15 +5718,11 @@ begin
     btSmallBlockSpan:
     begin
       if ABlockInfo.IsSequentialFeedSmallBlockSpan then
-      begin
         Inc(LPHeapStatus.Unused, ABlockInfo.SmallBlockSequentialFeedSpanUnusedBytes);
-        Dec(LPHeapStatus.Overhead, ABlockInfo.SmallBlockSequentialFeedSpanUnusedBytes);
-      end;
     end;
 
     btSmallBlock:
     begin
-      Dec(LPHeapStatus.Overhead, ABlockInfo.UsableSize);
       if ABlockInfo.BlockIsFree then
         Inc(LPHeapStatus.FreeSmall, ABlockInfo.UsableSize)
       else
@@ -5737,6 +5741,23 @@ begin
     [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result);
 
   Result.TotalFree := Result.FreeSmall + Result.FreeBig + Result.Unused;
+  Result.TotalAddrSpace := Result.TotalCommitted;
+  Result.Overhead := Result.TotalAddrSpace - Result.TotalAllocated - Result.TotalFree;
+end;
+
+function FastMM_GetUsageSummary: TFastMM_UsageSummary;
+var
+  LHeapStatus: THeapStatus;
+begin
+  LHeapStatus := FastMM_GetHeapStatus;
+
+  Result.AllocatedBytes := LHeapStatus.TotalAllocated;
+  Result.OverheadBytes := LHeapStatus.TotalAddrSpace - LHeapStatus.TotalAllocated;
+
+  if LHeapStatus.TotalAddrSpace > 0 then
+    Result.EfficiencyPercentage := Result.AllocatedBytes / LHeapStatus.TotalAddrSpace * 100
+  else
+    Result.EfficiencyPercentage := 100;
 end;
 
 {Returns True if there are live pointers using this memory manager.}
@@ -6524,10 +6545,10 @@ begin
   begin
     LPSmallBlockTypeInfo := @CSmallBlockTypeInfo[LBlockTypeInd];
 
-    {The minimum useable small block span size.}
+    {The minimum useable small block span size.  The first small block's header is inside the span header, so we need
+    space for one less small block heaader.}
     LMinimumSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(
-      CMinimumSmallBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize
-      + (CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize));
+      CMinimumSmallBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
     if LMinimumSmallBlockSpanSize < CMinimumMediumBlockSize then
       LMinimumSmallBlockSpanSize := CMinimumMediumBlockSize;
 
@@ -6538,8 +6559,9 @@ begin
     if LOptimalSmallBlockSpanSize > COptimalSmallBlockSpanSizeUpperLimit then
       LOptimalSmallBlockSpanSize := COptimalSmallBlockSpanSizeUpperLimit;
     LBlocksPerSpan := LOptimalSmallBlockSpanSize div LPSmallBlockTypeInfo.BlockSize;
+    {The first small block's header is inside the span header, so we need space for one less small block heaader.}
     LOptimalSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(LBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize
-      + (CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize));
+      + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
 
     for LArenaInd := 0 to CSmallBlockArenaCount - 1 do
     begin
