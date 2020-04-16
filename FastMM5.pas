@@ -54,8 +54,8 @@ Usage Instructions:
   Events (memory leaks, errors, etc.) may be logged to file, displayed on-screen, passed to the debugger or any
   combination of the three.  Specify how each event should be handled via the FastMM_LogToFileEvents,
   FastMM_MessageBoxEvents and FastMM_OutputDebugStringEvents variables.  The default event log filename will be built
-  from the application filepath, but may be overridden via the FastMM_EventLogFilename variable.  Messages are built
-  from templates that may be changed/translated by the application.
+  from the application filepath, but may be overridden via FastMM_SetEventLogFilename.  Messages are built from
+  templates that may be changed/translated by the application.
 
   The optimization strategy of the memory manager may be tuned via FastMM_SetOptimizationStrategy.  It can be set to
   favour performance, low memory usage, or a blend of both.  The default strategy is to blend the performance and low
@@ -238,8 +238,9 @@ type
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
 
-  {The formats in which the event log file may be written.  Controlled via the FastMM_EventLogTextEncoding variable.}
-  TFastMM_EventLogTextEncoding = (
+  {The formats in which text files (e.g. the event log) may be written.  Controlled via the FastMM_TextFileEncoding
+  variable.}
+  TFastMM_TextFileEncoding = (
     {UTF-8 with no byte-order mark}
     teUTF8,
     {UTF-8 with a byte-order mark}
@@ -340,6 +341,10 @@ blocks not yet released to the operating system are included in the overhead, wh
 that exposes freed blocks in separate fields.}
 function FastMM_GetUsageSummary: TFastMM_UsageSummary;
 
+{Writes a log file containing a summary of the memory mananger state and a list of allocated blocks grouped by class.
+The file will be saved in the encoding specified by FastMM_TextFileEncoding.  Returns True on success.}
+function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = ''): Boolean;
+
 {------------------------Memory Manager Sharing------------------------}
 
 {Searches the current process for a shared memory manager.  If no memory has been allocated using this memory manager
@@ -401,9 +406,17 @@ procedure FastMM_NoOpGetStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, AS
 function FastMM_NoOpConvertStackTraceToText(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
   APBufferPosition, APBufferEnd: PWideChar): PWideChar;
 
-{Sets FastMM_EventLogFileName to the default event log filename for the application.  If APathOverride <> nil then
-the default path will be substituted with the null terminated string pointed to by APathOverride.}
-procedure FastMM_SetDefaultEventLogFileName(APathOverride: PWideChar = nil);
+{Sets the default event log path and filename.  If the FastMMLogFilePath environment variable is set then that will be
+used as the path, otherwise the path to the application will be used.  The filename is built from the name of the
+application.}
+procedure FastMM_SetDefaultEventLogFilename;
+{Sets the full path and filename for the event log.  if APEventLogFilename = nil then the default event log filename
+will be set.}
+procedure FastMM_SetEventLogFilename(APEventLogFilename: PWideChar);
+{Returns the current full path and filename for the event log.}
+function FastMM_GetEventLogFilename: PWideChar;
+{Deletes the event log file.}
+function FastMM_DeleteEventLogFile: Boolean;
 
 var
 
@@ -447,11 +460,8 @@ var
 
   {---------Message and log file text configuration--------}
 
-
-  FastMM_EventLogTextEncoding: TFastMM_EventLogTextEncoding;
-
-  {Pointer to the name of the file to which the event log is written.}
-  FastMM_EventLogFilename: PWideChar;
+  {The text encoding to use for the event log and other text file output.}
+  FastMM_TextFileEncoding: TFastMM_TextFileEncoding;
 
   {Messages contain numeric tokens that will be substituted.  The available tokens are:
     0: A blank string (invalid token IDs will also translate to this)
@@ -697,7 +707,8 @@ const
   CEventLogMaxTokenID = 99;
 
   {The maximum size of an event message, in wide characters.}
-  CMaximumEventMessageSize = 32768;
+  CMaximumEventMessageSize = 65536;
+  CTokenBufferSize = 32768;
 
   CFilenameMaxLength = 1024;
 
@@ -1182,8 +1193,8 @@ var
   DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
   DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
 
-  {The default event log filename is stored in this buffer.}
-  DefaultEventLogFilename: array[0..CFilenameMaxLength] of WideChar;
+  {The full path and filename for the event log.}
+  EventLogFilename: array[0..CFilenameMaxLength] of WideChar;
 
   {The expected memory leaks list}
   ExpectedMemoryLeaks: PExpectedMemoryLeaks;
@@ -1429,7 +1440,7 @@ end;
 
 {Fills a buffer with the full path and filename of the application.  If AReturnLibraryFilename = True and this is a
 library then the full path and filename of the library is returned instead.}
-function OS_GetApplicationFilename(AReturnLibraryFilename: Boolean; APFilenameBuffer, APBufferEnd: PWideChar): PWideChar;
+function OS_GetApplicationFilename(APFilenameBuffer, APBufferEnd: PWideChar; AReturnLibraryFilename: Boolean): PWideChar;
 var
   LModuleHandle: HMODULE;
   LNumChars: Cardinal;
@@ -1589,6 +1600,59 @@ begin
   {Did we convert past the end?}
   if NativeUInt(LPIn) > NativeUInt(LPEnd) then
     Dec(Result);
+end;
+
+procedure AppendTextFile(APFileName, APEventMessage: PWideChar; AWideCharCount: Integer);
+const
+  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
+  maximum text size.}
+  CBufferSize = (CMaximumEventMessageSize + 4) * SizeOf(WideChar);
+var
+  LBuffer: array[0..CBufferSize] of Byte;
+  LPBuffer: PByte;
+begin
+  LPBuffer := @LBuffer;
+
+  if OS_FileExists(APFileName) then
+  begin
+    {The log file exists:  Add a line break after the previous event.}
+    if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
+    begin
+      PWord(LPBuffer)^ := $0A0D;
+      Inc(LPBuffer, 2);
+    end
+    else
+    begin
+      PCardinal(LPBuffer)^ := $000A000D;
+      Inc(LPBuffer, 4);
+    end;
+  end
+  else
+  begin
+    {The file does not exist, so add the BOM if required.}
+    if FastMM_TextFileEncoding = teUTF8_BOM then
+    begin
+      PCardinal(LPBuffer)^ := $BFBBEF;
+      Inc(LPBuffer, 3);
+    end else if FastMM_TextFileEncoding = teUTF16LE_BOM then
+    begin
+      PWord(LPBuffer)^ := $FEFF;
+      Inc(LPBuffer, 2);
+    end;
+  end;
+
+  {Copy the text across to the buffer, converting it as appropriate.}
+  if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
+  begin
+    LPBuffer := ConvertUTF16toUTF8(APEventMessage, AWideCharCount, LPBuffer);
+  end
+  else
+  begin
+    System.Move(APEventMessage^, LPBuffer^, AWideCharCount * 2);
+    Inc(LPBuffer, AWideCharCount * 2);
+  end;
+
+  OS_CreateOrAppendFile(APFileName, @LBuffer, NativeInt(LPBuffer) - NativeInt(@LBuffer));
 end;
 
 {Returns the class for a memory block.  Returns nil if it is not a valid class.  Used by the leak detection code.}
@@ -2224,8 +2288,8 @@ function AddTokenValues_GeneralTokens(var ATokenValues: TEventLogTokenValues;
   APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 begin
   Result := AddTokenValues_CurrentDateAndTime(ATokenValues, APTokenValueBufferPos, APBufferEnd);
-  Result := AddTokenValue(ATokenValues, CEventLogTokenEventLogFilename, FastMM_EventLogFilename,
-    GetStringLength(FastMM_EventLogFilename), Result, APBufferEnd);
+  Result := AddTokenValue(ATokenValues, CEventLogTokenEventLogFilename, @EventLogFilename,
+    GetStringLength(@EventLogFilename), Result, APBufferEnd);
 end;
 
 function AddTokenValues_BlockTokens(var ATokenValues: TEventLogTokenValues; APBlock: Pointer;
@@ -2361,59 +2425,6 @@ begin
   end;
 end;
 
-procedure LogEvent_WriteEventLogFile(APEventMessage: PWideChar; AWideCharCount: Integer);
-const
-  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
-  maximum event message size.}
-  CBufferSize = (CMaximumEventMessageSize + 4) * SizeOf(WideChar);
-var
-  LBuffer: array[0..CBufferSize] of Byte;
-  LPBuffer: PByte;
-begin
-  LPBuffer := @LBuffer;
-
-  if OS_FileExists(FastMM_EventLogFilename) then
-  begin
-    {The log file exists:  Add a line break after the previous event.}
-    if FastMM_EventLogTextEncoding in [teUTF8, teUTF8_BOM] then
-    begin
-      PWord(LPBuffer)^ := $0A0D;
-      Inc(LPBuffer, 2);
-    end
-    else
-    begin
-      PCardinal(LPBuffer)^ := $000A000D;
-      Inc(LPBuffer, 4);
-    end;
-  end
-  else
-  begin
-    {The file does not exist, so add the BOM if required.}
-    if FastMM_EventLogTextEncoding = teUTF8_BOM then
-    begin
-      PCardinal(LPBuffer)^ := $BFBBEF;
-      Inc(LPBuffer, 3);
-    end else if FastMM_EventLogTextEncoding = teUTF16LE_BOM then
-    begin
-      PWord(LPBuffer)^ := $FEFF;
-      Inc(LPBuffer, 2);
-    end;
-  end;
-
-  {Copy the text across to the buffer, converting it as appropriate.}
-  if FastMM_EventLogTextEncoding in [teUTF8, teUTF8_BOM] then
-  begin
-    LPBuffer := ConvertUTF16toUTF8(APEventMessage, AWideCharCount, LPBuffer);
-  end
-  else
-  begin
-    System.Move(APEventMessage^, LPBuffer^, AWideCharCount * 2);
-    Inc(LPBuffer, AWideCharCount * 2);
-  end;
-
-  OS_CreateOrAppendFile(FastMM_EventLogFilename, @LBuffer, NativeInt(LPBuffer) - NativeInt(@LBuffer));
-end;
-
 {Logs an event to OutputDebugString, file or the display (or any combination thereof) depending on configuration.}
 procedure LogEvent(AEventType: TFastMM_MemoryManagerEventType; const ATokenValues: TEventLogTokenValues);
 var
@@ -2519,7 +2530,7 @@ begin
   {Log the message to file, if needed.}
   if AEventType in FastMM_LogToFileEvents then
   begin
-    LogEvent_WriteEventLogFile(LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
+    AppendTextFile(@EventLogFilename, LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
   end;
 
   if AEventType in FastMM_OutputDebugStringEvents then
@@ -2614,8 +2625,6 @@ begin
 end;
 
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
-const
-  CTokenBufferSize = 65536;
 var
   LTokenValues: TEventLogTokenValues;
   LTokenValueBuffer: array[0..CTokenBufferSize] of WideChar;
@@ -2632,8 +2641,6 @@ end;
 
 {The debug header is assumed to be valid.}
 procedure LogDebugBlockFooterInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
-const
-  CTokenBufferSize = 65536;
 var
   LTokenValues: TEventLogTokenValues;
   LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
@@ -2711,7 +2718,6 @@ end;
 {The debug header and footer are assumed to be valid.}
 procedure LogDebugBlockFillPatternCorrupted(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 const
-  CTokenBufferSize = 65536;
   CMaxLoggedChanges = 32;
 var
   LTokenValues: TEventLogTokenValues;
@@ -4888,8 +4894,6 @@ end;
 {----------------------------------------------------}
 
 procedure HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
-const
-  CTokenBufferSize = 65536;
 var
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
   LHeaderChecksum: NativeUInt;
@@ -5798,6 +5802,13 @@ begin
     or (@LCurrentMemoryManager.UnregisterExpectedMemoryLeak <> @InstalledMemoryManager.UnregisterExpectedMemoryLeak);
 end;
 
+{Writes a log file containing a summary of the memory mananger state and a summary of allocated blocks grouped by class.
+The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
+function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string): Boolean;
+begin
+  Result := True;
+end;
+
 {--------------------------------------------------------}
 {----------------Memory Manager Sharing------------------}
 {--------------------------------------------------------}
@@ -5843,8 +5854,6 @@ end;
 it will switch to using the shared memory manager instead.  Returns True if another memory manager was found and it
 could be shared.  If this memory manager instance *is* the shared memory manager, it will do nothing and return True.}
 function FastMM_AttemptToUseSharedMemoryManager: Boolean;
-const
-  CTokenBufferSize = 65536;
 var
   LTokenValues: TEventLogTokenValues;
   LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
@@ -6267,8 +6276,6 @@ begin
 end;
 
 procedure FastMM_PerformMemoryLeakCheck_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
-const
-  CTokenBufferSize = 65536;
 var
   LPLeakSummary: PMemoryLeakSummary;
   LBlockContentType: NativeUInt;
@@ -6626,7 +6633,7 @@ begin
   {The first time EnterDebugMode is called an attempt will be made to load the debug support DLL.}
   DebugSupportConfigured := False;
 
-  FastMM_SetDefaultEventLogFileName;
+  FastMM_SetDefaultEventLogFilename;
 
   {---------Sharing setup-------}
 
@@ -6775,8 +6782,6 @@ begin
 end;
 
 procedure FastMM_InstallMemoryManager;
-const
-  CTokenBufferSize = 2048;
 var
   LTokenValues: TEventLogTokenValues;
   LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
@@ -6920,73 +6925,80 @@ begin
     Result := False;
 end;
 
-procedure FastMM_SetDefaultEventLogFileName(APathOverride: PWideChar);
+procedure FastMM_SetDefaultEventLogFilename;
 const
   CLogFilePathEnvironmentVariable: PWideChar = 'FastMMLogFilePath';
   CLogFileExtension: PWideChar = '_MemoryManager_EventLog.txt';
 var
-  LPathOverrideBuffer, LFilenameBuffer: array[0..CFilenameMaxLength] of WideChar;
-  LPBuffer, LPFilenameStart, LPFilenameEnd, LPBufferEnd: PWideChar;
+  LModuleFilename: array[0..CFilenameMaxLength] of WideChar;
+  LPModuleFilenamePos, LPModuleFilenameStart, LPModuleFilenameEnd, LPBufferPos, LPBufferEnd: PWideChar;
 begin
-  {If no path override is specified then try to get it from the environment variable.}
-  if APathOverride = nil then
-  begin
-    LPBuffer := OS_GetEnvironmentVariableValue(CLogFilePathEnvironmentVariable, @LPathOverrideBuffer,
-      @LPathOverrideBuffer[High(LPathOverrideBuffer)]);
-    LPBuffer^ := #0;
-    if LPBuffer <> @LPathOverrideBuffer then
-      APathOverride := @LPathOverrideBuffer;
-  end;
+  {Get the module filename into a buffer.}
+  LPModuleFilenameEnd := OS_GetApplicationFilename(@LModuleFilename, @LModuleFilename[High(LModuleFilename)], False);
 
-  {Get the application path and name into a buffer.}
-  LPBuffer := OS_GetApplicationFilename(False, @LFilenameBuffer, @LFilenameBuffer[High(LFilenameBuffer)]);
-  LPBuffer^ := #0;
-
-  {Drop the file extension from the filename.}
-  LPFilenameEnd := LPBuffer;
-  while NativeUInt(LPBuffer) > NativeUInt(@LFilenameBuffer) do
+  {Drop the file extension from the module filename.}
+  LPModuleFilenamePos := LPModuleFilenameEnd;
+  while NativeUInt(LPModuleFilenamePos) > NativeUInt(@LModuleFilename) do
   begin
-    if LPBuffer^ = '.' then
+    if LPModuleFilenamePos^ = '.' then
     begin
-      LPFilenameEnd := LPBuffer;
-      LPFilenameEnd^ := #0;
+      LPModuleFilenameEnd := LPModuleFilenamePos;
       Break;
     end;
-    Dec(LPBuffer);
+    Dec(LPModuleFilenamePos);
   end;
+  LPModuleFilenameEnd^ := #0;
 
-  {If there is path override find the start of the filename.}
-  if APathOverride <> nil then
+  {Try to get the path override from the environment variable.  If there is a path override then that is used instead
+  of the application path.}
+  LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
+  LPBufferPos := OS_GetEnvironmentVariableValue(CLogFilePathEnvironmentVariable, @EventLogFilename, LPBufferEnd);
+  if LPBufferPos <> @EventLogFilename then
   begin
-    LPFilenameStart := LPFilenameEnd;
-    while NativeUInt(LPFilenameStart) > NativeUInt(@LFilenameBuffer) do
+    {Strip the trailing path separator from the path override.}
+    Dec(LPBufferPos);
+    if (LPBufferPos^ <> '\') and (LPBufferPos^ <> '/') then
+      Inc(LPBufferPos);
+
+    {Strip the path from the module filename.}
+    LPModuleFilenameStart := LPModuleFilenameEnd;
+    while NativeUInt(LPModuleFilenameStart) > NativeUInt(@LModuleFilename) do
     begin
-      if (LPFilenameStart^ = '\') or (LPFilenameStart^ = '/') then
+      if (LPModuleFilenameStart^ = '\') or (LPModuleFilenameStart^ = '/') then
         Break;
-      Dec(LPFilenameStart);
+      Dec(LPModuleFilenameStart);
     end;
   end
   else
-    LPFilenameStart := @LFilenameBuffer;
+    LPModuleFilenameStart := @LModuleFilename;
 
-  {Add the path override to the buffer.}
-  LPBufferEnd := @DefaultEventLogFilename[High(DefaultEventLogFilename)];
-  LPBuffer := AppendTextToBuffer(APathOverride, @DefaultEventLogFilename, LPBufferEnd);
+  LPBufferPos := AppendTextToBuffer(LPModuleFilenameStart, LPBufferPos, LPBufferEnd);
+  LPBufferPos := AppendTextToBuffer(CLogFileExtension, LPBufferPos, LPBufferEnd);
+  LPBufferPos^ := #0;
+end;
 
-  {Strip the trailing path separator for the path override.}
-  if LPBuffer <> @DefaultEventLogFilename then
+procedure FastMM_SetEventLogFilename(APEventLogFilename: PWideChar);
+var
+  LPBufferPos, LPBufferEnd: PWideChar;
+begin
+  if APEventLogFilename <> nil then
   begin
-    Dec(LPBuffer);
-    if (LPBuffer^ <> '\') and (LPBuffer^ <> '/') then
-      Inc(LPBuffer);
-  end;
+    LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
+    LPBufferPos := AppendTextToBuffer(APEventLogFilename, @EventLogFilename, LPBufferEnd);
+    LPBufferPos^ := #0;
+  end
+  else
+    FastMM_SetDefaultEventLogFilename;
+end;
 
-  {Add the filename to the buffer, then the log file extension and file the #0 terminator.}
-  LPBuffer := AppendTextToBuffer(LPFilenameStart, LPBuffer, LPBufferEnd);
-  LPBuffer := AppendTextToBuffer(CLogFileExtension, LPBuffer, LPBufferEnd);
-  LPBuffer^ := #0;
+function FastMM_GetEventLogFilename: PWideChar;
+begin
+  Result := @EventLogFilename;
+end;
 
-  FastMM_EventLogFilename := @DefaultEventLogFilename;
+function FastMM_DeleteEventLogFile: Boolean;
+begin
+  Result := OS_DeleteFile(@EventLogFilename);
 end;
 
 initialization
