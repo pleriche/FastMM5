@@ -482,6 +482,13 @@ var
     14: Leak summary entries
     15: The size and offsets for modifications to a block after it was freed.
     16: The full path and filename of the event log.
+    17: The total kilobytes allocated (FastMM_LogStateToFile)
+    18: The total kilobytes overhead (FastMM_LogStateToFile)
+    19: The efficiency percentage (FastMM_LogStateToFile)
+    20: The total number of bytes used by the class (FastMM_LogStateToFile)
+    21: The number of instances of the class (FastMM_LogStateToFile)
+    22: The average number of bytes per instance for the class (FastMM_LogStateToFile)
+
   }
 
   {This entry precedes every entry in the event log.}
@@ -553,6 +560,14 @@ var
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_MemoryCorruptionMessageBoxCaption: PWideChar = 'Memory Corruption Detected';
+  {Memory state logging messages}
+  FastMM_LogStateToFileTemplate: PWideChar = 'FastMM State Capture:'#13#10
+    + '---------------------'#13#10
+    + '{17}K Allocated'#13#10
+    + '{18}K Overhead'#13#10
+    + '{19}% Efficiency'#13#10#13#10
+    + 'Usage Detail:'#13#10;
+  FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{20} bytes: {8} x {21} ({22} bytes avg.)'#13#10;
 
 implementation
 
@@ -684,7 +699,7 @@ const
   CEmergencyReserveAddressSpace = CMaximumMediumBlockSpanSize;
 {$endif}
 
-  {Event log tokens}
+  {Event and state log tokens}
   CEventLogTokenBlankString = 0;
   CEventLogTokenCurrentDate = 1;
   CEventLogTokenCurrentTime = 2;
@@ -703,12 +718,19 @@ const
   CEventLogTokenModifyAfterFreeDetail = 15;
   CEventLogTokenEventLogFilename = 16;
 
+  CStateLogTokenAllocatedKB = 17;
+  CStateLogTokenOverheadKB = 18;
+  CStateLogTokenEfficiencyPercentage = 19;
+  CStateLogTokenClassTotalBytesUsed = 20;
+  CStateLogTokenClassInstanceCount = 21;
+  CStateLogTokenClassAverageBytesPerInstance = 22;
+
   {The highest ID of an event log token.}
-  CEventLogMaxTokenID = 99;
+  CEventLogMaxTokenID = 30;
 
   {The maximum size of an event message, in wide characters.}
-  CMaximumEventMessageSize = 65536;
-  CTokenBufferSize = 32768;
+  CEventMessageMaxWideChars = 32768;
+  CTokenBufferMaxWideChars = 32768;
 
   CFilenameMaxLength = 1024;
 
@@ -726,6 +748,9 @@ const
   CDebugFillPattern4B = $80808080;
   CDebugFillPattern2B = $8080;
   CDebugFillPattern1B = $80;
+
+  {The number of bytes in a memory page.  It is assumed that pages are aligned and that memory protection is set at the page level.}
+  CVirtualMemoryPageSize = 4096;
 
 type
 
@@ -1388,12 +1413,14 @@ begin
     Result := -1;
 end;
 
-{Determines the size and state of the virtual memory region starting at APRegionStart.  APRegionStart is assumed to be
-rounded to a page (4K) boundary.}
+{Determines the size and state of the virtual memory region starting at APRegionStart.}
 procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegionInfo: TMemoryRegionInfo);
 var
   LMemInfo: TMemoryBasicInformation;
 begin
+  {VirtualQuery might fail if the address is not aligned on a 4K boundary, e.g. it fails when called on Pointer(-1).}
+  APRegionStart := Pointer(NativeUInt(APRegionStart) and (not (CVirtualMemoryPageSize - 1)));
+
   Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo));
 
   AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
@@ -1602,57 +1629,67 @@ begin
     Dec(Result);
 end;
 
-procedure AppendTextFile(APFileName, APEventMessage: PWideChar; AWideCharCount: Integer);
-const
-  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
-  maximum text size.}
-  CBufferSize = (CMaximumEventMessageSize + 4) * SizeOf(WideChar);
+function AppendTextFile(APFileName, APText: PWideChar; AWideCharCount: Integer): Boolean;
 var
-  LBuffer: array[0..CBufferSize] of Byte;
-  LPBuffer: PByte;
+  LBufferSize: Integer;
+  LPBufferStart, LPBufferPos: PByte;
 begin
-  LPBuffer := @LBuffer;
+  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
+  maximum text size.  If converting to UTF-8 it is also possible for the resulting text to be bigger than the UTF-16
+  encoded text.}
+  LBufferSize := (AWideCharCount + 4) * 3;
 
-  if OS_FileExists(APFileName) then
-  begin
-    {The log file exists:  Add a line break after the previous event.}
-    if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
+  LPBufferStart := OS_AllocateVirtualMemory(LBufferSize, False, False);
+  if LPBufferStart = nil then
+    Exit(False);
+
+  try
+    LPBufferPos := LPBufferStart;
+
+    if OS_FileExists(APFileName) then
     begin
-      PWord(LPBuffer)^ := $0A0D;
-      Inc(LPBuffer, 2);
+      {The log file exists:  Add a line break after the previous event.}
+      if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
+      begin
+        PWord(LPBufferPos)^ := $0A0D;
+        Inc(LPBufferPos, 2);
+      end
+      else
+      begin
+        PCardinal(LPBufferPos)^ := $000A000D;
+        Inc(LPBufferPos, 4);
+      end;
     end
     else
     begin
-      PCardinal(LPBuffer)^ := $000A000D;
-      Inc(LPBuffer, 4);
+      {The file does not exist, so add the BOM if required.}
+      if FastMM_TextFileEncoding = teUTF8_BOM then
+      begin
+        PCardinal(LPBufferPos)^ := $BFBBEF;
+        Inc(LPBufferPos, 3);
+      end else if FastMM_TextFileEncoding = teUTF16LE_BOM then
+      begin
+        PWord(LPBufferPos)^ := $FEFF;
+        Inc(LPBufferPos, 2);
+      end;
     end;
-  end
-  else
-  begin
-    {The file does not exist, so add the BOM if required.}
-    if FastMM_TextFileEncoding = teUTF8_BOM then
+
+    {Copy the text across to the buffer, converting it as appropriate.}
+    if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
     begin
-      PCardinal(LPBuffer)^ := $BFBBEF;
-      Inc(LPBuffer, 3);
-    end else if FastMM_TextFileEncoding = teUTF16LE_BOM then
+      LPBufferPos := ConvertUTF16toUTF8(APText, AWideCharCount, LPBufferPos);
+    end
+    else
     begin
-      PWord(LPBuffer)^ := $FEFF;
-      Inc(LPBuffer, 2);
+      System.Move(APText^, LPBufferPos^, AWideCharCount * 2);
+      Inc(LPBufferPos, AWideCharCount * 2);
     end;
-  end;
 
-  {Copy the text across to the buffer, converting it as appropriate.}
-  if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
-  begin
-    LPBuffer := ConvertUTF16toUTF8(APEventMessage, AWideCharCount, LPBuffer);
-  end
-  else
-  begin
-    System.Move(APEventMessage^, LPBuffer^, AWideCharCount * 2);
-    Inc(LPBuffer, AWideCharCount * 2);
-  end;
+    Result := OS_CreateOrAppendFile(APFileName, LPBufferStart, NativeInt(LPBufferPos) - NativeInt(LPBufferStart));
 
-  OS_CreateOrAppendFile(APFileName, @LBuffer, NativeInt(LPBuffer) - NativeInt(@LBuffer));
+  finally
+    OS_FreeVirtualMemory(LPBufferStart);
+  end;
 end;
 
 {Returns the class for a memory block.  Returns nil if it is not a valid class.  Used by the leak detection code.}
@@ -1663,21 +1700,24 @@ var
   {Checks whether the given address is a valid address for a VMT entry.}
   function IsValidVMTAddress(APAddress: Pointer): Boolean;
   begin
-    {Do some basic pointer checks:  Must be pointer aligned and beyond 64K}
-    if (NativeUInt(APAddress) > 65535)
-      and (NativeUInt(APAddress) and (SizeOf(Pointer) - 1) = 0) then
+    {Do some basic pointer checks:  Must be pointer aligned and beyond 64K. (The low 64K is never readable, at least
+    under Windows.)}
+    if (NativeUInt(APAddress) <= 65535)
+      or (NativeUInt(APAddress) and (SizeOf(Pointer) - 1) <> 0) then
     begin
-      {Do we need to recheck the virtual memory?}
-      if (NativeUInt(LMemoryRegionInfo.RegionStartAddress) > NativeUInt(APAddress))
-        or ((NativeUInt(LMemoryRegionInfo.RegionStartAddress) + LMemoryRegionInfo.RegionSize) < (NativeUInt(APAddress) + SizeOf(Pointer))) then
-      begin
-        OS_GetVirtualMemoryRegionInfo(APAddress, LMemoryRegionInfo);
-      end;
-      Result := (not LMemoryRegionInfo.RegionIsFree)
-        and (marRead in LMemoryRegionInfo.AccessRights);
-    end
-    else
-      Result := False;
+      Exit(False);
+    end;
+
+    {Fetch the memory access flags for the region surrounding the pointer, if required.}
+    if (NativeUInt(APAddress) < NativeUInt(LMemoryRegionInfo.RegionStartAddress))
+      or (NativeUInt(APAddress) - NativeUInt(LMemoryRegionInfo.RegionStartAddress) >= LMemoryRegionInfo.RegionSize) then
+    begin
+      OS_GetVirtualMemoryRegionInfo(APAddress, LMemoryRegionInfo);
+    end;
+
+    {The address must be readable.}
+    Result := (not LMemoryRegionInfo.RegionIsFree)
+      and (marRead in LMemoryRegionInfo.AccessRights);
   end;
 
   {Returns True if AClassPointer points to a class VMT}
@@ -1687,16 +1727,21 @@ var
   begin
     {Check that the self pointer as well as parent class self pointer addresses are valid}
     if (ADepth < 1000)
+      and (NativeUInt(AClassPointer) > 65535)
       and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtSelfPtr))
       and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtParent)) then
     begin
       {Get a pointer to the parent class' self pointer}
       LParentClassSelfPointer := PPointer(PByte(AClassPointer) + vmtParent)^;
-      {Check that the self pointer as well as the parent class is valid}
-      Result := (PPointer(PByte(AClassPointer) + vmtSelfPtr)^ = AClassPointer)
-        and ((LParentClassSelfPointer = nil)
-          or (IsValidVMTAddress(LParentClassSelfPointer)
-            and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1)));
+      {Is the "Self" pointer valid?}
+      if PPointer(PByte(AClassPointer) + vmtSelfPtr)^ <> AClassPointer then
+        Exit(False);
+      {No more parent classes?}
+      if LParentClassSelfPointer = nil then
+        Exit(True);
+      {Recusively check the parent class for validity.}
+      Result := IsValidVMTAddress(LParentClassSelfPointer)
+        and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
     end
     else
       Result := False;
@@ -2429,12 +2474,12 @@ end;
 procedure LogEvent(AEventType: TFastMM_MemoryManagerEventType; const ATokenValues: TEventLogTokenValues);
 var
   LPTextTemplate, LPMessageBoxCaption: PWideChar;
-  LTextBuffer: array[0..CMaximumEventMessageSize] of WideChar;
+  LTextBuffer: array[0..CEventMessageMaxWideChars] of WideChar;
   LPLogHeaderStart, LPBodyStart: PWideChar;
   LPBuffer, LPBufferEnd: PWideChar;
 begin
   LPLogHeaderStart := @LTextBuffer;
-  LPBufferEnd := @LTextBuffer[CMaximumEventMessageSize - 1];
+  LPBufferEnd := @LTextBuffer[CEventMessageMaxWideChars - 1];
   LPBuffer := LPLogHeaderStart;
 
   {Add the log file header.}
@@ -2627,7 +2672,7 @@ end;
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 var
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
   LTokenValues := Default(TEventLogTokenValues);
@@ -2643,7 +2688,7 @@ end;
 procedure LogDebugBlockFooterInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 var
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
   LTokenValues := Default(TEventLogTokenValues);
@@ -2721,7 +2766,7 @@ const
   CMaxLoggedChanges = 32;
 var
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
   LPUserArea: PByte;
   LOffset, LChangeStart: NativeInt;
@@ -4898,7 +4943,7 @@ var
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
   LHeaderChecksum: NativeUInt;
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
@@ -5802,11 +5847,288 @@ begin
     or (@LCurrentMemoryManager.UnregisterExpectedMemoryLeak <> @InstalledMemoryManager.UnregisterExpectedMemoryLeak);
 end;
 
+
+{--------------------------------------------------------}
+{----------FastMM_LogStateToFile Implementation----------}
+{--------------------------------------------------------}
+
+const
+  CMaxMemoryLogNodes = 100000;
+  CQuickSortMinimumItemsInPartition = 8;
+
+type
+  {While scanning the memory pool the list of classes is built up in a binary search tree.}
+  PMemoryLogNode = ^TMemoryLogNode;
+  TMemoryLogNode = record
+    {The left and right child nodes}
+    LeftAndRightNodePointers: array[Boolean] of PMemoryLogNode;
+    {A class reference or a string type enum.}
+    BlockContentType: NativeUInt;
+    {The number of instances of the class}
+    InstanceCount: NativeUInt;
+    {The total memory usage for this class}
+    TotalMemoryUsage: NativeUInt;
+  end;
+  TMemoryLogNodes = array[0..CMaxMemoryLogNodes - 1] of TMemoryLogNode;
+  PMemoryLogNodes = ^TMemoryLogNodes;
+
+  TMemoryLogInfo = record
+    {The number of nodes in "Nodes" that are used.}
+    NodeCount: Integer;
+    {The root node of the binary search tree.  The content of this node is not actually used, it just simplifies the
+    binary search code.}
+    RootNode: TMemoryLogNode;
+    Nodes: TMemoryLogNodes;
+  end;
+  PMemoryLogInfo = ^TMemoryLogInfo;
+
+procedure FastMM_LogStateToFile_Callback(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+var
+  LBlockContentType, LBlockContentTypeHashBits: NativeUInt;
+  LPLogInfo: PMemoryLogInfo;
+  LPParentNode, LPClassNode: PMemoryLogNode;
+  LChildNodeDirection: Boolean;
+begin
+  LPLogInfo := ABlockInfo.UserData;
+
+  {Detecting an object is very expensive (due to the VirtualQuery call), so we do some basic checks and try to find the
+  "class" in the tree first.}
+  LBlockContentType := PNativeUInt(ABlockInfo.BlockAddress)^;
+  if (LBlockContentType > 65535)
+    and (LBlockContentType and (SizeOf(Pointer) - 1) = 0) then
+  begin
+    LPParentNode := @LPLogInfo.RootNode;
+    LBlockContentTypeHashBits := LBlockContentType;
+    repeat
+      LChildNodeDirection := Boolean(LBlockContentTypeHashBits and 1);
+      {Split off the next bit of the class pointer and traverse in the appropriate direction.}
+      LPClassNode := LPParentNode.LeftAndRightNodePointers[LChildNodeDirection];
+      if (LPClassNode = nil) or (LPClassNode.BlockContentType = LBlockContentType) then
+        Break;
+      {The node was not found:  Keep on traversing the tree.}
+      LBlockContentTypeHashBits := LBlockContentTypeHashBits shr 1;
+      LPParentNode := LPClassNode;
+    until False;
+  end
+  else
+    LPClassNode := nil;
+
+  {Was the "class" found?}
+  if LPClassNode = nil then
+  begin
+    {The "class" is not yet in the tree:  Determine if it is actually a class.}
+    LBlockContentType := DetectBlockContentType(ABlockInfo.BlockAddress, ABlockInfo.UsableSize);
+    {Is this class already in the tree?}
+    LPParentNode := @LPLogInfo.RootNode;
+    LBlockContentTypeHashBits := LBlockContentType;
+    repeat
+      LChildNodeDirection := Boolean(LBlockContentTypeHashBits and 1);
+      {Split off the next bit of the class pointer and traverse in the appropriate direction.}
+      LPClassNode := LPParentNode.LeftAndRightNodePointers[LChildNodeDirection];
+      if LPClassNode = nil then
+      begin
+        {The end of the tree was reached:  Add a new child node (if possible)}
+        if LPLogInfo.NodeCount = CMaxMemoryLogNodes then
+          Exit;
+        LPClassNode := @LPLogInfo.Nodes[LPLogInfo.NodeCount];
+        Inc(LPLogInfo.NodeCount);
+        LPParentNode.LeftAndRightNodePointers[LChildNodeDirection] := LPClassNode;
+        LPClassNode.BlockContentType := LBlockContentType;
+        Break;
+      end
+      else
+      begin
+        if LPClassNode.BlockContentType = LBlockContentType then
+          Break;
+      end;
+      {The node was not found:  Keep on traversing the tree.}
+      LBlockContentTypeHashBits := LBlockContentTypeHashBits shr 1;
+      LPParentNode := LPClassNode;
+    until False;
+  end;
+
+  {Update the statistics for the class}
+  Inc(LPClassNode.InstanceCount);
+  Inc(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
+end;
+
+{LogMemoryManagerStateToFile subroutine:  A median-of-3 quicksort routine for sorting a TMemoryLogNodes array.}
+procedure FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
+var
+  M, I, J: Integer;
+  LPivot, LTempItem: TMemoryLogNode;
+begin
+  while True do
+  begin
+    {Order the left, middle and right items in descending order}
+    M := ARightIndex shr 1;
+    if APLeftItem[0].TotalMemoryUsage < APLeftItem[M].TotalMemoryUsage then
+    begin
+      LTempItem := APLeftItem[0];
+      APLeftItem[0] := APLeftItem[M];
+      APLeftItem[M] := LTempItem;
+    end;
+    if APLeftItem[M].TotalMemoryUsage < APLeftItem[ARightIndex].TotalMemoryUsage then
+    begin
+      LTempItem := APLeftItem[ARightIndex];
+      APLeftItem[ARightIndex] := APLeftItem[M];
+      APLeftItem[M] := LTempItem;
+      if APLeftItem[0].TotalMemoryUsage < APLeftItem[M].TotalMemoryUsage then
+      begin
+        LTempItem := APLeftItem[0];
+        APLeftItem[0] := APLeftItem[M];
+        APLeftItem[M] := LTempItem;
+      end;
+    end;
+
+    {Move the pivot item out of the way by swapping M with R - 1}
+    LPivot := APLeftItem[M];
+    APLeftItem[M] := APLeftItem[ARightIndex - 1];
+    APLeftItem[ARightIndex - 1] := LPivot;
+
+    {Set up the loop counters}
+    I := 0;
+    J := ARightIndex - 1;
+    while true do
+    begin
+      {Find the first item from the left that is not greater than the pivot}
+      repeat
+        Inc(I);
+      until APLeftItem[I].TotalMemoryUsage <= LPivot.TotalMemoryUsage;
+      {Find the first item from the right that is not less than the pivot}
+      repeat
+        Dec(J);
+      until APLeftItem[J].TotalMemoryUsage >= LPivot.TotalMemoryUsage;
+      {Stop the loop when the two indexes cross}
+      if J < I then
+        Break;
+      {Swap item I and J}
+      LTempItem := APLeftItem[I];
+      APLeftItem[I] := APLeftItem[J];
+      APLeftItem[J] := LTempItem;
+    end;
+
+    {Put the pivot item back in the correct position by swapping I with R - 1}
+    APLeftItem[ARightIndex - 1] := APLeftItem[I];
+    APLeftItem[I] := LPivot;
+
+    {Sort the left-hand partition}
+    if J >= (CQuickSortMinimumItemsInPartition - 1) then
+      FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem, J);
+
+    {Sort the right-hand partition}
+    APLeftItem := @APLeftItem[I + 1];
+    ARightIndex := ARightIndex - I - 1;
+    if ARightIndex < (CQuickSortMinimumItemsInPartition - 1) then
+      Break;
+  end;
+end;
+
+{LogMemoryManagerStateToFile subroutine:  An InsertionSort routine for sorting a TMemoryLogNodes array.}
+procedure FastMM_LogStateToFile_InsertionSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
+var
+  I, J: Integer;
+  LCurNode: TMemoryLogNode;
+begin
+  for I := 1 to ARightIndex do
+  begin
+    LCurNode := APLeftItem[I];
+    {Scan backwards to find the best insertion spot}
+    J := I;
+    while (J > 0) and (APLeftItem[J - 1].TotalMemoryUsage < LCurNode.TotalMemoryUsage) do
+    begin
+      APLeftItem[J] := APLeftItem[J - 1];
+      Dec(J);
+    end;
+    APLeftItem[J] := LCurNode;
+  end;
+end;
+
 {Writes a log file containing a summary of the memory mananger state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string): Boolean;
+const
+  CStateLogMaxChars = 1024 * 1024;
+  CRLF: PWideChar = #13#10;
+var
+  LMemoryManagerUsageSummary: TFastMM_UsageSummary;
+  LBufferSize: Integer;
+  LPLogInfo: PMemoryLogInfo;
+  LPTokenBufferStart, LPStateLogBufferStart, LPBufferEnd, LPTokenPos, LPStateLogPos: PWideChar;
+  LTokenValues: TEventLogTokenValues;
+  LInd: Integer;
+  LPNode: PMemoryLogNode;
 begin
-  Result := True;
+  {Get the current memory manager usage summary.}
+  LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
+
+  {Allocate the memory required to store the token buffer, log text, as well as the detailed allocation information.}
+  LBufferSize := SizeOf(TMemoryLogInfo) + (CTokenBufferMaxWideChars + CStateLogMaxChars) * SizeOf(Char);
+  LPLogInfo := OS_AllocateVirtualMemory(LBufferSize, False, False);
+  if LPLogInfo <> nil then
+  begin
+    try
+      {Obtain the list of classes, together with the total memory usage and block count for each.}
+      FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo);
+
+      {Sort the classes in descending total memory usage order:  Do the initial QuickSort pass over the list to sort the
+      list in groups of QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
+      if LPLogInfo.NodeCount >= CQuickSortMinimumItemsInPartition then
+        FastMM_LogStateToFile_QuickSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1);
+      FastMM_LogStateToFile_InsertionSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1);
+
+      LPTokenBufferStart := @LPLogInfo.Nodes[LPLogInfo.NodeCount];
+      LPStateLogBufferStart := @LPTokenBufferStart[CTokenBufferMaxWideChars];
+      LPBufferEnd := @PByte(LPLogInfo)[LBufferSize];
+
+      {Add the header with the usage summary.}
+      LTokenValues := Default(TEventLogTokenValues);
+      LPTokenPos := AddTokenValues_GeneralTokens(LTokenValues, LPTokenBufferStart, LPStateLogBufferStart);
+      LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenAllocatedKB,
+        LMemoryManagerUsageSummary.AllocatedBytes div 1024, LPTokenPos, LPStateLogBufferStart);
+      LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenOverheadKB,
+        LMemoryManagerUsageSummary.OverheadBytes div 1024, LPTokenPos, LPStateLogBufferStart);
+      AddTokenValue_NativeInt(LTokenValues, CStateLogTokenEfficiencyPercentage,
+        Round(LMemoryManagerUsageSummary.EfficiencyPercentage), LPTokenPos, LPStateLogBufferStart);
+      LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate, LTokenValues, LPStateLogBufferStart,
+        LPBufferEnd);
+
+      {Add the usage information for each class}
+      LTokenValues := Default(TEventLogTokenValues);
+      for LInd := 0 to LPLogInfo.NodeCount - 1 do
+      begin
+        LPNode := @LPLogInfo.Nodes[LInd];
+
+        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassTotalBytesUsed,
+          LPNode.TotalMemoryUsage, LPTokenBufferStart, LPStateLogBufferStart);
+        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassInstanceCount,
+          LPNode.InstanceCount, LPTokenPos, LPStateLogBufferStart);
+        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassAverageBytesPerInstance,
+          Round(LPNode.TotalMemoryUsage / LPNode.InstanceCount), LPTokenPos, LPStateLogBufferStart);
+        AddTokenValue_BlockContentType(LTokenValues, CEventLogTokenObjectClass, LPNode.BlockContentType, LPTokenPos,
+          LPStateLogBufferStart);
+        LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate_UsageDetail, LTokenValues, LPStateLogPos,
+          LPBufferEnd);
+      end;
+
+      {Append the additional information}
+      if AAdditionalDetails <> '' then
+      begin
+        LPStateLogPos := AppendTextToBuffer(CRLF, 2, LPStateLogPos, LPBufferEnd);
+        LPStateLogPos := AppendTextToBuffer(PWideChar(AAdditionalDetails), Length(AAdditionalDetails), LPStateLogPos,
+          LPBufferEnd);
+      end;
+
+      {Delete the old file and write the new one.}
+      OS_DeleteFile(PWideChar(AFilename));
+      Result := AppendTextFile(PWideChar(AFilename), LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
+
+    finally
+      OS_FreeVirtualMemory(LPLogInfo);
+    end;
+  end
+  else
+    Result := False;
 end;
 
 {--------------------------------------------------------}
@@ -5856,7 +6178,7 @@ could be shared.  If this memory manager instance *is* the shared memory manager
 function FastMM_AttemptToUseSharedMemoryManager: Boolean;
 var
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPMemoryManagerEx: PMemoryManagerEx;
 begin
   if CurrentInstallationState = mmisInstalled then
@@ -6280,7 +6602,7 @@ var
   LPLeakSummary: PMemoryLeakSummary;
   LBlockContentType: NativeUInt;
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
   LPLeakSummary := ABlockInfo.UserData;
@@ -6784,7 +7106,7 @@ end;
 procedure FastMM_InstallMemoryManager;
 var
   LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferSize - 1] of WideChar;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
 begin
   {FastMM may only be installed if no other replacement memory manager has already been installed, and no memory has
   been allocated through the default memory manager.}
