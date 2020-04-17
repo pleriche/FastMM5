@@ -1086,16 +1086,19 @@ type
     APBuffer: PAnsiChar): PAnsiChar;
 
 {Fixed size move procedures.  The 64-bit versions assume 16-byte alignment.}
-procedure Move6(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move14(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move22(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move30(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move38(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move46(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move8(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move16(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move24(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move32(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move40(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move48(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move56(const ASource; var ADest; ACount: NativeInt); forward;
+procedure Move64(const ASource; var ADest; ACount: NativeInt); forward;
 {Variable size move routines.}
-procedure MoveMultipleOf16Plus6(const ASource; var ADest; ACount: NativeInt); forward;
-procedure MoveMultipleOf16Plus14(const ASource; var ADest; ACount: NativeInt); forward;
-procedure MoveMultipleOf32Plus30(const ASource; var ADest; ACount: NativeInt); forward;
+procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt); forward;
+procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt); forward;
+procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt); forward;
+procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt); forward;
 
 const
   {Structure size constants}
@@ -1113,71 +1116,71 @@ const
   {Small block sizes (including the header)}
   CSmallBlockTypeInfo: array[0..CSmallBlockTypeCount - 1] of TSmallBlockTypeInfo = (
     {8 byte jumps}
-    (BlockSize: 8; UpsizeMoveProcedure: Move6),
-    (BlockSize: 16; UpsizeMoveProcedure: Move14),
-    (BlockSize: 24; UpsizeMoveProcedure: Move22),
-    (BlockSize: 32; UpsizeMoveProcedure: Move30),
-    (BlockSize: 40; UpsizeMoveProcedure: Move38),
-    (BlockSize: 48; UpsizeMoveProcedure: Move46),
-    (BlockSize: 56; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 64; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 72; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 80; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 88; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 96; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 104; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 112; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 120; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 128; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 136; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 144; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 152; UpsizeMoveProcedure: MoveMultipleOf16Plus6),
-    (BlockSize: 160; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
+    (BlockSize: 8; UpsizeMoveProcedure: Move8),
+    (BlockSize: 16; UpsizeMoveProcedure: Move16),
+    (BlockSize: 24; UpsizeMoveProcedure: Move24),
+    (BlockSize: 32; UpsizeMoveProcedure: Move32),
+    (BlockSize: 40; UpsizeMoveProcedure: Move40),
+    (BlockSize: 48; UpsizeMoveProcedure: Move48),
+    (BlockSize: 56; UpsizeMoveProcedure: Move56),
+    (BlockSize: 64; UpsizeMoveProcedure: Move64),
+    (BlockSize: 72; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 80; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 88; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 96; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 104; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 112; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 120; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 128; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 136; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 144; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 152; UpsizeMoveProcedure: MoveMultipleOf8),
+    (BlockSize: 160; UpsizeMoveProcedure: MoveMultipleOf32),
     {16 byte jumps}
-    (BlockSize: 176; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 192; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 208; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 224; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 240; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 256; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 272; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 288; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 304; UpsizeMoveProcedure: MoveMultipleOf16Plus14),
-    (BlockSize: 320; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
+    (BlockSize: 176; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 192; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 208; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 224; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 240; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 256; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 272; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 288; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 304; UpsizeMoveProcedure: MoveMultipleOf16),
+    (BlockSize: 320; UpsizeMoveProcedure: MoveMultipleOf64),
     {32 byte jumps}
-    (BlockSize: 352; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 384; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 416; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 448; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 480; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 512; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 544; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 576; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 608; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
-    (BlockSize: 640; UpsizeMoveProcedure: MoveMultipleOf32Plus30),
+    (BlockSize: 352; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 384; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 416; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 448; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 480; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 512; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 544; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 576; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 608; UpsizeMoveProcedure: MoveMultipleOf32),
+    (BlockSize: 640; UpsizeMoveProcedure: MoveMultipleOf64),
     {64 byte jumps}
-    (BlockSize: 704),
-    (BlockSize: 768),
-    (BlockSize: 832),
-    (BlockSize: 896),
-    (BlockSize: 960),
-    (BlockSize: 1024),
-    (BlockSize: 1088),
-    (BlockSize: 1152),
-    (BlockSize: 1216),
-    (BlockSize: 1280),
-    (BlockSize: 1344),
+    (BlockSize: 704; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 768; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 832; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 896; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 960; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1024; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1088; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1152; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1216; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1280; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1344; UpsizeMoveProcedure: MoveMultipleOf64),
     {128 byte jumps}
-    (BlockSize: 1472),
-    (BlockSize: 1600),
-    (BlockSize: 1728),
-    (BlockSize: 1856),
-    (BlockSize: 1984),
-    (BlockSize: 2112),
-    (BlockSize: 2240),
-    (BlockSize: 2368),
-    (BlockSize: 2496),
-    (BlockSize: CMaximumSmallBlockSize)
+    (BlockSize: 1472; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1600; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1728; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1856; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 1984; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 2112; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 2240; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 2368; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 2496; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: CMaximumSmallBlockSize; UpsizeMoveProcedure: MoveMultipleOf64)
   );
 
 var
@@ -1243,64 +1246,232 @@ var
 {--------------Move routines---------------}
 {------------------------------------------}
 
-procedure Move6(const ASource; var ADest; ACount: NativeInt);
-begin
-  PIntegerArray(@ADest)[0] := PIntegerArray(@ASource)[0];
-  PSmallIntArray(@ADest)[2] := PSmallIntArray(@ASource)[2];
-end;
-
-procedure Move14(const ASource; var ADest; ACount: NativeInt);
+procedure Move8(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fistp qword ptr [edx]
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
-  PIntegerArray(@ADest)[2] := PIntegerArray(@ASource)[2];
-  PSmallIntArray(@ADest)[6] := PSmallIntArray(@ASource)[6];
+{$endif}
 end;
 
-procedure Move22(const ASource; var ADest; ACount: NativeInt);
+procedure Move16(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
-  PIntegerArray(@ADest)[4] := PIntegerArray(@ASource)[4];
-  PSmallIntArray(@ADest)[10] := PSmallIntArray(@ASource)[10];
+{$endif}
 end;
 
-procedure Move30(const ASource; var ADest; ACount: NativeInt);
+procedure Move24(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
   PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
-  PIntegerArray(@ADest)[6] := PIntegerArray(@ASource)[6];
-  PSmallIntArray(@ADest)[14] := PSmallIntArray(@ASource)[14];
+{$endif}
 end;
 
-procedure Move38(const ASource; var ADest; ACount: NativeInt);
+procedure Move32(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
   PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
   PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
-  PIntegerArray(@ADest)[8] := PIntegerArray(@ASource)[8];
-  PSmallIntArray(@ADest)[18] := PSmallIntArray(@ASource)[18];
+{$endif}
 end;
 
-procedure Move46(const ASource; var ADest; ACount: NativeInt);
+procedure Move40(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
   PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
   PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
   PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
-  PIntegerArray(@ADest)[10] := PIntegerArray(@ASource)[10];
-  PSmallIntArray(@ADest)[22] := PSmallIntArray(@ASource)[22];
+{$endif}
 end;
 
-procedure MoveMultipleOf16Plus6(const ASource; var ADest; ACount: NativeInt);
+procedure Move48(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fild qword ptr [eax + 40]
+  fistp qword ptr [edx + 40]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
+  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
+  PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
+{$endif}
+end;
+
+procedure Move56(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fild qword ptr [eax + 40]
+  fild qword ptr [eax + 48]
+  fistp qword ptr [edx + 48]
+  fistp qword ptr [edx + 40]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
+  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
+  PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
+  PInt64Array(@ADest)[6] := PInt64Array(@ASource)[6];
+{$endif}
+end;
+
+procedure Move64(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fild qword ptr [eax + 40]
+  fild qword ptr [eax + 48]
+  fild qword ptr [eax + 56]
+  fistp qword ptr [edx + 56]
+  fistp qword ptr [edx + 48]
+  fistp qword ptr [edx + 40]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
+  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
+  PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
+  PInt64Array(@ADest)[6] := PInt64Array(@ASource)[6];
+  PInt64Array(@ADest)[7] := PInt64Array(@ASource)[7];
+{$endif}
+end;
+
+{Moves 8x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a 8
+byte boundary.}
+procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  fild qword ptr [eax + ecx]
+  fistp qword ptr [edx + ecx]
+  add ecx, 8
+  js @MoveLoop
+{$else}
 var
   LPSource, LPDest: PByte;
 begin
-  LPSource := @PByte(@ASource)[ACount - 6];
-  LPDest := @PByte(@ADest)[ACount - 6];
-  ACount := 6 - ACount;
+  LPSource := @PByte(@ASource)[ACount];
+  LPDest := @PByte(@ADest)[ACount];
+  ACount := - ACount;
+
+  while True do
+  begin
+    PInt64Array(@LPDest[ACount])[0] := PInt64Array(@LPSource[ACount])[0];
+
+    Inc(ACount, 8);
+    if ACount >= 0 then
+      Break;
+  end;
+{$endif}
+end;
+
+{Moves 16x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
+16 byte boundary.}
+procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  fild qword ptr [eax + ecx]
+  fild qword ptr [eax + ecx + 8]
+  fistp qword ptr [edx + ecx + 8]
+  fistp qword ptr [edx + ecx]
+  add ecx, 16
+  js @MoveLoop
+{$else}
+var
+  LPSource, LPDest: PByte;
+begin
+  LPSource := @PByte(@ASource)[ACount];
+  LPDest := @PByte(@ADest)[ACount];
+  ACount := - ACount;
 
   while True do
   begin
@@ -1311,41 +1482,35 @@ begin
     if ACount >= 0 then
       Break;
   end;
-
-  PIntegerArray(LPDest)[0] := PIntegerArray(LPSource)[0];
-  PSmallIntArray(LPDest)[2] := PSmallIntArray(LPSource)[2];
+{$endif}
 end;
 
-procedure MoveMultipleOf16Plus14(const ASource; var ADest; ACount: NativeInt);
+{Moves 32x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
+32 byte boundary.}
+procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  fild qword ptr [eax + ecx]
+  fild qword ptr [eax + ecx + 8]
+  fild qword ptr [eax + ecx + 16]
+  fild qword ptr [eax + ecx + 24]
+  fistp qword ptr [edx + ecx + 24]
+  fistp qword ptr [edx + ecx + 16]
+  fistp qword ptr [edx + ecx + 8]
+  fistp qword ptr [edx + ecx]
+  add ecx, 32
+  js @MoveLoop
+{$else}
 var
   LPSource, LPDest: PByte;
 begin
-  LPSource := @PByte(@ASource)[ACount - 14];
-  LPDest := @PByte(@ADest)[ACount - 14];
-  ACount := 14 - ACount;
-
-  while True do
-  begin
-    PInt64Array(@LPDest[ACount])[0] := PInt64Array(@LPSource[ACount])[0];
-    PInt64Array(@LPDest[ACount])[1] := PInt64Array(@LPSource[ACount])[1];
-
-    Inc(ACount, 16);
-    if ACount >= 0 then
-      Break;
-  end;
-
-  PInt64Array(LPDest)[0] := PInt64Array(LPSource)[0];
-  PIntegerArray(LPDest)[2] := PIntegerArray(LPSource)[2];
-  PSmallIntArray(LPDest)[6] := PSmallIntArray(LPSource)[6];
-end;
-
-procedure MoveMultipleOf32Plus30(const ASource; var ADest; ACount: NativeInt);
-var
-  LPSource, LPDest: PByte;
-begin
-  LPSource := @PByte(@ASource)[ACount - 30];
-  LPDest := @PByte(@ADest)[ACount - 30];
-  ACount := 30 - ACount;
+  LPSource := @PByte(@ASource)[ACount];
+  LPDest := @PByte(@ADest)[ACount];
+  ACount := - ACount;
 
   while True do
   begin
@@ -1358,12 +1523,60 @@ begin
     if ACount >= 0 then
       Break;
   end;
+{$endif}
+end;
 
-  PInt64Array(LPDest)[0] := PInt64Array(LPSource)[0];
-  PInt64Array(LPDest)[1] := PInt64Array(LPSource)[1];
-  PInt64Array(LPDest)[2] := PInt64Array(LPSource)[2];
-  PIntegerArray(LPDest)[6] := PIntegerArray(LPSource)[6];
-  PSmallIntArray(LPDest)[14] := PSmallIntArray(LPSource)[14];
+{Moves 64x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
+64 byte boundary.}
+procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  fild qword ptr [eax + ecx]
+  fild qword ptr [eax + ecx + 8]
+  fild qword ptr [eax + ecx + 16]
+  fild qword ptr [eax + ecx + 24]
+  fild qword ptr [eax + ecx + 32]
+  fild qword ptr [eax + ecx + 40]
+  fild qword ptr [eax + ecx + 48]
+  fild qword ptr [eax + ecx + 56]
+  fistp qword ptr [edx + ecx + 56]
+  fistp qword ptr [edx + ecx + 48]
+  fistp qword ptr [edx + ecx + 40]
+  fistp qword ptr [edx + ecx + 32]
+  fistp qword ptr [edx + ecx + 24]
+  fistp qword ptr [edx + ecx + 16]
+  fistp qword ptr [edx + ecx + 8]
+  fistp qword ptr [edx + ecx]
+  add ecx, 64
+  js @MoveLoop
+{$else}
+var
+  LPSource, LPDest: PByte;
+begin
+  LPSource := @PByte(@ASource)[ACount];
+  LPDest := @PByte(@ADest)[ACount];
+  ACount := - ACount;
+
+  while True do
+  begin
+    PInt64Array(@LPDest[ACount])[0] := PInt64Array(@LPSource[ACount])[0];
+    PInt64Array(@LPDest[ACount])[1] := PInt64Array(@LPSource[ACount])[1];
+    PInt64Array(@LPDest[ACount])[2] := PInt64Array(@LPSource[ACount])[2];
+    PInt64Array(@LPDest[ACount])[3] := PInt64Array(@LPSource[ACount])[3];
+    PInt64Array(@LPDest[ACount])[4] := PInt64Array(@LPSource[ACount])[4];
+    PInt64Array(@LPDest[ACount])[5] := PInt64Array(@LPSource[ACount])[5];
+    PInt64Array(@LPDest[ACount])[6] := PInt64Array(@LPSource[ACount])[6];
+    PInt64Array(@LPDest[ACount])[7] := PInt64Array(@LPSource[ACount])[7];
+
+    Inc(ACount, 64);
+    if ACount >= 0 then
+      Break;
+  end;
+{$endif}
 end;
 
 
@@ -3214,7 +3427,7 @@ begin
       {The user allocated size is stored for large blocks}
       LOldUserSize := LPLargeBlockHeader.UserAllocatedSize;
       {The number of bytes to move is the old user size.}
-      System.Move(APointer^, Result^, LOldUserSize);
+      MoveMultipleOf64(APointer^, Result^, LOldUserSize);
       {Free the old block.}
       FastMM_FreeMem(APointer);
     end;
@@ -3231,8 +3444,7 @@ begin
     end
     else
     begin
-      {The block is less than half the old size, and the current size is greater than the minimum block size allowing a
-      downsize:  Reallocate}
+      {The new size is less than half the old size:  Reallocate}
       Result := FastMM_GetMem(ANewSize);
       if Result <> nil then
       begin
@@ -4098,8 +4310,6 @@ var
   LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPMediumBlockManager: PMediumBlockManager;
 begin
-  {TODO : Process the pending free lists?}
-
   {What is the available size in the block being reallocated?}
   LBlockSize := GetMediumBlockSize(APointer);
   {Get a pointer to the next block}
@@ -4201,7 +4411,7 @@ begin
       if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
         PLargeBlockHeader(PByte(Result) - CLargeBlockHeaderSize).UserAllocatedSize := ANewUserSize;
       {Move the data across}
-      System.Move(APointer^, Result^, LOldUserSize);
+      MoveMultipleOf64(APointer^, Result^, LOldUserSize);
       {Free the old block}
       FastMM_FreeMem(APointer);
     end;
@@ -6909,10 +7119,7 @@ begin
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
 
-      if Assigned(LPSmallBlockTypeInfo.UpsizeMoveProcedure) then
-        LPSmallBlockManager.UpsizeMoveProcedure := LPSmallBlockTypeInfo.UpsizeMoveProcedure
-      else
-        LPSmallBlockManager.UpsizeMoveProcedure := System.Move;
+      LPSmallBlockManager.UpsizeMoveProcedure := LPSmallBlockTypeInfo.UpsizeMoveProcedure;
 
     end;
   end;
