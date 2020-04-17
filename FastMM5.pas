@@ -568,6 +568,9 @@ var
     + '{19}% Efficiency'#13#10#13#10
     + 'Usage Detail:'#13#10;
   FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{20} bytes: {8} x {21} ({22} bytes avg.)'#13#10;
+  {Initialization error messages.}
+  FastMM_DebugSupportLibraryNotAvailableError: PWideChar = 'The FastMM debug support library could not be loaded.';
+  FastMM_DebugSupportLibraryNotAvailableError_Caption: PWideChar = 'Fatal Error';
 
 implementation
 
@@ -749,7 +752,8 @@ const
   CDebugFillPattern2B = $8080;
   CDebugFillPattern1B = $80;
 
-  {The number of bytes in a memory page.  It is assumed that pages are aligned and that memory protection is set at the page level.}
+  {The number of bytes in a memory page.  It is assumed that pages are aligned at page size boundaries, and that memory
+  protection is set at the page level.}
   CVirtualMemoryPageSize = 4096;
 
 type
@@ -7247,6 +7251,60 @@ begin
     Result := False;
 end;
 
+procedure FastMM_ApplyLegacyConditionalDefines;
+begin
+  {This procedure provides backward compatibility with the conditional defines of FastMM4.}
+
+  {$ifdef Align16Bytes}
+  FastMM_EnterMinimumAddressAlignment(maa16Bytes);
+  {$endif}
+
+  {$ifdef EnableMemoryLeakReporting}
+  {$ifdef RequireDebuggerPresenceForLeakReporting}
+  if DebugHook <> 0 then
+  {$endif}
+  begin
+    FastMM_LogToFileEvents := FastMM_LogToFileEvents + [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary];
+    FastMM_MessageBoxEvents := FastMM_MessageBoxEvents + [mmetUnexpectedMemoryLeakSummary];
+  end;
+  {$endif}
+
+  {$ifdef NoMessageBoxes}
+  FastMM_MessageBoxEvents := [];
+  {$endif}
+
+  {$ifdef FullDebugModeWhenDLLAvailable}
+  {$define FullDebugMode}
+  {$endif}
+
+  {$ifdef FullDebugMode}
+  if FastMM_LoadDebugSupportLibrary then
+  begin
+    FastMM_EnterDebugMode;
+  end
+  else
+  begin
+    {$ifndef FullDebugModeWhenDLLAvailable}
+    {Exception handling is not yet in place, so show an error message and terminate the application.}
+    OS_ShowMessageBox(FastMM_DebugSupportLibraryNotAvailableError, FastMM_DebugSupportLibraryNotAvailableError_Caption);
+    {Return error code 217 - the same error code that would be returned for an exception in an initialization section.}
+    Halt(217);
+    {$endif}
+  end;
+  {$endif}
+
+  {$ifdef ShareMM}
+  {$ifndef ShareMMIfLibrary}
+  if not IsLibrary then
+  {$endif}
+    FastMM_ShareMemoryManager;
+  {$endif}
+
+  {$ifdef AttemptToUseSharedMM}
+  FastMM_AttemptToUseSharedMemoryManager;
+  {$endif}
+end;
+
 procedure FastMM_SetDefaultEventLogFilename;
 const
   CLogFilePathEnvironmentVariable: PWideChar = 'FastMMLogFilePath';
@@ -7327,6 +7385,11 @@ initialization
   FastMM_InitializeMemoryManager;
   FastMM_InstallMemoryManager;
 
+  {If installation was successful, check for any legacy FastMM4 conditional defines and adjust the configuration
+  accordingly.}
+  if CurrentInstallationState = mmisInstalled then
+    FastMM_ApplyLegacyConditionalDefines;
+
 finalization
 
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
@@ -7344,8 +7407,8 @@ finalization
   FastMM_FinalizeMemoryManager;
   FastMM_UninstallMemoryManager;
 
-  {Free all memory.  If this is a .DLL that owns its own MM, then it is necessary to prevent the main application from
-  running out of address space.}
+  {Free all memory.  If this is a .DLL that owns its own memory manager, then it is necessary to prevent the main
+  application from running out of address space.}
   FastMM_FreeAllMemory;
 
 end.
