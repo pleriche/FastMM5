@@ -2815,8 +2815,9 @@ end;
 {--------General utility subroutines-------}
 {------------------------------------------}
 
+{$if CompilerVersion < 34}
 {Returns the lowest set bit index in the 32-bit number}
-function FindFirstSetBit(AInteger: Integer): Integer;
+function CountTrailingZeros32(AInteger: Integer): Integer;
 asm
 {$ifdef 64Bit}
   .noframe
@@ -2824,6 +2825,7 @@ asm
 {$endif}
   bsf eax, eax
 end;
+{$endif}
 
 {Returns True if the block is not in use.}
 function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
@@ -4222,7 +4224,7 @@ begin
   if LBinGroupMasked <> 0 then
   begin
     {Get the actual bin number}
-    LBinNumber := FindFirstSetBit(LBinGroupMasked) + LBinGroupNumber * 32;
+    LBinNumber := CountTrailingZeros32(LBinGroupMasked) + LBinGroupNumber * 32;
   end
   else
   begin
@@ -4231,9 +4233,9 @@ begin
     if LBinGroupsMasked <> 0 then
     begin
       {There is a suitable group with space:  Get the bin number}
-      LBinGroupNumber := FindFirstSetBit(LBinGroupsMasked);
+      LBinGroupNumber := CountTrailingZeros32(LBinGroupsMasked);
       {Get the bin in the group with free blocks}
-      LBinNumber := FindFirstSetBit(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + LBinGroupNumber * 32;
+      LBinNumber := CountTrailingZeros32(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + LBinGroupNumber * 32;
     end
     else
     begin
