@@ -3108,6 +3108,13 @@ begin
     Result := True;
 end;
 
+{Checks a free debug block for oorruption of the header, footer or fill pattern.  Returns True if it is intact.}
+function CheckFreeDebugBlockIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
+begin
+  Result := CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader)
+    and CheckDebugBlockFillPatternIntact(APDebugBlockHeader);
+end;
+
 procedure EnsureEmergencyReserveAddressSpaceAllocated;
 begin
 {$ifdef 32Bit}
@@ -3125,6 +3132,122 @@ begin
     EmergencyReserveAddressSpace := nil;
   end;
 {$endif}
+end;
+
+
+{-----------------------------------------}
+{--------Debug block management-----------}
+{-----------------------------------------}
+
+function FastMM_FreeMem_FreeDebugBlock(APointer: Pointer): Integer;
+var
+  LPActualBlock: PFastMM_DebugBlockHeader;
+begin
+  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+
+  {Check that the debug header and footer are intact}
+  if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
+    System.Error(reInvalidPtr);
+
+  {Update the information in the block header.}
+  LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
+  FastMM_GetStackTrace(@LPActualBlock.FreeStackTrace, CFastMM_StackTraceEntryCount, 0);
+  LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
+
+  {Fill the user area of the block with the debug pattern.}
+  FillDebugBlockWithDebugPattern(LPActualBlock);
+
+  {The block is now free.}
+  LPActualBlock.DebugBlockFlags := CIsDebugBlockFlag or CBlockIsFreeFlag;
+
+  {Update the header and footer checksums}
+  SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
+
+  {Return the actual block to the memory pool.}
+  Result := FastMM_FreeMem(LPActualBlock);
+end;
+
+{Reallocates a block containing debug information.  Any debug information remains intact.}
+function FastMM_ReallocMem_ReallocDebugBlock(APointer: Pointer; ANewSize: NativeInt): Pointer;
+var
+  LPActualBlock: PFastMM_DebugBlockHeader;
+  LAvailableSpace: NativeInt;
+begin
+  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+
+  {Check that the debug header and footer are intact}
+  if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
+    System.Error(reInvalidPtr);
+
+  {Can the block be resized in-place?}
+  LAvailableSpace := FastMM_BlockMaximumUserBytes(LPActualBlock);
+  if LAvailableSpace >= ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize) then
+  begin
+    {Update the user block size and set the new header and footer checksums.}
+    LPActualBlock.UserSize := ANewSize;
+    SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
+
+    Result := APointer;
+  end
+  else
+  begin
+    {The new size cannot fit in the existing block:  We need to allocate a new block.}
+    Result := FastMM_GetMem(ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize));
+
+    if Result <> nil then
+    begin
+      {Move the old data across and free the old block.}
+      System.Move(LPActualBlock^, Result^, LPActualBlock.UserSize + CDebugBlockHeaderSize);
+      FastMM_FreeMem_FreeDebugBlock(APointer);
+
+      {Update the user block size and set the new header and footer checksums.}
+      PFastMM_DebugBlockHeader(Result).UserSize := ANewSize;
+      SetDebugBlockHeaderAndFooterChecksums(PFastMM_DebugBlockHeader(Result));
+
+      {Set the flag in the actual block header to indicate that the block contains debug information.}
+      SetBlockHasDebugInfo(Result, True);
+
+      {Return a pointer to the user data}
+      Inc(PByte(Result), CDebugBlockHeaderSize);
+
+    end;
+
+  end;
+end;
+
+{----------------------------------------------------}
+{------------Invalid Free/realloc handling-----------}
+{----------------------------------------------------}
+
+procedure HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
+var
+  LPDebugBlockHeader: PFastMM_DebugBlockHeader;
+  LHeaderChecksum: NativeUInt;
+  LTokenValues: TEventLogTokenValues;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
+  LPBufferPos, LPBufferEnd: PWideChar;
+begin
+  {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
+  not much that can be done to provide additional error information.}
+  if PWord(PByte(APointer) - CBlockStatusWordSize)^ <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
+    Exit;
+
+  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
+  LPDebugBlockHeader := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
+  if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
+    Exit;
+
+  LTokenValues := Default(TEventLogTokenValues);
+
+  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
+  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
+  AddTokenValues_BlockTokens(LTokenValues, APointer, LPBufferPos, LPBufferEnd);
+
+  if AIsReallocMemCall then
+    LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
+  else
+    LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
 end;
 
 
@@ -4043,15 +4166,12 @@ begin
     begin
 
       {If the block currently has debug info, check it for consistency.}
-      if BlockHasDebugInfo(Result) then
+      if BlockHasDebugInfo(Result)
+        and (not CheckFreeDebugBlockIntact(Result)) then
       begin
-        if (not CheckDebugBlockHeaderAndFooterCheckSumsValid(Result))
-         or (not CheckDebugBlockFillPatternIntact(Result)) then
-        begin
-          {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
-          APMediumBlockManager.MediumBlockManagerLocked := 0;
-          System.Error(reInvalidPtr);
-        end;
+        {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
+        APMediumBlockManager.MediumBlockManagerLocked := 0;
+        System.Error(reInvalidPtr);
       end;
 
       {Should the block be split?}
@@ -4129,14 +4249,11 @@ begin
   RemoveMediumFreeBlockFromBin(APMediumBlockManager, Result);
 
   {If the block currently has debug info, check it for consistency before resetting the flag.}
-  if BlockHasDebugInfo(Result) then
+  if BlockHasDebugInfo(Result)
+    and (not CheckFreeDebugBlockIntact(Result)) then
   begin
-    if (not CheckDebugBlockHeaderAndFooterCheckSumsValid(Result))
-      or (not CheckDebugBlockFillPatternIntact(Result)) then
-    begin
-      APMediumBlockManager.MediumBlockManagerLocked := 0;
-      System.Error(reInvalidPtr);
-    end;
+    APMediumBlockManager.MediumBlockManagerLocked := 0;
+    System.Error(reInvalidPtr);
   end;
 
   {Get the size of the available medium block}
@@ -4163,7 +4280,7 @@ begin
       InsertMediumBlockIntoBin(APMediumBlockManager, LPSecondSplit, LSecondSplitSize);
   end;
 
-  {Set the header for this block, clearing the debug infor flag.}
+  {Set the header for this block, clearing the debug info flag.}
   SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
 end;
 
@@ -4535,10 +4652,11 @@ begin
 end;
 
 {Subroutine for FastMM_FreeMem_FreeSmallBlock.  The small block manager must already be locked.  Optionally unlocks the
-small block manager before exit.}
-procedure FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(APSmallBlockManager: PSmallBlockManager;
-  APSmallBlockSpan: PSmallBlockSpanHeader; APSmallBlock: Pointer; AUnlockSmallBlockManager: Boolean);
+small block manager before exit.  Returns 0 on success.}
+function FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(APSmallBlockSpan: PSmallBlockSpanHeader;
+  APSmallBlock: Pointer; AUnlockSmallBlockManager: Boolean): Integer;
 var
+  LPSmallBlockManager: PSmallBlockManager;
   LPPreviousSpan, LPNextSpan, LPInsertAfterSpan, LPInsertBeforeSpan: PSmallBlockSpanHeader;
   LOldFirstFreeBlock: Pointer;
 begin
@@ -4548,8 +4666,9 @@ begin
   if LOldFirstFreeBlock = nil then
   begin
     {Insert this as the first partially free pool for the block size}
-    LPInsertAfterSpan := PSmallBlockSpanHeader(APSmallBlockManager);
-    LPInsertBeforeSpan := APSmallBlockManager.FirstPartiallyFreeSpan;
+    LPSmallBlockManager := APSmallBlockSpan.SmallBlockManager;
+    LPInsertAfterSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
+    LPInsertBeforeSpan := LPSmallBlockManager.FirstPartiallyFreeSpan;
 
     APSmallBlockSpan.NextPartiallyFreeSpan := LPInsertBeforeSpan;
     APSmallBlockSpan.PreviousPartiallyFreeSpan := LPInsertAfterSpan;
@@ -4585,7 +4704,7 @@ begin
 
     {Unlock this block type}
     if AUnlockSmallBlockManager then
-      APSmallBlockManager.SmallBlockManagerLocked := 0;
+      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
     {Free the block pool}
     FastMM_FreeMem_FreeMediumBlock(APSmallBlockSpan);
   end
@@ -4593,15 +4712,17 @@ begin
   begin
     {Unlock this block type}
     if AUnlockSmallBlockManager then
-      APSmallBlockManager.SmallBlockManagerLocked := 0;
+      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
   end;
+
+  Result := 0;
 end;
 
 {Frees a chain of blocks belonging to the small block manager.  The block manager is assumed to be locked.  Optionally
 unlocks the block manager when done.  The first pointer inside each free block should be a pointer to the next free
-block.}
-procedure FastMM_FreeMem_FreeSmallBlockChain(APSmallBlockManager: PSmallBlockManager; APPendingFreeSmallBlock: Pointer;
-  AUnlockSmallBlockManagerWhenDone: Boolean);
+block.  Returns 0 on success.}
+function FastMM_FreeMem_FreeSmallBlockChain(APPendingFreeSmallBlock: Pointer;
+  AUnlockSmallBlockManagerWhenDone: Boolean): Integer;
 var
   LPNextBlock: Pointer;
   LPSmallBlockSpan: PSmallBlockSpanHeader;
@@ -4611,18 +4732,80 @@ begin
     LPNextBlock := PPointer(APPendingFreeSmallBlock)^;
 
     LPSmallBlockSpan := GetSpanForSmallBlock(APPendingFreeSmallBlock);
-    FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(APSmallBlockManager, LPSmallBlockSpan,
-      APPendingFreeSmallBlock, AUnlockSmallBlockManagerWhenDone and (LPNextBlock = nil));
+    FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APPendingFreeSmallBlock,
+      AUnlockSmallBlockManagerWhenDone and (LPNextBlock = nil));
 
     if LPNextBlock = nil then
       Break;
 
     APPendingFreeSmallBlock := LPNextBlock;
   end;
+
+  Result := 0;
 end;
 
-{Returns a small block to the memory pool.}
-procedure FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer);
+{Returns a small block to the memory pool.  Returns 0 on success.}
+function FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer): Integer;
+{$ifdef X86ASM}
+asm
+  push esi
+
+  {Get the span pointer in ecx}
+  movzx esi, word ptr [eax - 2]
+  and esi, CDropSmallBlockFlagsMask
+  shl esi, CSmallBlockSpanOffsetBitShift
+  mov ecx, eax
+  sub ecx, esi
+  and ecx, -CMediumBlockAlignment
+
+  {Get the small block manager in esi}
+  mov esi, TSmallBlockSpanHeader(ecx).SmallBlockManager
+
+  {Get the block pointer in edx}
+  mov edx, eax
+
+  mov eax, $100
+  lock cmpxchg byte ptr TSmallBlockManager(esi).SmallBlockManagerLocked, ah
+  jne @ManagerCurrentlyLocked
+
+  {Get the span in eax}
+  mov eax, ecx
+
+  cmp TSmallBlockManager(esi).PendingFreeList, 0
+  jne @HasPendingFreeList
+
+  {No pending free list:  Just free this block and unlock the block manager.}
+  pop esi
+  mov cl, 1
+  jmp FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked
+
+@HasPendingFreeList:
+  xor ecx, ecx
+  call FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked
+
+  {Unlink the current pending free list}
+@GetPendingFreeListLoop:
+  mov eax, TSmallBlockManager(esi).PendingFreeList
+  xor ecx, ecx
+  lock cmpxchg TSmallBlockManager(esi).PendingFreeList, ecx
+  jne @GetPendingFreeListLoop
+
+  {Process the pending free list.}
+  pop esi
+  mov dl, 1
+  jmp FastMM_FreeMem_FreeSmallBlockChain
+
+  {The small block manager is currently locked, so we need to add this block to its pending free list.}
+@ManagerCurrentlyLocked:
+  mov eax, TSmallBlockManager(esi).PendingFreeList
+  mov [edx], eax
+  lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
+  jne @ManagerCurrentlyLocked
+
+  xor eax, eax
+  pop esi
+
+{$else}
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LPSmallBlockManager: PSmallBlockManager;
@@ -4638,13 +4821,12 @@ begin
 
     if LPSmallBlockManager.PendingFreeList = nil then
     begin
-      FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockManager, LPSmallBlockSpan, APSmallBlock,
-        True);
+      Result := FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, True);
+      Exit;
     end
     else
     begin
-      FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockManager, LPSmallBlockSpan, APSmallBlock,
-        False);
+      FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, False);
 
       {Process the pending frees list.}
       while True do
@@ -4652,7 +4834,7 @@ begin
         LFirstPendingFreeBlock := LPSmallBlockManager.PendingFreeList;
         if (AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, nil, LFirstPendingFreeBlock) = LFirstPendingFreeBlock) then
         begin
-          FastMM_FreeMem_FreeSmallBlockChain(LPSmallBlockManager, LFirstPendingFreeBlock, True);
+          Result := FastMM_FreeMem_FreeSmallBlockChain(LFirstPendingFreeBlock, True);
           Exit;
         end;
       end;
@@ -4670,19 +4852,20 @@ begin
       if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
         Break;
     end;
+    Result := 0;
   end;
+
+{$endif}
 end;
 
 {Allocates a new sequential feed small block span and splits off the first block, returning it.  The small block
-manager is assumed to be locked, and will be unlocked before exit.}
+manager is assumed to be locked, and will be unlocked before exit.  There may not be an existing sequential feed span
+with available space.}
 function FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager: PSmallBlockManager): Pointer;
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LSpanSize, LLastBlockOffset, LTotalBlocksInSpan: Integer;
 begin
-  {A new sequential feed span may only be allocated once the previous span has been exhausted.}
-  Assert(APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize);
-
   LPSmallBlockSpan := FastMM_GetMem_GetMediumBlock(APSmallBlockManager.MinimumSpanSize,
     APSmallBlockManager.OptimalSpanSize, APSmallBlockManager.OptimalSpanSize + CSmallBlockSpanMaximumAmountWithWhichOptimalSizeMayBeExceeded);
 
@@ -4720,12 +4903,58 @@ begin
 
   {Set the header for the returned block.}
   SetSmallBlockHeader(Result, LPSmallBlockSpan, False, False);
-
 end;
 
 {Attempts to split off a small block from the sequential feed span for the arena.  Returns the block on success, nil if
 there is no available sequential feed block.  The arena does not have to be locked.}
 function FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock(APSmallBlockManager: PSmallBlockManager): Pointer;
+{$ifdef X86ASM}
+asm
+  push ebx
+  push esi
+  push edi
+
+  mov esi, eax
+@TrySequentialFeedLoop:
+
+  {Get the old ABA counter and offset in edx:eax}
+  mov eax, TSmallBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  mov edx, TSmallBlockManager(esi).LastSequentialFeedBlockOffset.ABACounter
+
+  {Get the new ABA counter and offset in ecx:ebx}
+  movzx edi, TSmallBlockManager(esi).BlockSize
+  mov ebx, eax
+  sub ebx, edi
+  lea ecx, [edx + 1]
+
+  {Get the current sequential feed span in edi}
+  mov edi, TSmallBlockManager(esi).CurrentSequentialFeedSpan
+
+  cmp eax, CSmallBlockSpanHeaderSize
+  jle @NoSequentialFeedAvailable
+
+  {Try to grab the block.  If it fails, try again from the start.}
+  lock cmpxchg8b TSmallBlockManager(esi).LastSequentialFeedBlockOffset
+  jne @TrySequentialFeedLoop
+
+  {The block address is the span + offset.}
+  lea eax, [edi + ebx]
+
+  {Set the header for the small block.}
+  and ebx, -CMediumBlockAlignment
+  shr ebx, CSmallBlockSpanOffsetBitShift
+  or ebx, CIsSmallBlockFlag
+  mov [eax - CSmallBlockHeaderSize], bx
+
+  jmp @Done
+
+@NoSequentialFeedAvailable:
+  xor eax, eax
+@Done:
+  pop edi
+  pop esi
+  pop ebx
+{$else}
 var
   LPreviousLastSequentialFeedBlockOffset, LNewLastSequentialFeedBlockOffset: TIntegerWithABACounter;
   LPSequentialFeedSpan: PSmallBlockSpanHeader;
@@ -4733,14 +4962,15 @@ begin
   while True do
   begin
     LPreviousLastSequentialFeedBlockOffset := APSmallBlockManager.LastSequentialFeedBlockOffset;
-    if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
-      Exit(nil);
-
-    LPSequentialFeedSpan := APSmallBlockManager.CurrentSequentialFeedSpan;
 
     {Subtract the block size and increment the ABA counter to the new sequential feed offset.}
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
       - APSmallBlockManager.BlockSize + Int64(1) shl 32;
+
+    LPSequentialFeedSpan := APSmallBlockManager.CurrentSequentialFeedSpan;
+
+    if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
+      Exit(nil);
 
     if AtomicCmpExchange(APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
@@ -4754,12 +4984,52 @@ begin
     end;
 
   end;
+{$endif}
 end;
 
 {Reuses a pending free block, freeing all pending free blocks other than the first.  On entry it is assumed that
 APSmallBlockManager.PendingFreeList <> nil and that the arena is locked.  The arena will be unlocked before exit.}
 function FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(
   APSmallBlockManager: PSmallBlockManager): Pointer;
+{$ifdef X86ASM}
+asm
+  push esi
+  {Get the old pending free list pointer in esi}
+  xor esi, esi
+  lock xchg TSmallBlockManager(eax).PendingFreeList, esi
+  {Get the next block in the chain in eax}
+  mov edx, [esi]
+
+  {Free all subsequent blocks in the chain, if there are any.}
+  test edx, edx
+  jz @NoNextPendingFree
+  mov eax, edx
+  mov dl, 1
+  call FastMM_FreeMem_FreeSmallBlockChain
+  jmp @CheckDebugInfo
+@NoNextPendingFree:
+  mov byte ptr TSmallBlockManager(eax).SmallBlockManagerLocked, 0
+
+  {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
+  fill pattern.}
+@CheckDebugInfo:
+  test [esi - CSmallBlockHeaderSize], CHasDebugInfoFlag
+  jz @BlockHasNoDebugInfo
+  call CheckFreeDebugBlockIntact
+  test al, al
+  jnz @DebugBlockOK
+@DebugBlockError:
+  mov al, reInvalidPtr
+  call System.Error
+@DebugBlockOK:
+  {Reset the debug info flag in the block.}
+  and word ptr [esi - CSmallBlockHeaderSize], not CHasDebugInfoFlag
+@BlockHasNoDebugInfo:
+
+  {Return the first block in the pending free list}
+  mov eax, esi
+  pop esi
+{$else}
 var
   LPNextFreeBlock: Pointer;
 begin
@@ -4767,7 +5037,7 @@ begin
 
   LPNextFreeBlock := PPointer(Result)^;
   if LPNextFreeBlock <> nil then
-    FastMM_FreeMem_FreeSmallBlockChain(APSmallBlockManager, PPointer(Result)^, True)
+    FastMM_FreeMem_FreeSmallBlockChain(LPNextFreeBlock, True)
   else
     APSmallBlockManager.SmallBlockManagerLocked := 0;
 
@@ -4775,9 +5045,106 @@ begin
   fill pattern.}
   if BlockHasDebugInfo(Result) then
   begin
-    if (not CheckDebugBlockHeaderAndFooterCheckSumsValid(Result))
-      or (not CheckDebugBlockFillPatternIntact(Result)) then
+    if not CheckFreeDebugBlockIntact(Result) then
+      System.Error(reInvalidPtr);
+
+    {Reset the debug info flag in the block.}
+    SetBlockHasDebugInfo(Result, False);
+  end;
+{$endif}
+end;
+
+{Returns the first free block and unlocks the small block manager.  On entry the manager must be locked and must be
+known to have at least one free block.}
+function FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager: PSmallBlockManager): Pointer;
+{$ifdef X86ASM}
+asm
+  push esi
+  mov esi, eax
+
+  {ecx = first partially free span}
+  mov ecx, TSmallBlockManager(eax).FirstPartiallyFreeSpan
+
+  {Return the first free block in the span.}
+  mov eax, TSmallBlockSpanHeader(ecx).FirstFreeBlock
+
+  {Mark the block as in use.}
+  and word ptr [eax - CSmallBlockHeaderSize], not CBlockIsFreeFlag
+
+  {The current content of the block will be a pointer to the next free block in the span.}
+  mov edx, [eax]
+  mov TSmallBlockSpanHeader(ecx).FirstFreeBlock, edx
+
+  {Increment the number of used blocks}
+  Inc TSmallBlockSpanHeader(ecx).BlocksInUse;
+
+  {If there are no more free blocks in the small block span then it must be removed from the circular linked list of
+  small block spans with available blocks.}
+  test edx, edx
+  jnz @HasMoreFreeBlocks
+  mov edx, TSmallBlockSpanHeader(ecx).NextPartiallyFreeSpan
+  mov TSmallBlockManager(esi).FirstPartiallyFreeSpan, edx
+  mov TSmallBlockSpanHeader(edx).PreviousPartiallyFreeSpan, esi
+@HasMoreFreeBlocks:
+
+  mov byte ptr TSmallBlockManager(esi).SmallBlockManagerLocked, 0
+
+  {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
+  fill pattern.}
+  test [eax - CSmallBlockHeaderSize], CHasDebugInfoFlag
+  jz @BlockHasNoDebugInfo
+  push eax
+  call CheckFreeDebugBlockIntact
+  test al, al
+  pop eax
+  jnz @DebugBlockOK
+@DebugBlockError:
+  mov al, reInvalidPtr
+  call System.Error
+@DebugBlockOK:
+  {Reset the debug info flag in the block.}
+  and word ptr [eax - CSmallBlockHeaderSize], not CHasDebugInfoFlag
+@BlockHasNoDebugInfo:
+
+  pop esi
+{$else}
+var
+  LPFirstPartiallyFreeSpan, LPNewFirstPartiallyFreeSpan: PSmallBlockSpanHeader;
+begin
+  LPFirstPartiallyFreeSpan := APSmallBlockManager.FirstPartiallyFreeSpan;
+
+  {Return the first free block in the span.}
+  Result := LPFirstPartiallyFreeSpan.FirstFreeBlock;
+
+  {Mark the block as in use.}
+  SetBlockIsFreeFlag(Result, False);
+
+  {The current content of the first free block will be a pointer to the next free block in the span.}
+  LPFirstPartiallyFreeSpan.FirstFreeBlock := PPointer(Result)^;
+
+  {Increment the number of used blocks}
+  Inc(LPFirstPartiallyFreeSpan.BlocksInUse);
+
+  {If there are no more free blocks in the small block span then it must be removed from the circular linked list of
+  small block spans with available blocks.}
+  if LPFirstPartiallyFreeSpan.FirstFreeBlock = nil then
+  begin
+    LPNewFirstPartiallyFreeSpan := LPFirstPartiallyFreeSpan.NextPartiallyFreeSpan;
+    APSmallBlockManager.FirstPartiallyFreeSpan := LPNewFirstPartiallyFreeSpan;
+    LPNewFirstPartiallyFreeSpan.PreviousPartiallyFreeSpan := PSmallBlockSpanHeader(APSmallBlockManager);
+  end;
+
+  {ARM requires a data memory barrier here to ensure that all prior writes have completed before the arena is unlocked.}
+
+  APSmallBlockManager.SmallBlockManagerLocked := 0;
+
+  {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
+  fill pattern.}
+  if BlockHasDebugInfo(Result) then
+  begin
+    if not CheckFreeDebugBlockIntact(Result) then
     begin
+      APSmallBlockManager.SmallBlockManagerLocked := 0;
       System.Error(reInvalidPtr);
     end;
 
@@ -4785,66 +5152,142 @@ begin
     SetBlockHasDebugInfo(Result, False);
   end;
 
-end;
-
-{Returns the first free block and unlocks the small block manager.  On entry the manager must be locked and must be
-known to have at least one free block.}
-function FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(
-  APSmallBlockManager: PSmallBlockManager): Pointer;
-var
-  LPFirstPartiallyFreeSpan, LPNewFirstPartiallyFreeSpan: PSmallBlockSpanHeader;
-begin
-  LPFirstPartiallyFreeSpan := APSmallBlockManager.FirstPartiallyFreeSpan;
-  if NativeInt(LPFirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
-  begin
-    {Return the first free block in the span.}
-    Result := LPFirstPartiallyFreeSpan.FirstFreeBlock;
-
-    {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
-    fill pattern.}
-    if BlockHasDebugInfo(Result) then
-    begin
-      if (not CheckDebugBlockHeaderAndFooterCheckSumsValid(Result))
-        or (not CheckDebugBlockFillPatternIntact(Result)) then
-      begin
-        APSmallBlockManager.SmallBlockManagerLocked := 0;
-        System.Error(reInvalidPtr);
-      end;
-
-      {Reset the debug info flag in the block.}
-      SetBlockHasDebugInfo(Result, False);
-    end;
-
-    {Mark the block as in use.}
-    SetBlockIsFreeFlag(Result, False);
-
-    {The current content of the first free block will be a pointer to the next free block in the span.}
-    LPFirstPartiallyFreeSpan.FirstFreeBlock := PPointer(Result)^;
-
-    {Increment the number of used blocks}
-    Inc(LPFirstPartiallyFreeSpan.BlocksInUse);
-
-    {If there are no more free blocks in the small block span then it must be removed from the circular linked list of
-    small block spans with available blocks.}
-    if LPFirstPartiallyFreeSpan.FirstFreeBlock = nil then
-    begin
-      LPNewFirstPartiallyFreeSpan := LPFirstPartiallyFreeSpan.NextPartiallyFreeSpan;
-      APSmallBlockManager.FirstPartiallyFreeSpan := LPNewFirstPartiallyFreeSpan;
-      LPNewFirstPartiallyFreeSpan.PreviousPartiallyFreeSpan := PSmallBlockSpanHeader(APSmallBlockManager);
-    end;
-
-    {ARM requires a data memory barrier here to ensure that all prior writes have completed before the arena is
-    unlocked.}
-
-    APSmallBlockManager.SmallBlockManagerLocked := 0;
-  end
-  else
-    Result := nil;
+{$endif}
 end;
 
 {Tries to allocate a small block through the given small block manager.  If the manager has no available blocks, or
 it is locked, then the corresponding managers in other arenas are also tried.}
 function FastMM_GetMem_GetSmallBlock(APSmallBlockManager: PSmallBlockManager): Pointer;
+{$ifdef X86ASM}
+asm
+  {--------------Attempt 1--------------
+  Try to get a block from the first arena with an available block.  During the first attempt only memory that has
+  already been reserved for use by the block type will be used - no new spans will be allocated.
+
+  Try to obtain a block in this sequence:
+    1) The pending free list
+    2) From a partially free span
+    3) From the sequential feed span}
+
+@Attempt1Loop:
+  {Is this manager currently locked?}
+  cmp byte ptr TSmallBlockManager(eax).SmallBlockManagerLocked, 0
+  jne @Attempt1TrySequentialFeed
+
+  {Is there a pending free block?}
+  cmp TSmallBlockManager(eax).PendingFreeList, 0
+  jne @Attempt1LockManagerAndTryGetBlock
+
+  {Are there free blocks for this manager?}
+  cmp TSmallBlockManager(eax).FirstPartiallyFreeSpan, eax
+  je @Attempt1TrySequentialFeed
+
+@Attempt1LockManagerAndTryGetBlock:
+  {Try to lock the manager}
+  mov edx, eax
+  xor eax, eax
+  mov cl, 1
+  lock cmpxchg byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, cl
+  mov eax, edx
+  jne @Attempt1TrySequentialFeed
+
+  {1.1) Try to get a pending free block.  If there's no pending free block after locking the arena, try reusing a free
+  block.}
+  cmp TSmallBlockManager(eax).PendingFreeList, 0
+  jne FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena
+
+  {1.2) Try to get a block from the first free span.}
+  cmp TSmallBlockManager(eax).FirstPartiallyFreeSpan, eax
+  jne FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena
+
+  {Other threads took all the available blocks before the manager could be locked.}
+  mov byte ptr TSmallBlockManager(eax).SmallBlockManagerLocked, 0
+
+@Attempt1TrySequentialFeed:
+  {1.3) Could not reuse a free block nor a pending free block:  Try sequential feed.}
+  cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
+  jle @Attempt1NoSequentialFeedBlockAvailable
+  push eax
+  call FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock
+  pop edx
+  test eax, eax
+  jz @Attempt1SequentialFeedFailed
+  ret
+@Attempt1SequentialFeedFailed:
+  mov eax, edx
+@Attempt1NoSequentialFeedBlockAvailable:
+
+  {Is this the last arena?  If not, try the next one.}
+  cmp eax, offset SmallBlockArenas + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  jnb @Attempt1Failed
+  add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
+  jmp @Attempt1Loop
+
+@Attempt1Failed:
+  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+
+  {--------------Attempt 2--------------
+  Lock the first unlocked arena and try again.  During the second attempt a new sequential feed span will be allocated
+  if there are no available blocks in the arena.
+
+  Try to obtain a block in this sequence:
+    1) The pending free list
+    2) From a partially free span
+    3) From the sequential feed span
+    4) By allocating a new sequential feed span and splitting off a block from it}
+
+@Attempt2Loop:
+
+  {Try to lock the manager}
+  mov edx, eax
+  xor eax, eax
+  mov cl, 1
+  lock cmpxchg byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, cl
+  mov eax, edx
+  jne @Attempt2ManagerAlreadyLocked
+
+  {2.1) Try to get a pending free block.  If there's no pending free block after locking the arena, try reusing a free
+  block.}
+  cmp TSmallBlockManager(eax).PendingFreeList, 0
+  jne FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena
+
+  {2.2) Try to get a block from the first free span.}
+  cmp TSmallBlockManager(eax).FirstPartiallyFreeSpan, eax
+  jne FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena
+
+  {2.3) Could not reuse a free block nor a pending free block:  Try sequential feed.}
+  cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
+  jle @Attempt2NoSequentialFeedBlockAvailable
+  push eax
+  call FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock
+  pop edx
+  test eax, eax
+  jz @Attempt2SequentialFeedFailed
+  mov byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, 0
+  ret
+@Attempt2SequentialFeedFailed:
+  mov eax, edx
+@Attempt2NoSequentialFeedBlockAvailable:
+
+  {2.4) Allocate a new sequential feed span and split off a block}
+  jmp FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena;
+
+@Attempt2ManagerAlreadyLocked:
+  {Is this the last arena?  If not, try the next one.}
+  cmp eax, offset SmallBlockArenas + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  jnb @Attempt2Failed
+  add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
+  jmp @Attempt2Loop
+
+@Attempt2Failed:
+  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+
+  {All arenas are currently locked:  Back off and start again at the first arena}
+  push eax
+  call OS_AllowOtherThreadToRun
+  pop eax
+  jmp @Attempt1Loop
+{$else}
 begin
   while True do
   begin
@@ -4963,7 +5406,7 @@ begin
     OS_AllowOtherThreadToRun;
 
   end;
-
+{$endif}
 end;
 
 function FastMM_ReallocMem_ReallocSmallBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
@@ -5027,126 +5470,52 @@ begin
 end;
 
 
-{-----------------------------------------}
-{--------Debug block management-----------}
-{-----------------------------------------}
-
-function FastMM_FreeMem_FreeDebugBlock(APointer: Pointer): Integer;
-var
-  LPActualBlock: PFastMM_DebugBlockHeader;
-begin
-  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
-
-  {Check that the debug header and footer are intact}
-  if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
-    System.Error(reInvalidPtr);
-
-  {Update the information in the block header.}
-  LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
-  FastMM_GetStackTrace(@LPActualBlock.FreeStackTrace, CFastMM_StackTraceEntryCount, 0);
-  LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
-
-  {Fill the user area of the block with the debug pattern.}
-  FillDebugBlockWithDebugPattern(LPActualBlock);
-
-  {The block is now free.}
-  LPActualBlock.DebugBlockFlags := CIsDebugBlockFlag or CBlockIsFreeFlag;
-
-  {Update the header and footer checksums}
-  SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
-
-  {Return the actual block to the memory pool.}
-  Result := FastMM_FreeMem(LPActualBlock);
-end;
-
-{Reallocates a block containing debug information.  Any debug information remains intact.}
-function FastMM_ReallocMem_ReallocDebugBlock(APointer: Pointer; ANewSize: NativeInt): Pointer;
-var
-  LPActualBlock: PFastMM_DebugBlockHeader;
-  LAvailableSpace: NativeInt;
-begin
-  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
-
-  {Check that the debug header and footer are intact}
-  if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
-    System.Error(reInvalidPtr);
-
-  {Can the block be resized in-place?}
-  LAvailableSpace := FastMM_BlockMaximumUserBytes(LPActualBlock);
-  if LAvailableSpace >= ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize) then
-  begin
-    {Update the user block size and set the new header and footer checksums.}
-    LPActualBlock.UserSize := ANewSize;
-    SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
-
-    Result := APointer;
-  end
-  else
-  begin
-    {The new size cannot fit in the existing block:  We need to allocate a new block.}
-    Result := FastMM_GetMem(ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize));
-
-    if Result <> nil then
-    begin
-      {Move the old data across and free the old block.}
-      System.Move(LPActualBlock^, Result^, LPActualBlock.UserSize + CDebugBlockHeaderSize);
-      FastMM_FreeMem_FreeDebugBlock(APointer);
-
-      {Update the user block size and set the new header and footer checksums.}
-      PFastMM_DebugBlockHeader(Result).UserSize := ANewSize;
-      SetDebugBlockHeaderAndFooterChecksums(PFastMM_DebugBlockHeader(Result));
-
-      {Set the flag in the actual block header to indicate that the block contains debug information.}
-      SetBlockHasDebugInfo(Result, True);
-
-      {Return a pointer to the user data}
-      Inc(PByte(Result), CDebugBlockHeaderSize);
-
-    end;
-
-  end;
-end;
-
-{----------------------------------------------------}
-{------------Invalid Free/realloc handling-----------}
-{----------------------------------------------------}
-
-procedure HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
-var
-  LPDebugBlockHeader: PFastMM_DebugBlockHeader;
-  LHeaderChecksum: NativeUInt;
-  LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
-  LPBufferPos, LPBufferEnd: PWideChar;
-begin
-  {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
-  not much that can be done to provide additional error information.}
-  if PWord(PByte(APointer) - CBlockStatusWordSize)^ <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
-    Exit;
-
-  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
-  LPDebugBlockHeader := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
-  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
-  if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit;
-
-  LTokenValues := Default(TEventLogTokenValues);
-
-  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
-  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
-  AddTokenValues_BlockTokens(LTokenValues, APointer, LPBufferPos, LPBufferEnd);
-
-  if AIsReallocMemCall then
-    LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
-  else
-    LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
-end;
-
 {--------------------------------------------------------}
 {-------Core memory manager interface: Normal mode-------}
 {--------------------------------------------------------}
 
 function FastMM_GetMem(ASize: NativeInt): Pointer;
+{$ifdef X86ASM}
+asm
+  cmp eax, (CMaximumSmallBlockSize - CSmallBlockHeaderSize)
+  ja @NotASmallBlock
+  {Small block:  Get the small block manager index in eax}
+  inc eax
+  shr eax, 3
+  movzx eax, byte ptr SmallBlockTypeLookup[eax]
+  {Get a pointer to the small block manager for arena 0 in eax}
+  shl eax, 6 // * CSmallBlockManagerSize
+  add eax, offset SmallBlockArenas
+  jmp FastMM_GetMem_GetSmallBlock
+@NotASmallBlock:
+  cmp eax, (CMaximumMediumBlockSize - CMediumBlockHeaderSize)
+  ja FastMM_GetMem_GetLargeBlock
+  {Medium block:  Round the requested size up to the next medium block bin.}
+  cmp eax, (CMediumBlockMiddleBinsStart - CMediumBlockHeaderSize)
+  ja @NotFirstMediumBlockGroup
+  add eax, (CMediumBlockHeaderSize - CMinimumMediumBlockSize + CInitialBinSpacing - 1)
+  and eax, -CInitialBinSpacing
+  add eax, CMinimumMediumBlockSize
+  mov edx, eax
+  mov ecx, eax
+  jmp FastMM_GetMem_GetMediumBlock
+@NotFirstMediumBlockGroup:
+  cmp eax, (CMediumBlockFinalBinsStart - CMediumBlockHeaderSize)
+  ja @LastMediumBlockGroup
+  add eax, (CMediumBlockHeaderSize - CMediumBlockMiddleBinsStart + CMiddleBinSpacing - 1)
+  and eax, -CMiddleBinSpacing
+  add eax, CMediumBlockMiddleBinsStart
+  mov edx, eax
+  mov ecx, eax
+  jmp FastMM_GetMem_GetMediumBlock
+@LastMediumBlockGroup:
+  add eax, (CMediumBlockHeaderSize - CMediumBlockFinalBinsStart + CFinalBinSpacing - 1)
+  and eax, -CFinalBinSpacing
+  add eax, CMediumBlockFinalBinsStart
+  mov edx, eax
+  mov ecx, eax
+  jmp FastMM_GetMem_GetMediumBlock
+{$else}
 var
   LPSmallBlockManager: PSmallBlockManager;
   LSmallBlockTypeIndex: Integer;
@@ -5173,9 +5542,37 @@ begin
       Result := FastMM_GetMem_GetLargeBlock(ASize);
     end;
   end;
+{$endif}
 end;
 
 function FastMM_FreeMem(APointer: Pointer): Integer;
+{$ifdef X86ASM}
+asm
+  {Read the flags from the block header.}
+  movzx edx, word ptr [eax - 2]
+
+  {Is it a small block that is in use?}
+  mov ecx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
+  and ecx, edx
+  cmp ecx, CIsSmallBlockFlag
+  je FastMM_FreeMem_FreeSmallBlock
+
+  mov ecx, (not CHasDebugInfoFlag)
+  and ecx, edx
+  cmp ecx, CIsMediumBlockFlag
+  je FastMM_FreeMem_FreeMediumBlock
+
+  cmp ecx, CIsLargeBlockFlag
+  je FastMM_FreeMem_FreeLargeBlock
+
+  cmp edx, CIsDebugBlockFlag
+  je FastMM_FreeMem_FreeDebugBlock
+
+  xor edx,edx
+  call HandleInvalidFreeMemOrReallocMem
+  or eax, -1
+
+{$else}
 var
   LBlockHeader: Integer;
 begin
@@ -5185,9 +5582,7 @@ begin
   {Is it a small block that is in use?}
   if LBlockHeader and (CBlockIsFreeFlag or CIsSmallBlockFlag) = CIsSmallBlockFlag then
   begin
-    FastMM_FreeMem_FreeSmallBlock(APointer);
-    {No error}
-    Result := 0;
+    Result := FastMM_FreeMem_FreeSmallBlock(APointer);
   end
   else
   begin
@@ -5215,6 +5610,7 @@ begin
       end;
     end;
   end;
+{$endif}
 end;
 
 function FastMM_ReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
@@ -5524,7 +5920,7 @@ begin
 
             if (AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, nil, LPPendingFreeBlock) = LPPendingFreeBlock) then
             begin
-              FastMM_FreeMem_FreeSmallBlockChain(LPSmallBlockManager, LPPendingFreeBlock, True);
+              FastMM_FreeMem_FreeSmallBlockChain(LPPendingFreeBlock, True);
               Break;
             end;
 
