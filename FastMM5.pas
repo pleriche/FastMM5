@@ -621,6 +621,12 @@ type and state may be determined from the bits of the word preceding the block a
 
 const
 
+  {$ifdef 32Bit}
+  CPointerSizeBitShift = 2; //1 shl 2 = 4
+  {$else}
+  CPointerSizeBitShift = 3; //1 shl 3 = 8
+  {$endif}
+
   {Block status flags}
   CBlockStatusWordSize = 2;
 
@@ -633,7 +639,8 @@ const
 
   {-----Small block constants-----}
   CSmallBlockTypeCount = 61;
-  CSmallBlockGranularity = 8;
+  CSmallBlockGranularityBits = 3;
+  CSmallBlockGranularity = 1 shl CSmallBlockGranularityBits;
   CMaximumSmallBlockSize = 2624; //Must be a multiple of 64 for the 64-byte alignment option to work
   CSmallBlockArenaCount = 4;
   CSmallBlockFlagCount = 3;
@@ -643,7 +650,8 @@ const
   {-----Medium block constants-----}
   CMediumBlockArenaCount = 4;
   {Medium blocks are always aligned to at least 64 bytes (which is the typical cache line size).}
-  CMediumBlockAlignment = 64;
+  CMediumBlockAlignmentBits = 6;
+  CMediumBlockAlignment = 1 shl CMediumBlockAlignmentBits;
   CMaximumMediumBlockSpanSize = 4 * 1024 * 1024; //64K * CMediumBlockAlignment = 4MB
 
   {Medium blocks are binned in linked lists - one linked list for each size.}
@@ -657,15 +665,18 @@ const
 
   {The spacing between medium block bins is not constant.  There are three groups: initial, middle and final.}
   CInitialBinCount = 384;
-  CInitialBinSpacing = 256; //must be a power of 2
+  CInitialBinSpacingBits = 8;
+  CInitialBinSpacing = 1 shl CInitialBinSpacingBits; //256
 
   CMediumBlockMiddleBinsStart = CMinimumMediumBlockSize + CInitialBinSpacing * CInitialBinCount;
   CMiddleBinCount = 384;
-  CMiddleBinSpacing = 512; //must be a power of 2
+  CMiddleBinSpacingBits = 9;
+  CMiddleBinSpacing = 1 shl CMiddleBinSpacingBits; //512
 
   CMediumBlockFinalBinsStart = CMediumBlockMiddleBinsStart + CMiddleBinSpacing * CMiddleBinCount;
   CFinalBinCount = CMediumBlockBinCount - CMiddleBinCount - CInitialBinCount;
-  CFinalBinSpacing = 1024; //must be a power of 2
+  CFinalBinSpacingBits = 10;
+  CFinalBinSpacing = 1 shl CFinalBinSpacingBits; //1024
 
   {The maximum size allocatable through medium blocks.  Blocks larger than this are allocated via the OS from the
   virtual memory pool ( = large blocks).}
@@ -3621,26 +3632,26 @@ function GetBinNumberForMediumBlockSize(AMediumBlockSize: Integer): Integer; inl
 begin
   if AMediumBlockSize <= CMediumBlockMiddleBinsStart then
   begin
-    Result := (AMediumBlockSize - CMinimumMediumBlockSize) div CInitialBinSpacing;
+    Result := (AMediumBlockSize - CMinimumMediumBlockSize) shr CInitialBinSpacingBits;
   end
   else
   begin
     if AMediumBlockSize <= CMediumBlockFinalBinsStart then
-      Result := (AMediumBlockSize + (CInitialBinCount * CMiddleBinSpacing - CMediumBlockMiddleBinsStart)) div CMiddleBinSpacing
+      Result := (AMediumBlockSize + (CInitialBinCount * CMiddleBinSpacing - CMediumBlockMiddleBinsStart)) shr CMiddleBinSpacingBits
     else
-      Result := (AMediumBlockSize + ((CInitialBinCount + CMiddleBinCount) * CFinalBinSpacing - CMediumBlockFinalBinsStart)) div CFinalBinSpacing;
+      Result := (AMediumBlockSize + ((CInitialBinCount + CMiddleBinCount) * CFinalBinSpacing - CMediumBlockFinalBinsStart)) shr CFinalBinSpacingBits;
   end;
 end;
 
 function GetMediumBlockSpan(APMediumBlock: Pointer): PMediumBlockSpanHeader; inline;
 begin
   Result := PMediumBlockSpanHeader(PByte(APMediumBlock)
-    - (PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSpanOffsetMultiple * CMediumBlockAlignment));
+    - (PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSpanOffsetMultiple shl CMediumBlockAlignmentBits));
 end;
 
 function GetMediumBlockSize(APMediumBlock: Pointer): Integer; inline;
 begin
-  Result := PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple * CMediumBlockAlignment;
+  Result := PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple shl CMediumBlockAlignmentBits;
 end;
 
 procedure SetMediumBlockHeader_SetIsSmallBlockSpan(APMediumBlock: Pointer; AIsSmallBlockSpan: Boolean); inline;
@@ -3652,7 +3663,7 @@ procedure SetMediumBlockHeader_SetMediumBlockSpan(APMediumBlock: Pointer; APMedi
 begin
   {Store the offset to the medium block span.}
   PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSpanOffsetMultiple :=
-    (NativeInt(APMediumBlock) - NativeInt(APMediumBlockSpan)) div CMediumBlockAlignment;
+    (NativeInt(APMediumBlock) - NativeInt(APMediumBlockSpan)) shr CMediumBlockAlignmentBits;
 end;
 
 procedure SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock: Pointer; ABlockSize: Integer; ABlockIsFree: Boolean;
@@ -3699,7 +3710,7 @@ begin
   end;
 
   {Store the block size.}
-  PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple := ABlockSize div CMediumBlockAlignment;
+  PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple := ABlockSize shr CMediumBlockAlignmentBits;
 end;
 
 {Inserts a medium block into the appropriate medium block bin.  The header for APMediumFreeBlock must already be set
@@ -3736,7 +3747,7 @@ begin
   else
   begin
     {Get the group number}
-    LBinGroupNumber := LBinNumber div 32;
+    LBinGroupNumber := LBinNumber shr 5; //32 bins per group
     {Flag this bin as used}
     APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]
       or (1 shl (LBinNumber and 31));
@@ -3771,9 +3782,10 @@ begin
   end
   else
   begin
-    {Get the bin number for this block size}
-    LBinNumber := (NativeInt(LPNextFreeBlock) - NativeInt(@APMediumBlockManager.FirstFreeBlockInBin)) div SizeOf(Pointer);
-    LBinGroupNumber := LBinNumber div 32;
+    {Calculate the bin number from the bin pointer:  LPNextFreeBlock will be a pointer to the bin, since the bin is now
+    empty.)}
+    LBinNumber := (NativeInt(LPNextFreeBlock) - NativeInt(@APMediumBlockManager.FirstFreeBlockInBin)) shr CPointerSizeBitShift;
+    LBinGroupNumber := LBinNumber shr 5; //32 bins per group
     {Flag this bin as empty}
     APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]
       and (not (1 shl (LBinNumber and 31)));
@@ -4218,13 +4230,13 @@ var
 begin
   {Round the request up to the next bin size.}
   LBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
-  LBinGroupNumber := LBinNumber div 32;
+  LBinGroupNumber := LBinNumber shr 5; //32 bins per group
 
   LBinGroupMasked := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and -(1 shl (LBinNumber and 31));
   if LBinGroupMasked <> 0 then
   begin
     {Get the actual bin number}
-    LBinNumber := CountTrailingZeros32(LBinGroupMasked) + LBinGroupNumber * 32;
+    LBinNumber := CountTrailingZeros32(LBinGroupMasked) + (LBinGroupNumber shl 5);
   end
   else
   begin
@@ -4235,7 +4247,7 @@ begin
       {There is a suitable group with space:  Get the bin number}
       LBinGroupNumber := CountTrailingZeros32(LBinGroupsMasked);
       {Get the bin in the group with free blocks}
-      LBinNumber := CountTrailingZeros32(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + LBinGroupNumber * 32;
+      LBinNumber := CountTrailingZeros32(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + (LBinGroupNumber shl 5);
     end
     else
     begin
@@ -4328,7 +4340,7 @@ begin
 
     {Determine the bin for blocks of this size.}
     LBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
-    LBinGroupNumber := LBinNumber div 32;
+    LBinGroupNumber := LBinNumber shr 5; //32 bins per group
 
     LPMediumBlockManager := @MediumBlockArenas[0];
     for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
@@ -4542,7 +4554,7 @@ begin
   else
   begin
     {Must be less than half the current size or we don't bother resizing.}
-    if (ANewUserSize * 2) >= LOldUserSize then
+    if (ANewUserSize shl 1) >= LOldUserSize then
     begin
       Result := APointer;
     end
@@ -5428,7 +5440,7 @@ begin
   begin
     {It's a downsize.  Do we need to allocate a smaller block?  Only if the new block size is less than a quarter of
     the available size less SmallBlockDownsizeCheckAdder bytes}
-    if (ANewUserSize * 4 + CSmallBlockDownsizeCheckAdder) >= LOldUserSize then
+    if (ANewUserSize shl 2 + CSmallBlockDownsizeCheckAdder) >= LOldUserSize then
     begin
       {In-place downsize - return the pointer}
       Result := APointer;
@@ -5454,7 +5466,7 @@ begin
     again.  Since reallocations are expensive, there is a minimum upsize percentage to avoid unnecessary future move
     operations.}
     {Must grow with at least 100% + x bytes}
-    LNewUserSize := LOldUserSize * 2 + CSmallBlockUpsizeAdder;
+    LNewUserSize := LOldUserSize shl 1 + CSmallBlockUpsizeAdder;
 
     {Still not large enough?}
     if LNewUserSize < ANewUserSize then
@@ -5526,7 +5538,7 @@ begin
   if NativeUInt(ASize) <= (CMaximumSmallBlockSize - CSmallBlockHeaderSize) then
   begin
     {Convert the size to a pointer to the corresponding manager in the first arena.}
-    LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ASize) + (CSmallBlockHeaderSize - 1)) div CSmallBlockGranularity];
+    LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ASize) + (CSmallBlockHeaderSize - 1)) shr CSmallBlockGranularityBits];
     LPSmallBlockManager := @SmallBlockArenas[0][LSmallBlockTypeIndex];
     Result := FastMM_GetMem_GetSmallBlock(LPSmallBlockManager);
   end
