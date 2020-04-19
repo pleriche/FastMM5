@@ -833,12 +833,12 @@ type
     FirstPartiallyFreeSpan: PSmallBlockSpanHeader; //Do not change position
     LastPartiallyFreeSpan: PSmallBlockSpanHeader; //Do not change position
 
-    {The offset from the start of CurrentSequentialFeedSpan of the last block that was fed sequentially, as well as an
-    ABA counter to solve concurrency issues.}
+    {The offset from the start of SequentialFeedSmallBlockSpan of the last block that was fed sequentially, as well as
+    an ABA counter to solve concurrency issues.}
     LastSequentialFeedBlockOffset: TIntegerWithABACounter;
 
     {The span that is current being used to serve blocks in sequential order, from the last block down to the first.}
-    CurrentSequentialFeedSpan: PSmallBlockSpanHeader;
+    SequentialFeedSmallBlockSpan: PSmallBlockSpanHeader;
 
     {Singly linked list of blocks in this arena that should be freed.  If a block must be freed but the arena is
     currently locked by another thread then the block is added to the head of this list.  It is the responsibility of
@@ -4076,7 +4076,74 @@ end;
 {Attempts to split off a medium block from the sequential feed span for the arena.  Returns the block on success, nil if
 there is not enough sequential feed space available.  The arena does not have to be locked.}
 function FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(APMediumBlockManager: PMediumBlockManager;
-  AMinimumSize, AOptimalSize: Integer): Pointer;
+  AMinimumBlockSize, AOptimalBlockSize: Integer): Pointer;
+{$ifndef X86ASM}
+asm
+  push ebx
+  push esi
+  push edi
+  push ebp
+  push ecx
+
+  {esi = APMediumBlockManager, ebp = AMinimumBlockSize, [esp] = AOptimalBlockSize}
+  mov esi, eax
+  mov ebp, edx
+@TrySequentialFeedLoop:
+
+  {Get the old ABA counter and offset in edx:eax}
+  mov eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  mov edx, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.ABACounter
+
+  {Get the available size in ecx, and check that it is sufficient.}
+  lea ecx, [eax - CMediumBlockSpanHeaderSize]
+  cmp ecx, ebp
+  jl @NoSequentialFeedAvailable
+
+  {Cap the block size at the optimal size.}
+  cmp ecx, [esp]
+  jle @BlockNotTooBig
+  mov ecx, [esp]
+@BlockNotTooBig:
+
+  {Get the new ABA counter and offset in ecx:ebx}
+  mov ebx, eax
+  sub ebx, ecx
+  lea ecx, [edx + 1]
+
+  {Get the current sequential feed span in edi}
+  mov edi, TMediumBlockManager(esi).SequentialFeedMediumBlockSpan
+
+  {Try to grab the block.  If it fails, try again from the start.}
+  lock cmpxchg8b TMediumBlockManager(esi).LastSequentialFeedBlockOffset
+  jne @TrySequentialFeedLoop
+
+  {Current state: eax = next block offset, ebx = this block offset, edi = sequential feed span}
+
+  {Get the block size in ecx}
+  mov ecx, eax
+  sub ecx, ebx
+
+  {The block address is the span + offset.}
+  lea eax, [edi + ebx]
+
+  {Configure the block header.  Medium block spans are always zero initialized, so it is not necessary to set the
+  PreviousBlockIsFree or IsSmallBlockSpan fields since they will already be zero.  Similarly it is not necessary to set
+  the "previous block is free" flag in the next block.}
+  shr ecx, CMediumBlockAlignmentBits
+  mov TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize), cx
+  shr ebx, CMediumBlockAlignmentBits
+  mov TMediumBlockHeader.MediumBlockSpanOffsetMultiple(eax - CMediumBlockHeaderSize), bx
+  mov TMediumBlockHeader.BlockStatusFlags(eax - CMediumBlockHeaderSize), CIsMediumBlockFlag
+
+@NoSequentialFeedAvailable:
+  xor eax, eax
+@Done:
+  pop edx
+  pop ebp
+  pop edi
+  pop esi
+  pop ebx
+{$else}
 var
   LPSequentialFeedSpan: PMediumBlockSpanHeader;
   LPreviousLastSequentialFeedBlockOffset, LNewLastSequentialFeedBlockOffset: TIntegerWithABACounter;
@@ -4088,11 +4155,11 @@ begin
     LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastSequentialFeedBlockOffset;
 
     {Is there space available for at least the minimum size block?}
-    if (LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize) >= AMinimumSize then
+    LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
+    if LBlockSize >= AMinimumBlockSize then
     begin
-      LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
-      if LBlockSize > AOptimalSize then
-        LBlockSize := AOptimalSize;
+      if LBlockSize > AOptimalBlockSize then
+        LBlockSize := AOptimalBlockSize;
 
       {Calculate the new sequential feed parameters.}
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
@@ -4100,12 +4167,12 @@ begin
 
       LPSequentialFeedSpan := APMediumBlockManager.SequentialFeedMediumBlockSpan;
 
-      Result := Pointer(PByte(LPSequentialFeedSpan) + LNewLastSequentialFeedBlockOffset.IntegerValue);
-
       if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
         LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
         LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
       begin
+        Result := Pointer(PByte(LPSequentialFeedSpan) + LNewLastSequentialFeedBlockOffset.IntegerValue);
+
         {Set the header for the block.}
         SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
         SetMediumBlockHeader_SetMediumBlockSpan(Result, LPSequentialFeedSpan);
@@ -4120,6 +4187,7 @@ begin
       Exit(nil);
     end;
   end;
+{$endif}
 end;
 
 {Clears the list of pending frees while attempting to reuse one of a suitable size.  The arena must be locked.}
@@ -4385,9 +4453,12 @@ begin
     for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
     begin
 
-      Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager, AMinimumBlockSize, AOptimalBlockSize);
-      if Result <> nil then
-        Exit;
+      if (LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue  - CMediumBlockSpanHeaderSize) >= AMinimumBlockSize then
+      begin
+        Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager, AMinimumBlockSize, AOptimalBlockSize);
+        if Result <> nil then
+          Exit;
+      end;
 
       Inc(LPMediumBlockManager);
     end;
@@ -4969,7 +5040,7 @@ begin
   {Set up the block span}
   LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
   LPSmallBlockSpan.FirstFreeBlock := nil;
-  APSmallBlockManager.CurrentSequentialFeedSpan := LPSmallBlockSpan;
+  APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
   {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header,
   as well as the difference in the medium and small block header sizes for the last block.  All the sequential
   feed blocks are initially marked as used.  This implies that the sequential feed span can never be freed until
@@ -5016,7 +5087,7 @@ asm
   lea ecx, [edx + 1]
 
   {Get the current sequential feed span in edi}
-  mov edi, TSmallBlockManager(esi).CurrentSequentialFeedSpan
+  mov edi, TSmallBlockManager(esi).SequentialFeedSmallBlockSpan
 
   cmp eax, CSmallBlockSpanHeaderSize
   jle @NoSequentialFeedAvailable
@@ -5055,7 +5126,7 @@ begin
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
       - APSmallBlockManager.BlockSize + (Int64(1) shl 32);
 
-    LPSequentialFeedSpan := APSmallBlockManager.CurrentSequentialFeedSpan;
+    LPSequentialFeedSpan := APSmallBlockManager.SequentialFeedSmallBlockSpan;
 
     if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
       Exit(nil);
@@ -6288,7 +6359,7 @@ begin
                 still a small block span.}
                 if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
                 begin
-                  if LPSmallBlockManager.CurrentSequentialFeedSpan = LPMediumBlock then
+                  if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
                   begin
                     LSmallBlockOffset := LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue;
                     if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
@@ -7690,7 +7761,7 @@ begin
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue := 0;
-      LPSmallBlockManager.CurrentSequentialFeedSpan := nil;
+      LPSmallBlockManager.SequentialFeedSmallBlockSpan := nil;
       LPSmallBlockManager.PendingFreeList := nil;
     end;
   end;
