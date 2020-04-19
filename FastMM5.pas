@@ -1,6 +1,6 @@
 {
 
-FastMM 5 Beta 1
+FastMM 5 Beta 2
 
 Description:
   A fast replacement memory manager for Embarcadero Delphi applications that scales well under multi-threaded usage, is
@@ -60,6 +60,12 @@ Usage Instructions:
   The optimization strategy of the memory manager may be tuned via FastMM_SetOptimizationStrategy.  It can be set to
   favour performance, low memory usage, or a blend of both.  The default strategy is to blend the performance and low
   memory usage goals.
+
+Supported Compilers:
+  Delphi XE3 and later
+
+Supported Platforms:
+  Windows, 32-bit and 64-bit
 
 }
 
@@ -154,7 +160,9 @@ type
 
   {The debug block header.  Must be a multiple of 64 in order to guarantee that minimum block alignment restrictions
   are honoured.}
+{$PointerMath On}
   PFastMM_DebugBlockHeader = ^TFastMM_DebugBlockHeader;
+{$PointerMath Off}
   TFastMM_DebugBlockHeader = packed record
     {The first two pointer sized slots cannot be used by the debug block header.  The medium block manager uses the
     first two pointers in a free block for the free block linked list, and the small block manager uses the first
@@ -628,8 +636,6 @@ const
   {$endif}
 
   {Block status flags}
-  CBlockStatusWordSize = 2;
-
   CBlockIsFreeFlag = 1;
   CHasDebugInfoFlag = 2;
   CIsSmallBlockFlag = 4;
@@ -780,7 +786,10 @@ type
       1: (IntegerValue, ABACounter: Integer);
   end;
 
+  TBlockStatusFlags = Word;
+
 {$PointerMath On}
+  PBlockStatusFlags = ^TBlockStatusFlags;
   PSmallIntArray = ^SmallInt;
   PIntegerArray = ^Integer;
   PInt64Array = ^Int64;
@@ -805,9 +814,11 @@ type
     Bits 3..15 (0..8191):
       The offset of the block from the start of the small block span header, divided by 64.
     }
-    BlockStatusFlagsAndSpanOffset: Word;
+    BlockStatusFlagsAndSpanOffset: TBlockStatusFlags;
   end;
+{$PointerMath On}
   PSmallBlockHeader = ^TSmallBlockHeader;
+{$PointerMath Off}
 
   {Small block layout:
     Offset: -2 = This block's header
@@ -902,9 +913,11 @@ type
     {True if this medium block is used as a small block span.}
     IsSmallBlockSpan: Boolean;
     {The block status and type}
-    BlockStatusFlags: Word;
+    BlockStatusFlags: TBlockStatusFlags;
   end;
+{$PointerMath On}
   PMediumBlockHeader = ^TMediumBlockHeader;
+{$PointerMath Off}
 
   {Medium block layout:
    Offset: - SizeOf(TMediumBlockHeader) - 4 = Integer containing the previous block size (only if PreviousBlockIsFree = True)
@@ -937,14 +950,23 @@ type
     FirstBlockHeader: TMediumBlockHeader;
   end;
 
-  {A medium block that is unused}
-  PMediumFreeBlock = ^TMediumFreeBlock;
-  TMediumFreeBlock = record
+  {The contents of a medium block that is unused.  This data follows the block header.}
+  PMediumFreeBlockContent = ^TMediumFreeBlockContent;
+  TMediumFreeBlockContent = record
     {This will point to the bin if this is the last free medium block in the bin.}
-    NextFreeMediumBlock: PMediumFreeBlock;
+    NextFreeMediumBlock: PMediumFreeBlockContent;
     {This will point to the bin if this is the first free medium block in the bin.}
-    PreviousFreeMediumBlock: PMediumFreeBlock;
+    PreviousFreeMediumBlock: PMediumFreeBlockContent;
   end;
+
+  {Free medium blocks always store their size before the header of the next block}
+  TMediumFreeBlockFooter = packed record
+    MediumFreeBlockSize: Integer;
+    NextBlockHeader: TMediumBlockHeader;
+  end;
+{$PointerMath On}
+  PMediumFreeBlockFooter = ^TMediumFreeBlockFooter;
+{$PointerMath Off}
 
   TMediumBlockManager = record
     {Maintains a circular list of all medium block spans to enable memory leak detection on program shutdown.}
@@ -982,7 +1004,9 @@ type
   PLargeBlockManager = ^TLargeBlockManager;
 
   {Large block header.  Always 64 bytes in size.}
+  {$PointerMath On}
   PLargeBlockHeader = ^TLargeBlockHeader;
+  {$PointerMath Off}
   TLargeBlockHeader = packed record
     {Points to the previous and next large blocks.  This circular linked list is used to track memory leaks on program
     shutdown.}
@@ -1003,7 +1027,7 @@ type
     Padding: array[0..40] of Byte;
 {$endif}
     {The block status and type}
-    BlockStatusFlags: Word;
+    BlockStatusFlags: TBlockStatusFlags;
   end;
 
   TLargeBlockManager = record
@@ -2605,10 +2629,10 @@ begin
   Result := AddTokenValue_ASCIIDump(ATokenValues, CEventLogTokenASCIIDump, APBlock, LMemoryDumpSize, Result, APBufferEnd);
 
   {If this is a debug sub-block, log the additional debug information.}
-  LBlockHeader := PWord(PByte(APBlock) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APBlock)[-1];
   if LBlockHeader and (CIsSmallBlockFlag or CIsMediumBlockFlag or CIsLargeBlockFlag or CIsDebugBlockFlag) = CIsDebugBlockFlag then
   begin
-    LPDebugBlockHeader := PFastMM_DebugBlockHeader(PByte(APBlock) - CDebugBlockHeaderSize);
+    LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APBlock)[-1];
 
     Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenAllocatedByThread, LPDebugBlockHeader.AllocatedByThread,
       Result, APBufferEnd);
@@ -2841,37 +2865,31 @@ end;
 {Returns True if the block is not in use.}
 function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
 begin
-  Result := PWord(PByte(APSmallMediumOrLargeBlock) - CBlockStatusWordSize)^ and CBlockIsFreeFlag <> 0;
+  Result := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and CBlockIsFreeFlag <> 0;
 end;
 
 {Tags a block as free, without affecting any other flags.}
 procedure SetBlockIsFreeFlag(APSmallMediumOrLargeBlock: Pointer; ABlockIsFree: Boolean); inline;
-var
-  LPBlockStatus: PWord;
 begin
-  LPBlockStatus := PWord(PByte(APSmallMediumOrLargeBlock) - CBlockStatusWordSize);
   if ABlockIsFree then
-    LPBlockStatus^ := LPBlockStatus^ or CBlockIsFreeFlag
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CBlockIsFreeFlag
   else
-    LPBlockStatus^ := LPBlockStatus^ and (not CBlockIsFreeFlag);
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and (not CBlockIsFreeFlag);
 end;
 
 {Returns True if the block contains a debug sub-block.}
 function BlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
 begin
-  Result := PWord(PByte(APSmallMediumOrLargeBlock) - CBlockStatusWordSize)^ and CHasDebugInfoFlag <> 0;
+  Result := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and CHasDebugInfoFlag <> 0;
 end;
 
 {Tags a block as having debug info, without affecting any other flags.}
 procedure SetBlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer; ABlockHasDebugInfo: Boolean); inline;
-var
-  LPBlockStatus: PWord;
 begin
-  LPBlockStatus := PWord(PByte(APSmallMediumOrLargeBlock) - CBlockStatusWordSize);
   if ABlockHasDebugInfo then
-    LPBlockStatus^ := LPBlockStatus^ or CHasDebugInfoFlag
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CHasDebugInfoFlag
   else
-    LPBlockStatus^ := LPBlockStatus^ and (not CHasDebugInfoFlag);
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and (not CHasDebugInfoFlag);
 end;
 
 function CalculateDebugBlockHeaderChecksum(APDebugBlockHeader: PFastMM_DebugBlockHeader): NativeUInt;
@@ -3156,7 +3174,7 @@ function FastMM_FreeMem_FreeDebugBlock(APointer: Pointer): Integer;
 var
   LPActualBlock: PFastMM_DebugBlockHeader;
 begin
-  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+  LPActualBlock := @PFastMM_DebugBlockHeader(APointer)[-1];
 
   {Check that the debug header and footer are intact}
   if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
@@ -3186,7 +3204,7 @@ var
   LPActualBlock: PFastMM_DebugBlockHeader;
   LAvailableSpace: NativeInt;
 begin
-  LPActualBlock := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+  LPActualBlock := @PFastMM_DebugBlockHeader(APointer)[-1];
 
   {Check that the debug header and footer are intact}
   if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
@@ -3242,11 +3260,11 @@ var
 begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
   not much that can be done to provide additional error information.}
-  if PWord(PByte(APointer) - CBlockStatusWordSize)^ <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
+  if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
     Exit;
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
-  LPDebugBlockHeader := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize);
+  LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
     Exit;
@@ -3337,8 +3355,7 @@ begin
   begin
     LPNextLargeBlock := PPointer(LPCurrentLargeBlock)^;
 
-    LPLargeBlockHeader := Pointer(PByte(LPCurrentLargeBlock) - CLargeBlockHeaderSize);
-
+    LPLargeBlockHeader := @PLargeBlockHeader(LPCurrentLargeBlock)[-1];
     UnlinkLargeBlock(LPLargeBlockHeader);
 
     LPCurrentLargeBlock := LPNextLargeBlock;
@@ -3353,8 +3370,7 @@ begin
   begin
     LPNextLargeBlock := PPointer(LPCurrentLargeBlock)^;
 
-    LPLargeBlockHeader := Pointer(PByte(LPCurrentLargeBlock) - CLargeBlockHeaderSize);
-
+    LPLargeBlockHeader := @PLargeBlockHeader(LPCurrentLargeBlock)[-1];
     if FastMM_FreeMem_FreeLargeBlock_ReleaseVM(LPLargeBlockHeader) <> 0 then
       Result := -1;
 
@@ -3470,7 +3486,7 @@ var
   LPLargeBlockManager: PLargeBlockManager;
   LOldPendingFreeList: Pointer;
 begin
-  LPLargeBlockHeader := Pointer(PByte(APLargeBlock) - CLargeBlockHeaderSize);
+  LPLargeBlockHeader := @PLargeBlockHeader(APLargeBlock)[-1];
   LPLargeBlockManager := LPLargeBlockHeader.LargeBlockArena;
 
   {Try to lock the large block manager so that the block may be freed.}
@@ -3512,7 +3528,7 @@ var
   LPNextSegment: Pointer;
 begin
   {Get the block header}
-  LPLargeBlockHeader := PLargeBlockHeader(PByte(APointer) - CLargeBlockHeaderSize);
+  LPLargeBlockHeader := @PLargeBlockHeader(APointer)[-1];
   {Large block - size is (16 + 4) less than the allocated size}
   LOldAvailableSize := LPLargeBlockHeader.ActualBlockSize - CLargeBlockHeaderSize;
   {Is it an upsize or a downsize?}
@@ -3562,7 +3578,7 @@ begin
       {If it's a large block - store the actual user requested size (it may not be if the block that is being
       reallocated from was previously downsized)}
       if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
-        PLargeBlockHeader(PByte(Result) - CLargeBlockHeaderSize).UserAllocatedSize := ANewSize;
+        PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewSize;
       {The user allocated size is stored for large blocks}
       LOldUserSize := LPLargeBlockHeader.UserAllocatedSize;
       {The number of bytes to move is the old user size.}
@@ -3645,81 +3661,74 @@ end;
 
 function GetMediumBlockSpan(APMediumBlock: Pointer): PMediumBlockSpanHeader; inline;
 begin
-  Result := PMediumBlockSpanHeader(PByte(APMediumBlock)
-    - (PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSpanOffsetMultiple shl CMediumBlockAlignmentBits));
+  Result := PMediumBlockSpanHeader(NativeUInt(APMediumBlock)
+    - (PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSpanOffsetMultiple shl CMediumBlockAlignmentBits));
 end;
 
 function GetMediumBlockSize(APMediumBlock: Pointer): Integer; inline;
 begin
-  Result := PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple shl CMediumBlockAlignmentBits;
+  Result := PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSizeMultiple shl CMediumBlockAlignmentBits;
 end;
 
 procedure SetMediumBlockHeader_SetIsSmallBlockSpan(APMediumBlock: Pointer; AIsSmallBlockSpan: Boolean); inline;
 begin
-  PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).IsSmallBlockSpan := AIsSmallBlockSpan;
+  PMediumBlockHeader(APMediumBlock)[-1].IsSmallBlockSpan := AIsSmallBlockSpan;
 end;
 
 procedure SetMediumBlockHeader_SetMediumBlockSpan(APMediumBlock: Pointer; APMediumBlockSpan: PMediumBlockSpanHeader); inline;
 begin
   {Store the offset to the medium block span.}
-  PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSpanOffsetMultiple :=
-    (NativeInt(APMediumBlock) - NativeInt(APMediumBlockSpan)) shr CMediumBlockAlignmentBits;
+  PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSpanOffsetMultiple :=
+    (NativeUInt(APMediumBlock) - NativeUInt(APMediumBlockSpan)) shr CMediumBlockAlignmentBits;
 end;
 
 procedure SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock: Pointer; ABlockSize: Integer; ABlockIsFree: Boolean;
   ABlockHasDebugInfo: Boolean); inline;
+var
+  LPNextBlock: Pointer;
 begin
   if ABlockIsFree then
   begin
 
     if ABlockHasDebugInfo then
-    begin
-      PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).BlockStatusFlags :=
-        CHasDebugInfoFlag + CBlockIsFreeFlag + CIsMediumBlockFlag;
-    end
+      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CHasDebugInfoFlag + CBlockIsFreeFlag + CIsMediumBlockFlag
     else
-    begin
-      PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).BlockStatusFlags :=
-        CBlockIsFreeFlag + CIsMediumBlockFlag;
-    end;
+      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CBlockIsFreeFlag + CIsMediumBlockFlag;
 
+    LPNextBlock := @PByte(APMediumBlock)[ABlockSize];
     {If the block is free then the size must also be stored just before the header of the next block.}
-    PInteger(PByte(APMediumBlock) + ABlockSize - (CMediumBlockHeaderSize + SizeOf(Integer)))^ := ABlockSize;
+    PMediumFreeBlockFooter(LPNextBlock)[-1].MediumFreeBlockSize := ABlockSize;
 
     {Update the flag in the next block header to indicate that this block is free.}
-    PMediumBlockHeader(PByte(APMediumBlock) + ABlockSize - CMediumBlockHeaderSize).PreviousBlockIsFree := True;
+    PMediumBlockHeader(LPNextBlock)[-1].PreviousBlockIsFree := True;
 
   end
   else
   begin
 
     if ABlockHasDebugInfo then
-    begin
-      PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).BlockStatusFlags :=
-        CHasDebugInfoFlag + CIsMediumBlockFlag;
-    end
+      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CHasDebugInfoFlag + CIsMediumBlockFlag
     else
-    begin
-      PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).BlockStatusFlags := CIsMediumBlockFlag;
-    end;
+      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CIsMediumBlockFlag;
 
+    LPNextBlock := @PByte(APMediumBlock)[ABlockSize];
     {Update the flag in the next block to indicate that this block is in use.  The block size is not stored before
     the header of the next block if it is not free.}
-    PMediumBlockHeader(PByte(APMediumBlock) + ABlockSize - CMediumBlockHeaderSize).PreviousBlockIsFree := False;
+    PMediumBlockHeader(LPNextBlock)[-1].PreviousBlockIsFree := False;
 
   end;
 
   {Store the block size.}
-  PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).MediumBlockSizeMultiple := ABlockSize shr CMediumBlockAlignmentBits;
+  PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSizeMultiple := ABlockSize shr CMediumBlockAlignmentBits;
 end;
 
 {Inserts a medium block into the appropriate medium block bin.  The header for APMediumFreeBlock must already be set
 correctly.}
-procedure InsertMediumBlockIntoBin(APMediumBlockManager: PMediumBlockManager; APMediumFreeBlock: PMediumFreeBlock;
+procedure InsertMediumBlockIntoBin(APMediumBlockManager: PMediumBlockManager; APMediumFreeBlock: PMediumFreeBlockContent;
   AMediumBlockSize: Integer);
 var
   LBinNumber, LBinGroupNumber: Cardinal;
-  LPBin, LPInsertAfterBlock, LPInsertBeforeBlock: PMediumFreeBlock;
+  LPBin, LPInsertAfterBlock, LPInsertBeforeBlock: PMediumFreeBlockContent;
 begin
   {Get the bin for blocks of this size.  If the block is not aligned to a bin size, then put it in the closest bin
   smaller than the block size.}
@@ -3759,9 +3768,9 @@ end;
 
 {Removes a medium block from the circular linked list of free blocks.  Does not change any header flags.  The medium
 block manager should be locked before calling this procedure.}
-procedure RemoveMediumFreeBlockFromBin(APMediumBlockManager: PMediumBlockManager; APMediumFreeBlock: PMediumFreeBlock);
+procedure RemoveMediumFreeBlockFromBin(APMediumBlockManager: PMediumBlockManager; APMediumFreeBlock: PMediumFreeBlockContent);
 var
-  LPPreviousFreeBlock, LPNextFreeBlock: PMediumFreeBlock;
+  LPPreviousFreeBlock, LPNextFreeBlock: PMediumFreeBlockContent;
   LBinNumber, LBinGroupNumber: Cardinal;
 begin
   {Get the current previous and next blocks}
@@ -3854,106 +3863,6 @@ begin
 
 end;
 
-{Allocates a new sequential feed medium block span and immediately splits off a block of the requested size.  The block
-size must be a multiple of 64 and medium blocks must be locked.  Returns a pointer to the first block.  The block
-manager must be locked.}
-function FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(APMediumBlockManager: PMediumBlockManager;
-  AFirstBlockSize: Integer): Pointer;
-var
-  LNewSpanSize: Integer;
-  LOldFirstMediumBlockSpan, LPNewSpan: PMediumBlockSpanHeader;
-begin
-  {Bin the current sequential feed remainder}
-  BinMediumSequentialFeedRemainder(APMediumBlockManager);
-  {Allocate a new sequential feed block pool.  The block is assumed to be zero initialized.}
-  LNewSpanSize := DefaultMediumBlockSpanSize;
-  LPNewSpan := OS_AllocateVirtualMemory(LNewSpanSize, False, False);
-  if LPNewSpan <> nil then
-  begin
-    LPNewSpan.SpanSize := LNewSpanSize;
-    LPNewSpan.MediumBlockArena := APMediumBlockManager;
-
-    {Insert this span into the circular linked list of medium block spans}
-    LOldFirstMediumBlockSpan := APMediumBlockManager.FirstMediumBlockSpanHeader;
-    LPNewSpan.PreviousMediumBlockSpanHeader := PMediumBlockSpanHeader(APMediumBlockManager);
-    APMediumBlockManager.FirstMediumBlockSpanHeader := LPNewSpan;
-    LPNewSpan.NextMediumBlockSpanHeader := LOldFirstMediumBlockSpan;
-    LOldFirstMediumBlockSpan.PreviousMediumBlockSpanHeader := LPNewSpan;
-
-    {Store the sequential feed span trailer.  Technically, this should not be necessary since the span is
-    zero-initialized and the only flag that really matters is the "is free block" flag.}
-    PMediumBlockHeader(PByte(LPNewSpan) + (LNewSpanSize - CMediumBlockHeaderSize)).BlockStatusFlags := CIsMediumBlockFlag;
-
-    {Get the result and set its header.}
-    Result := Pointer(PByte(LPNewSpan) + LNewSpanSize - AFirstBlockSize);
-    SetMediumBlockHeader_SetSizeAndFlags(Result, AFirstBlockSize, False, False);
-    SetMediumBlockHeader_SetMediumBlockSpan(Result, LPNewSpan);
-
-    {Install this is the new sequential feed span.  The new offset must be set after the new span and ABA counter,
-    since other threads may immediately split off blocks the moment the new offset is set.}
-    Inc(APMediumBlockManager.LastSequentialFeedBlockOffset.ABACounter);
-    APMediumBlockManager.SequentialFeedMediumBlockSpan := LPNewSpan;
-
-    {May need a memory fence here for ARM.}
-
-    APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue := NativeInt(Result) - NativeInt(LPNewSpan);
-  end
-  else
-  begin
-    {Out of memory}
-    Result := nil;
-  end;
-end;
-
-{Attempts to split off a medium block from the sequential feed span for the arena.  Returns the block on success, nil if
-there is not enough sequential feed space available.  The arena does not have to be locked.}
-function FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(APMediumBlockManager: PMediumBlockManager;
-  AMinimumSize, AOptimalSize: Integer): Pointer;
-var
-  LPSequentialFeedSpan: PMediumBlockSpanHeader;
-  LPreviousLastSequentialFeedBlockOffset, LNewLastSequentialFeedBlockOffset: TIntegerWithABACounter;
-  LBlockSize: Integer;
-begin
-  {The arena is not necessarily locked, so we may have to try several times to split off a block.}
-  while True do
-  begin
-    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastSequentialFeedBlockOffset;
-
-    {Is there space available for at least the minimum size block?}
-    if (LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize) >= AMinimumSize then
-    begin
-      LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
-      if LBlockSize > AOptimalSize then
-        LBlockSize := AOptimalSize;
-
-      {Calculate the new sequential feed parameters.}
-      LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
-        - LBlockSize + Int64(1) shl 32;
-
-      LPSequentialFeedSpan := APMediumBlockManager.SequentialFeedMediumBlockSpan;
-
-      Result := Pointer(PByte(LPSequentialFeedSpan) + LNewLastSequentialFeedBlockOffset.IntegerValue);
-
-      if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
-        LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
-        LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
-      begin
-        {Set the header for the block.}
-        SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
-        SetMediumBlockHeader_SetMediumBlockSpan(Result, LPSequentialFeedSpan);
-
-        Exit;
-      end;
-
-    end
-    else
-    begin
-      {There is either no sequential feed span, or it has insufficient space.}
-      Exit(nil);
-    end;
-  end;
-end;
-
 {Subroutine for FastMM_FreeMem_FreeMediumBlock.  The medium block manager must already be locked.  Optionally unlocks the
 medium block manager before exit.  Returns 0 on success, -1 on failure.}
 function FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(APMediumBlockManager: PMediumBlockManager;
@@ -3978,9 +3887,9 @@ begin
     end;
 
     {Combine with the previous block, if it is free.}
-    if PMediumBlockHeader(PByte(APMediumBlock) - CMediumBlockHeaderSize).PreviousBlockIsFree then
+    if PMediumBlockHeader(APMediumBlock)[-1].PreviousBlockIsFree then
     begin
-      LPreviousBlockSize := PInteger(PByte(APMediumBlock) - CMediumBlockHeaderSize - SizeOf(Integer))^;
+      LPreviousBlockSize := PMediumFreeBlockFooter(APMediumBlock)[-1].MediumFreeBlockSize;
       {This is the new current block}
       APMediumBlock := Pointer(PByte(APMediumBlock) - LPreviousBlockSize);
 
@@ -4113,12 +4022,112 @@ begin
 
 end;
 
+{Allocates a new sequential feed medium block span and immediately splits off a block of the requested size.  The block
+size must be a multiple of 64 and medium blocks must be locked.  Returns a pointer to the first block.  The block
+manager must be locked.}
+function FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(APMediumBlockManager: PMediumBlockManager;
+  AFirstBlockSize: Integer): Pointer;
+var
+  LNewSpanSize: Integer;
+  LOldFirstMediumBlockSpan, LPNewSpan: PMediumBlockSpanHeader;
+begin
+  {Bin the current sequential feed remainder}
+  BinMediumSequentialFeedRemainder(APMediumBlockManager);
+  {Allocate a new sequential feed block pool.  The block is assumed to be zero initialized.}
+  LNewSpanSize := DefaultMediumBlockSpanSize;
+  LPNewSpan := OS_AllocateVirtualMemory(LNewSpanSize, False, False);
+  if LPNewSpan <> nil then
+  begin
+    LPNewSpan.SpanSize := LNewSpanSize;
+    LPNewSpan.MediumBlockArena := APMediumBlockManager;
+
+    {Insert this span into the circular linked list of medium block spans}
+    LOldFirstMediumBlockSpan := APMediumBlockManager.FirstMediumBlockSpanHeader;
+    LPNewSpan.PreviousMediumBlockSpanHeader := PMediumBlockSpanHeader(APMediumBlockManager);
+    APMediumBlockManager.FirstMediumBlockSpanHeader := LPNewSpan;
+    LPNewSpan.NextMediumBlockSpanHeader := LOldFirstMediumBlockSpan;
+    LOldFirstMediumBlockSpan.PreviousMediumBlockSpanHeader := LPNewSpan;
+
+    {Store the sequential feed span trailer.  Technically, this should not be necessary since the span is
+    zero-initialized and the only flag that really matters is the "is free block" flag.}
+    PMediumBlockHeader(PByte(LPNewSpan) + LNewSpanSize)[-1].BlockStatusFlags := CIsMediumBlockFlag;
+
+    {Get the result and set its header.}
+    Result := Pointer(PByte(LPNewSpan) + LNewSpanSize - AFirstBlockSize);
+    SetMediumBlockHeader_SetSizeAndFlags(Result, AFirstBlockSize, False, False);
+    SetMediumBlockHeader_SetMediumBlockSpan(Result, LPNewSpan);
+
+    {Install this is the new sequential feed span.  The new offset must be set after the new span and ABA counter,
+    since other threads may immediately split off blocks the moment the new offset is set.}
+    Inc(APMediumBlockManager.LastSequentialFeedBlockOffset.ABACounter);
+    APMediumBlockManager.SequentialFeedMediumBlockSpan := LPNewSpan;
+
+    {May need a memory fence here for ARM.}
+
+    APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue := NativeInt(Result) - NativeInt(LPNewSpan);
+  end
+  else
+  begin
+    {Out of memory}
+    Result := nil;
+  end;
+end;
+
+{Attempts to split off a medium block from the sequential feed span for the arena.  Returns the block on success, nil if
+there is not enough sequential feed space available.  The arena does not have to be locked.}
+function FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(APMediumBlockManager: PMediumBlockManager;
+  AMinimumSize, AOptimalSize: Integer): Pointer;
+var
+  LPSequentialFeedSpan: PMediumBlockSpanHeader;
+  LPreviousLastSequentialFeedBlockOffset, LNewLastSequentialFeedBlockOffset: TIntegerWithABACounter;
+  LBlockSize: Integer;
+begin
+  {The arena is not necessarily locked, so we may have to try several times to split off a block.}
+  while True do
+  begin
+    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastSequentialFeedBlockOffset;
+
+    {Is there space available for at least the minimum size block?}
+    if (LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize) >= AMinimumSize then
+    begin
+      LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
+      if LBlockSize > AOptimalSize then
+        LBlockSize := AOptimalSize;
+
+      {Calculate the new sequential feed parameters.}
+      LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
+        - LBlockSize + (Int64(1) shl 32);
+
+      LPSequentialFeedSpan := APMediumBlockManager.SequentialFeedMediumBlockSpan;
+
+      Result := Pointer(PByte(LPSequentialFeedSpan) + LNewLastSequentialFeedBlockOffset.IntegerValue);
+
+      if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
+        LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
+        LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
+      begin
+        {Set the header for the block.}
+        SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
+        SetMediumBlockHeader_SetMediumBlockSpan(Result, LPSequentialFeedSpan);
+
+        Exit;
+      end;
+
+    end
+    else
+    begin
+      {There is either no sequential feed span, or it has insufficient space.}
+      Exit(nil);
+    end;
+  end;
+end;
+
 {Clears the list of pending frees while attempting to reuse one of a suitable size.  The arena must be locked.}
 function FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(APMediumBlockManager: PMediumBlockManager;
   AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
 var
   LBlockSize, LBestMatchBlockSize, LSecondSplitSize: Integer;
-  LPSecondSplit: PMediumFreeBlock;
+  LPSecondSplit: PMediumFreeBlockContent;
   LPPendingFreeBlock, LPNextPendingFreeBlock: Pointer;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
 begin
@@ -4196,7 +4205,7 @@ begin
         {Adjust the block size}
         LBestMatchBlockSize := AOptimalBlockSize;
         {Split the block in two}
-        LPSecondSplit := PMediumFreeBlock(PByte(Result) + LBestMatchBlockSize);
+        LPSecondSplit := PMediumFreeBlockContent(PByte(Result) + LBestMatchBlockSize);
         LPMediumBlockSpan := GetMediumBlockSpan(Result);
         SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, True, False);
         SetMediumBlockHeader_SetMediumBlockSpan(LPSecondSplit, LPMediumBlockSpan);
@@ -4225,7 +4234,7 @@ function FastMM_GetMem_GetMediumBlock_TryAllocateFreeBlock(APMediumBlockManager:
   AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
 var
   LBinGroupNumber, LBinNumber, LBinGroupMasked, LBinGroupsMasked, LBlockSize, LSecondSplitSize: Integer;
-  LPMediumBin, LPSecondSplit: PMediumFreeBlock;
+  LPMediumBin, LPSecondSplit: PMediumFreeBlockContent;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
 begin
   {Round the request up to the next bin size.}
@@ -4282,7 +4291,7 @@ begin
     {Adjust the block size}
     LBlockSize := AOptimalBlockSize;
     {Split the block in two}
-    LPSecondSplit := PMediumFreeBlock(PByte(Result) + LBlockSize);
+    LPSecondSplit := PMediumFreeBlockContent(PByte(Result) + LBlockSize);
     SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, True, False);
     SetMediumBlockHeader_SetMediumBlockSpan(LPSecondSplit, LPMediumBlockSpan);
 
@@ -4503,7 +4512,7 @@ begin
             else
             begin
               {Split the block in two}
-              LPNextBlock := PMediumFreeBlock(PByte(APointer) + LNewBlockSize);
+              LPNextBlock := PMediumFreeBlockContent(PByte(APointer) + LNewBlockSize);
 
               SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, True, False);
               SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
@@ -4543,7 +4552,7 @@ begin
     begin
       {If it's a large block - store the actual user requested size}
       if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
-        PLargeBlockHeader(PByte(Result) - CLargeBlockHeaderSize).UserAllocatedSize := ANewUserSize;
+        PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewUserSize;
       {Move the data across}
       MoveMultipleOf64(APointer^, Result^, LOldUserSize);
       {Free the old block}
@@ -4625,13 +4634,13 @@ begin
 
     if ABlockHasDebugInfo then
     begin
-      PSmallBlockHeader(PByte(APSmallBlock) - CSmallBlockHeaderSize).BlockStatusFlagsAndSpanOffset :=
+      PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
         (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
         + (CHasDebugInfoFlag + CBlockIsFreeFlag + CIsSmallBlockFlag);
     end
     else
     begin
-      PSmallBlockHeader(PByte(APSmallBlock) - CSmallBlockHeaderSize).BlockStatusFlagsAndSpanOffset :=
+      PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
         (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
         + (CBlockIsFreeFlag + CIsSmallBlockFlag);
     end;
@@ -4642,13 +4651,13 @@ begin
 
     if ABlockHasDebugInfo then
     begin
-      PSmallBlockHeader(PByte(APSmallBlock) - CSmallBlockHeaderSize).BlockStatusFlagsAndSpanOffset :=
+      PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
         (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
         + (CHasDebugInfoFlag + CIsSmallBlockFlag);
     end
     else
     begin
-      PSmallBlockHeader(PByte(APSmallBlock) - CSmallBlockHeaderSize).BlockStatusFlagsAndSpanOffset :=
+      PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
         ((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift
         + CIsSmallBlockFlag;
     end;
@@ -4658,11 +4667,9 @@ begin
 end;
 
 function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; inline;
-var
-  LBlockOffset: NativeInt;
 begin
-  LBlockOffset := (CDropSmallBlockFlagsMask and PWord(PByte(APSmallBlock) - CBlockStatusWordSize)^) shl CSmallBlockSpanOffsetBitShift;
-  Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment) - LBlockOffset);
+  Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment)
+    - (CDropSmallBlockFlagsMask and PBlockStatusFlags(APSmallBlock)[-1]) shl CSmallBlockSpanOffsetBitShift);
 end;
 
 {Subroutine for FastMM_FreeMem_FreeSmallBlock.  The small block manager must already be locked.  Optionally unlocks the
@@ -4988,7 +4995,7 @@ end;
 
 {Attempts to split off a small block from the sequential feed span for the arena.  Returns the block on success, nil if
 there is no available sequential feed block.  The arena does not have to be locked.}
-function FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock(APSmallBlockManager: PSmallBlockManager): Pointer;
+function FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager: PSmallBlockManager): Pointer;
 {$ifdef X86ASM}
 asm
   push ebx
@@ -5046,7 +5053,7 @@ begin
 
     {Subtract the block size and increment the ABA counter to the new sequential feed offset.}
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
-      - APSmallBlockManager.BlockSize + Int64(1) shl 32;
+      - APSmallBlockManager.BlockSize + (Int64(1) shl 32);
 
     LPSequentialFeedSpan := APSmallBlockManager.CurrentSequentialFeedSpan;
 
@@ -5094,7 +5101,7 @@ asm
   {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
   fill pattern.}
 @CheckDebugInfo:
-  test [esi - CSmallBlockHeaderSize], CHasDebugInfoFlag
+  test word ptr [esi - CSmallBlockHeaderSize], CHasDebugInfoFlag
   jz @BlockHasNoDebugInfo
   call CheckFreeDebugBlockIntact
   test al, al
@@ -5191,6 +5198,7 @@ asm
 {$else}
 var
   LPFirstPartiallyFreeSpan, LPNewFirstPartiallyFreeSpan: PSmallBlockSpanHeader;
+  LPNextFreeBlock: Pointer;
 begin
   LPFirstPartiallyFreeSpan := APSmallBlockManager.FirstPartiallyFreeSpan;
 
@@ -5201,14 +5209,15 @@ begin
   SetBlockIsFreeFlag(Result, False);
 
   {The current content of the first free block will be a pointer to the next free block in the span.}
-  LPFirstPartiallyFreeSpan.FirstFreeBlock := PPointer(Result)^;
+  LPNextFreeBlock := PPointer(Result)^;
+  LPFirstPartiallyFreeSpan.FirstFreeBlock := LPNextFreeBlock;
 
   {Increment the number of used blocks}
   Inc(LPFirstPartiallyFreeSpan.BlocksInUse);
 
   {If there are no more free blocks in the small block span then it must be removed from the circular linked list of
   small block spans with available blocks.}
-  if LPFirstPartiallyFreeSpan.FirstFreeBlock = nil then
+  if LPNextFreeBlock = nil then
   begin
     LPNewFirstPartiallyFreeSpan := LPFirstPartiallyFreeSpan.NextPartiallyFreeSpan;
     APSmallBlockManager.FirstPartiallyFreeSpan := LPNewFirstPartiallyFreeSpan;
@@ -5289,7 +5298,7 @@ asm
   cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
   jle @Attempt1NoSequentialFeedBlockAvailable
   push eax
-  call FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock
+  call FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan
   pop edx
   test eax, eax
   jz @Attempt1SequentialFeedFailed
@@ -5340,7 +5349,7 @@ asm
   cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
   jle @Attempt2NoSequentialFeedBlockAvailable
   push eax
-  call FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock
+  call FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan
   pop edx
   test eax, eax
   jz @Attempt2SequentialFeedFailed
@@ -5416,7 +5425,7 @@ begin
       does not require the manager to be locked.}
       if APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue > CSmallBlockSpanHeaderSize then
       begin
-        Result := FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock(APSmallBlockManager);
+        Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
         if Result <> nil then
           Exit;
       end;
@@ -5460,7 +5469,7 @@ begin
         check again before allocating a new one.}
         if APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue > CSmallBlockSpanHeaderSize then
         begin
-          Result := FastMM_GetMem_GetSmallBlock_TryGetSequentialFeedBlock(APSmallBlockManager);
+          Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
           if Result <> nil then
           begin
             APSmallBlockManager.SmallBlockManagerLocked := 0;
@@ -5658,7 +5667,7 @@ var
   LBlockHeader: Integer;
 begin
   {Read the flags from the block header.}
-  LBlockHeader := PWord(PByte(APointer) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
 
   {Is it a small block that is in use?}
   if LBlockHeader and (CBlockIsFreeFlag or CIsSmallBlockFlag) = CIsSmallBlockFlag then
@@ -5722,7 +5731,7 @@ var
   LBlockHeader: Integer;
 begin
   {Read the flags from the block header.}
-  LBlockHeader := PWord(PByte(APointer) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
 
   {Is it a small block that is in use?}
   if LBlockHeader and (CBlockIsFreeFlag or CIsSmallBlockFlag) = CIsSmallBlockFlag then
@@ -5818,7 +5827,7 @@ var
   LMoveCount: NativeInt;
 begin
   {Read the flags from the block header.}
-  LBlockHeader := PWord(PByte(APointer) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
 
   if LBlockHeader = CIsDebugBlockFlag then
   begin
@@ -5907,7 +5916,7 @@ var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
 begin
   {Read the flags from the block header.}
-  LBlockHeader := PWord(PByte(APointer) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
   {Is it a small block that is in use?}
   if LBlockHeader and CIsSmallBlockFlag = CIsSmallBlockFlag then
   begin
@@ -5924,13 +5933,13 @@ begin
     begin
       if LBlockHeader and CIsLargeBlockFlag = CIsLargeBlockFlag then
       begin
-        Result := PLargeBlockHeader(PByte(APointer) - CLargeBlockHeaderSize).UserAllocatedSize;
+        Result := PLargeBlockHeader(APointer)[-1].UserAllocatedSize;
       end
       else
       begin
         if LBlockHeader and CIsDebugBlockFlag = CIsDebugBlockFlag then
         begin
-          Result := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize).UserSize;
+          Result := PFastMM_DebugBlockHeader(APointer)[-1].UserSize;
         end
         else
         begin
@@ -5950,7 +5959,7 @@ var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
 begin
   {Read the flags from the block header.}
-  LBlockHeader := PWord(PByte(APointer) - CBlockStatusWordSize)^;
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
   {Is it a small block?}
   if LBlockHeader and CIsSmallBlockFlag = CIsSmallBlockFlag then
   begin
@@ -5968,13 +5977,13 @@ begin
     begin
       if LBlockHeader and CIsLargeBlockFlag = CIsLargeBlockFlag then
       begin
-        Result := PLargeBlockHeader(PByte(APointer) - CLargeBlockHeaderSize).ActualBlockSize - CLargeBlockHeaderSize;
+        Result := PLargeBlockHeader(APointer)[-1].ActualBlockSize - CLargeBlockHeaderSize;
       end
       else
       begin
         if LBlockHeader and CIsDebugBlockFlag = CIsDebugBlockFlag then
         begin
-          Result := PFastMM_DebugBlockHeader(PByte(APointer) - CDebugBlockHeaderSize).UserSize;
+          Result := PFastMM_DebugBlockHeader(APointer)[-1].UserSize;
         end
         else
         begin
@@ -6144,7 +6153,6 @@ var
   LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPMediumBlock: Pointer;
   LBlockOffsetFromMediumSpanStart, LMediumBlockSize, LSmallBlockOffset, LLastBlockOffset: Integer;
-  LPMediumBlockHeader: PMediumBlockHeader;
   LPSmallBlockManager: PSmallBlockManager;
 begin
   LBlockInfo.UserData := AUserData;
@@ -6261,11 +6269,9 @@ begin
             LBlockInfo.BlockIsFree := BlockIsFree(LPMediumBlock);
             if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
             begin
-              LPMediumBlockHeader := Pointer(PByte(LPMediumBlock) - CMediumBlockHeaderSize);
-
               {Read the pointer to the small block manager in case this is a small block span.}
               if (AWalkBlockTypes * [btSmallBlockSpan, btSmallBlock] <> [])
-                and LPMediumBlockHeader.IsSmallBlockSpan then
+                and PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
               begin
                 LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
@@ -6280,7 +6286,7 @@ begin
 
                 {The last block may have been released before the manager was locked, so we need to check whether it is
                 still a small block span.}
-                if LPMediumBlockHeader.IsSmallBlockSpan then
+                if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
                 begin
                   if LPSmallBlockManager.CurrentSequentialFeedSpan = LPMediumBlock then
                   begin
