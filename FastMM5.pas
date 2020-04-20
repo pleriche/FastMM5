@@ -3,8 +3,8 @@
 FastMM 5 Beta 2
 
 Description:
-  A fast replacement memory manager for Embarcadero Delphi applications that scales well under multi-threaded usage, is
-  not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
+  A fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU
+  cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
 Copyright:
   Pierre le Riche
@@ -1155,6 +1155,7 @@ const
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
 
   CSmallBlockManagerSize = SizeOf(TSmallBlockManager);
+  CMediumBlockManagerSize = SizeOf(TMediumBlockManager);
 
   {Small block sizes (including the header)}
   CSmallBlockTypeInfo: array[0..CSmallBlockTypeCount - 1] of TSmallBlockTypeInfo = (
@@ -4317,7 +4318,7 @@ begin
   LBinGroupNumber := AMinimumBlockSizeBinNumber shr 5; //32 bins per group
 
   {Is there an available block in the group containing the bin?}
-  LBinGroupMasked := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and -(1 shl (AMinimumBlockSizeBinNumber and 31));
+  LBinGroupMasked := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and ((-1) shl (AMinimumBlockSizeBinNumber and 31));
   if LBinGroupMasked <> 0 then
   begin
     {There is a block in the group containing AMinimumBlockSizeBinNumber, get the exact bin number.}
@@ -4327,7 +4328,7 @@ begin
   begin
     {There are no suitable free blocks in the group containing AMinimumBlockSizeBinNumber, so get a free block from any
     subsequent group.}
-    LBinGroupsMasked := APMediumBlockManager.MediumBlockBinGroupBitmap and -(2 shl LBinGroupNumber);
+    LBinGroupsMasked := APMediumBlockManager.MediumBlockBinGroupBitmap and ((-2) shl LBinGroupNumber);
     {There is a suitable group with space:  Get the bin group number}
     LBinGroupNumber := CountTrailingZeros32(LBinGroupsMasked);
     {Get the first bin with a free block in the group}
@@ -4378,6 +4379,238 @@ end;
 
 {Allocates a medium block within the given size constraints.  Sizes must be properly aligned to a bin size.}
 function FastMM_GetMem_GetMediumBlock(AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
+{$ifdef X86ASM}
+const
+  {The offsets of variables on the stack.}
+  CMinimumBlockSizeOffset = 12;
+  COptimalBlockSizeOffset = 8;
+  CMaximumBlockSizeOffset = 4;
+  CBinNumberOffset = 0;
+asm
+  push ebx
+  push esi
+  push edi
+  push ebp
+  push eax
+  push edx
+  push ecx
+
+  {Calculate the bin number for the minimum block size.}
+  cmp eax, CMediumBlockMiddleBinsStart
+  jg @MiddleOrLastMediumBlockGroup
+  lea edx, [eax - CMinimumMediumBlockSize]
+  shr edx, CInitialBinSpacingBits
+  jmp @GotBinNumber
+@MiddleOrLastMediumBlockGroup:
+  cmp eax, CMediumBlockFinalBinsStart
+  jg @LastMediumBlockGroup
+  lea edx, [eax + CInitialBinCount * CMiddleBinSpacing - CMediumBlockMiddleBinsStart]
+  shr edx, CMiddleBinSpacingBits
+  jmp @GotBinNumber
+@LastMediumBlockGroup:
+  lea edx, [eax + (CInitialBinCount + CMiddleBinCount) * CFinalBinSpacing - CMediumBlockFinalBinsStart]
+  shr edx, CFinalBinSpacingBits
+@GotBinNumber:
+  push edx
+
+  {Minimum block size group in edi}
+  mov edi, edx
+  shr edi, 5
+
+  {Bin mask in ebx}
+  mov ecx, 31
+  and ecx, edx
+  mov ebx, -1
+  shl ebx, cl
+
+  {Larger groups mask in ebp}
+  mov ecx, edi
+  mov ebp, -2
+  shl ebp, cl
+
+@OuterLoop:
+
+  {--------------Attempt 1--------------
+  Try to get a block from the first arena with an available block.  During the first attempt only memory that has
+  already been reserved for medium blocks will be used - no new spans will be allocated.  We also avoid grabbing a
+  sequential feed block, because that may touch a new page and cause a page fault.  The sequence of allocation attempts
+  is:
+    1.1) The pending free list
+    1.2) From the medium block free lists}
+
+  mov esi, offset MediumBlockArenas
+@Attempt1Loop:
+  cmp byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, 0
+  jne @Attempt1NextManager
+  cmp TMediumBlockManager(esi).PendingFreeList, 0
+  jne @Attempt1TryLock
+  test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
+  jnz @Attempt1TryLock
+  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  jz @Attempt1NextManager
+@Attempt1TryLock:
+  mov eax, $100
+  lock cmpxchg byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, ah
+  jne @Attempt1NextManager
+
+  {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
+  a block that is of sufficient size if possible.}
+  cmp TMediumBlockManager(esi).PendingFreeList, 0
+  je @Attempt1NoPendingFrees
+  mov eax, esi
+  mov edx, [esp + CMinimumBlockSizeOffset]
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  push [esp + CMaximumBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock
+  test eax, eax
+  jnz @UnlockManagerAndExit
+@Attempt1NoPendingFrees:
+
+  {1.2) Try to find a suitable free block in the free lists}
+  test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
+  jnz @Attempt1HasFreeBlock
+  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  jz @Attempt1NoFreeBlocks
+@Attempt1HasFreeBlock:
+  mov eax, esi
+  mov edx, [esp + CBinNumberOffset]
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  push [esp + CMaximumBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena
+  jmp @Done
+@Attempt1NoFreeBlocks:
+
+  {A different thread grabbed the last block, unlock the manager and try the next arena.}
+  mov TMediumBlockManager(esi).MediumBlockManagerLocked, 0
+
+@Attempt1NextManager:
+  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  jnb @Attempt1Failed
+  add esi, CMediumBlockManagerSize
+  jmp @Attempt1Loop
+@Attempt1Failed:
+
+  {--------------Attempt 2--------------
+  Try to get a block from a sequential feed span.  Splitting off a sequentisal feed block is very likely to touch a new
+  memory page and thus cause an (expensive) page fault.}
+
+  {edx = AMinimumBlockSize, eax = AMinimumBlockSize + CMediumBlockSpanHeaderSize}
+  mov edx, [esp + CMinimumBlockSizeOffset]
+  lea eax, [edx + CMediumBlockSpanHeaderSize]
+  mov esi, offset MediumBlockArenas
+@Attempt2Loop:
+
+  {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
+  cmp eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  ja @Attempt2NextManager
+  mov eax, esi
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan
+  test eax, eax
+  jnz @Done
+  {The call failed:  Restore edx and eax to correct values}
+  mov edx, [esp + CMinimumBlockSizeOffset]
+  lea eax, [edx + CMediumBlockSpanHeaderSize]
+
+@Attempt2NextManager:
+  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  jnb @Attempt2Failed
+  add esi, CMediumBlockManagerSize
+  jmp @Attempt2Loop
+@Attempt2Failed:
+
+  {--------------Attempt 3--------------
+  At this point (a) all arenas are either locked, or (b) there are no pending free blocks, no free blocks, and all
+  the sequential feed spans are exhausted.  In this second attempt the first unlocked manager is locked and a block
+  will then be obtained from it in this sequence:
+
+    3.1) From the medium block free lists
+    3.2) From the existing sequential feed span
+    3.3) From the pending free list
+    3.4) From a new sequential feed span.}
+
+  mov esi, offset MediumBlockArenas
+@Attempt3Loop:
+
+  {Try to lock the manager}
+  mov eax, $100
+  lock cmpxchg byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, ah
+  jne @Attempt3NextManager
+
+  {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
+  test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
+  jnz @Attempt3HasFreeBlock
+  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  jz @Attempt3NoFreeBlocks
+@Attempt3HasFreeBlock:
+  mov eax, esi
+  mov edx, [esp + CBinNumberOffset]
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  push [esp + CMaximumBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena
+  jmp @Done
+@Attempt3NoFreeBlocks:
+
+  {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second attempt
+  at feeding a block sequentially should be made before allocating a new span.}
+  mov edx, [esp + CMinimumBlockSizeOffset]
+  lea eax, [edx + CMediumBlockSpanHeaderSize]
+  cmp eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  ja @Attempt3NoSequentialFeed
+  mov eax, esi
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan
+  test eax, eax
+  jnz @UnlockManagerAndExit
+@Attempt3NoSequentialFeed:
+
+  {3.3) Another thread may have added blocks to the pending free list in the meantime - again try to reuse a pending
+  free block.  Allocating a new span is very expensive, so has to be avoided if at all possible.}
+  cmp TMediumBlockManager(esi).PendingFreeList, 0
+  je @Attempt3NoPendingFrees
+  mov eax, esi
+  mov edx, [esp + CMinimumBlockSizeOffset]
+  mov ecx, [esp + COptimalBlockSizeOffset]
+  push [esp + CMaximumBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock
+  test eax, eax
+  jnz @UnlockManagerAndExit
+@Attempt3NoPendingFrees:
+
+  {3.4) If we get here then there are no suitable free blocks, pending free blocks, and the current sequential feed span
+  has no space:  Allocate a new sequential feed span and split off a block of the optimal size.}
+  mov eax, esi
+  mov edx, [esp + COptimalBlockSizeOffset]
+  call FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan
+  jmp @UnlockManagerAndExit
+
+@Attempt3NextManager:
+  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  jnb @Attempt3Failed
+  add esi, CMediumBlockManagerSize
+  jmp @Attempt3Loop
+@Attempt3Failed:
+
+  {--------Back off--------}
+
+  {All arenas are currently locked:  Back off and try again.}
+  call OS_AllowOtherThreadToRun
+  jmp @OuterLoop
+
+@UnlockManagerAndExit:
+  mov TMediumBlockManager(esi).MediumBlockManagerLocked, 0
+
+@Done:
+  pop ecx
+  pop ecx
+  pop ecx
+  pop ecx
+  pop ebp
+  pop edi
+  pop esi
+  pop ebx
+
+{$else}
 var
   LPMediumBlockManager: PMediumBlockManager;
   LMinimumBlockSizeBinNumber, LMinimumBlockSizeBinGroupNumber, LMinimumBlockSizeBinMask, LLargerBinGroupsMask: Integer;
@@ -4386,8 +4619,8 @@ begin
   of at least the requested size.}
   LMinimumBlockSizeBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
   LMinimumBlockSizeBinGroupNumber := LMinimumBlockSizeBinNumber shr 5; //32 bins per group
-  LMinimumBlockSizeBinMask := -(1 shl (LMinimumBlockSizeBinNumber and 31));
-  LLargerBinGroupsMask := -(2 shl LMinimumBlockSizeBinGroupNumber);
+  LMinimumBlockSizeBinMask := ((-1) shl (LMinimumBlockSizeBinNumber and 31));
+  LLargerBinGroupsMask := ((-2) shl LMinimumBlockSizeBinGroupNumber);
 
   while True do
   begin
@@ -4428,7 +4661,7 @@ begin
           end;
         end;
 
-        {1.2) Try to find a suitable free block in the free lists for all arenas}
+        {1.2) Try to find a suitable free block in the free lists}
         if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
           or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
         begin
@@ -4539,13 +4772,14 @@ begin
       Inc(LPMediumBlockManager);
     end;
 
-    {--------Backoff--------}
+    {--------Back off--------}
 
     {All arenas are currently locked:  Back off and try again.}
     OS_AllowOtherThreadToRun;
 
   end;
 
+{$endif}
 end;
 
 function FastMM_ReallocMem_ReallocMediumBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
@@ -4782,7 +5016,7 @@ function FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(APSmallBlock
 asm
   push ebx
 
-  dec TSmallBlockSpanHeader(eax).BlocksInUse
+  sub TSmallBlockSpanHeader(eax).BlocksInUse, 1
   jnz @DoNotFreeSpan
   cmp DebugModeCounter, 0
   jg @DoNotFreeSpan
@@ -5266,7 +5500,7 @@ asm
   mov TSmallBlockSpanHeader(ecx).FirstFreeBlock, edx
 
   {Increment the number of used blocks}
-  Inc TSmallBlockSpanHeader(ecx).BlocksInUse;
+  add TSmallBlockSpanHeader(ecx).BlocksInUse, 1
 
   {If there are no more free blocks in the small block span then it must be removed from the circular linked list of
   small block spans with available blocks.}
@@ -5592,7 +5826,7 @@ begin
     end;
     Dec(APSmallBlockManager, CSmallBlockTypeCount * (CSmallBlockArenaCount - 1));
 
-    {--------------Backoff--------------
+    {--------------Back off--------------
     All arenas are currently locked:  Back off and start again at the first arena}
 
     OS_AllowOtherThreadToRun;
@@ -5672,7 +5906,7 @@ asm
   cmp eax, (CMaximumSmallBlockSize - CSmallBlockHeaderSize)
   ja @NotASmallBlock
   {Small block:  Get the small block manager index in eax}
-  inc eax
+  add eax, 1
   shr eax, 3
   movzx eax, byte ptr SmallBlockTypeLookup[eax]
   {Get a pointer to the small block manager for arena 0 in eax}
