@@ -4304,46 +4304,37 @@ begin
     Result := nil;
 end;
 
-{Tries to find a block of suitable size from the list of available blocks in the arena.  The arena must be locked.
-Block sizes must be aligned to a bin size.}
-function FastMM_GetMem_GetMediumBlock_TryAllocateFreeBlock(APMediumBlockManager: PMediumBlockManager;
-  AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
+{Allocates a free block of at least the size in AMinimumBlockSizeBinNumber.  The arena must be known to have a suitable
+free block, the arena must be locked, and AOptimalBlockSize and AMaximumBlockSize must be aligned to a bin size.
+Unlocks the arena before returning.  Returns a pointer to the allocated block.}
+function FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(APMediumBlockManager: PMediumBlockManager;
+  AMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
 var
   LBinGroupNumber, LBinNumber, LBinGroupMasked, LBinGroupsMasked, LBlockSize, LSecondSplitSize: Integer;
-  LPMediumBin, LPSecondSplit: PMediumFreeBlockContent;
+  LPSecondSplit: PMediumFreeBlockContent;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
 begin
-  {Round the request up to the next bin size.}
-  LBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
-  LBinGroupNumber := LBinNumber shr 5; //32 bins per group
+  LBinGroupNumber := AMinimumBlockSizeBinNumber shr 5; //32 bins per group
 
-  LBinGroupMasked := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and -(1 shl (LBinNumber and 31));
+  {Is there an available block in the group containing the bin?}
+  LBinGroupMasked := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and -(1 shl (AMinimumBlockSizeBinNumber and 31));
   if LBinGroupMasked <> 0 then
   begin
-    {Get the actual bin number}
+    {There is a block in the group containing AMinimumBlockSizeBinNumber, get the exact bin number.}
     LBinNumber := CountTrailingZeros32(LBinGroupMasked) + (LBinGroupNumber shl 5);
   end
   else
   begin
-    {Try all groups greater than this group}
+    {There are no suitable free blocks in the group containing AMinimumBlockSizeBinNumber, so get a free block from any
+    subsequent group.}
     LBinGroupsMasked := APMediumBlockManager.MediumBlockBinGroupBitmap and -(2 shl LBinGroupNumber);
-    if LBinGroupsMasked <> 0 then
-    begin
-      {There is a suitable group with space:  Get the bin number}
-      LBinGroupNumber := CountTrailingZeros32(LBinGroupsMasked);
-      {Get the bin in the group with free blocks}
-      LBinNumber := CountTrailingZeros32(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + (LBinGroupNumber shl 5);
-    end
-    else
-    begin
-      {There is no free block of sufficient size available.}
-      Exit(nil);
-    end;
+    {There is a suitable group with space:  Get the bin group number}
+    LBinGroupNumber := CountTrailingZeros32(LBinGroupsMasked);
+    {Get the first bin with a free block in the group}
+    LBinNumber := CountTrailingZeros32(APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]) + (LBinGroupNumber shl 5);
   end;
 
-  {If we get here there is a block that is AMinimumBlockSize or greater.}
-  LPMediumBin := @APMediumBlockManager.FirstFreeBlockInBin[LBinNumber];
-  Result := LPMediumBin.NextFreeMediumBlock;
+  Result := APMediumBlockManager.FirstFreeBlockInBin[LBinNumber];
 
   RemoveMediumFreeBlockFromBin(APMediumBlockManager, Result);
 
@@ -4381,159 +4372,176 @@ begin
 
   {Set the header for this block, clearing the debug info flag.}
   SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
+
+  APMediumBlockManager.MediumBlockManagerLocked := 0;
 end;
 
 {Allocates a medium block within the given size constraints.  Sizes must be properly aligned to a bin size.}
 function FastMM_GetMem_GetMediumBlock(AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
 var
   LPMediumBlockManager: PMediumBlockManager;
-  LBinGroupNumber, LBinNumber, LBinMask, LBinGroupMask: Integer;
+  LMinimumBlockSizeBinNumber, LMinimumBlockSizeBinGroupNumber, LMinimumBlockSizeBinMask, LLargerBinGroupsMask: Integer;
 begin
+  {Determine the bin for blocks of the minimum size, as well as the masks for the bins and groups that will have blocks
+  of at least the requested size.}
+  LMinimumBlockSizeBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
+  LMinimumBlockSizeBinGroupNumber := LMinimumBlockSizeBinNumber shr 5; //32 bins per group
+  LMinimumBlockSizeBinMask := -(1 shl (LMinimumBlockSizeBinNumber and 31));
+  LLargerBinGroupsMask := -(2 shl LMinimumBlockSizeBinGroupNumber);
 
   while True do
   begin
 
-    {---------Step 1: Process pending free lists------------}
-    {Scan the pending free lists for all medium block managers first, and reuse a block that is of sufficient size if
-    possible.}
+    {--------------Attempt 1--------------
+    Try to get a block from the first arena with an available block.  During the first attempt only memory that has
+    already been reserved for medium blocks will be used - no new spans will be allocated.  We also avoid grabbing a
+    sequential feed block, because that may touch a new page and cause a page fault (which is expensive).  The sequence
+    of allocation attempts is:
+      1.1) The pending free list
+      1.2) From the medium block free lists}
+
 
     LPMediumBlockManager := @MediumBlockArenas[0];
     while True do
     begin
 
-      if (LPMediumBlockManager.PendingFreeList <> nil)
-        and (LPMediumBlockManager.MediumBlockManagerLocked = 0)
-        and (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0) then
-      begin
-        Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager,
-          AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize);
-
-        {Memory fence needed here for ARM}
-
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
-
-        if Result <> nil then
-          Exit;
-
-      end;
-
-      {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
-        Inc(LPMediumBlockManager)
-      else
-        Break;
-    end;
-
-
-    {--------Step 2: Try to find a suitable free block in the free lists for all arenas--------}
-
-    {Determine the bin for blocks of this size, as well as the masks for the bins and groups that will have blocks of
-    at least the requested size.}
-    LBinNumber := GetBinNumberForMediumBlockSize(AMinimumBlockSize);
-    LBinGroupNumber := LBinNumber shr 5; //32 bins per group
-    LBinMask := -(1 shl (LBinNumber and 31));
-    LBinGroupMask := -(2 shl LBinGroupNumber);
-
-    LPMediumBlockManager := @MediumBlockArenas[0];
-    while True do
-    begin
-
-      {The arena must currently be unlocked and there must be available blocks of the minimum size or larger.  If that
-      is the case then try to lock the arena.}
+      {In order to process the pending free lists or get a block from the free lists the block manager must be locked.
+      Locking is expensive, so first check whether locking the manager is likely to result in successful block
+      allocation.}
       if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
-        and (((LPMediumBlockManager.MediumBlockBinGroupBitmap and LBinGroupMask) <> 0)
-            or ((LPMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] and LBinMask) <> 0))
+        and ((LPMediumBlockManager.PendingFreeList <> nil)
+          or ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0))
         and (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0) then
       begin
 
-        Result := FastMM_GetMem_GetMediumBlock_TryAllocateFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
-          AOptimalBlockSize, AMaximumBlockSize);
-
-        {Memory fence needed here for ARM}
-
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
-
-        if Result <> nil then
-          Exit;
-
-      end;
-
-      {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
-        Inc(LPMediumBlockManager)
-      else
-        Break;
-    end;
-
-    {--------Step 3: Try to feed a medium block sequentially from an existing sequential feed span--------}
-
-    LPMediumBlockManager := @MediumBlockArenas[0];
-    while True do
-    begin
-
-      Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager, AMinimumBlockSize,
-        AOptimalBlockSize);
-      if Result <> nil then
-        Exit;
-
-      {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
-        Inc(LPMediumBlockManager)
-      else
-        Break;
-    end;
-
-    {--------Step 4: Lock the first available arena and try again, allocating a new sequential feed span if needed--------}
-
-    {At this point (a) all arenas are either locked, or (b) there are no pending free blocks, no available blocks, and
-    all the sequential feed spans are exhausted.}
-
-    LPMediumBlockManager := @MediumBlockArenas[0];
-    while True do
-    begin
-
-      if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
-      begin
-        {Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
-        Result := FastMM_GetMem_GetMediumBlock_TryAllocateFreeBlock(LPMediumBlockManager,
-          AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize);
-
-        if Result = nil then
+        {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
+        a block that is of sufficient size if possible.}
+        if LPMediumBlockManager.PendingFreeList <> nil then
         begin
-          {Another thread may have allocated a sequential feed span before the arena could be locked, so a second
-          attempt at feeding a block sequentially should be made before allocating a new span.}
-          Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager, AMinimumBlockSize, AOptimalBlockSize);
-          if Result = nil then
+          Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
+            AOptimalBlockSize, AMaximumBlockSize);
+          if Result <> nil then
           begin
-            {Another thread may have added blocks to the pending free list in the meantime - try to reuse a pending
-            free block again.  Allocating a span is very expensive, so has to be avoided if at all possible.}
-            if LPMediumBlockManager.PendingFreeList <> nil then
-            begin
-              Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager,
-                AMinimumBlockSize, AOptimalBlockSize, AMaximumBlockSize);
-            end;
-
-            {If we get here then there are no suitable free blocks, pending free blocks, and the current sequential
-            feed span has no space.}
-            if Result = nil then
-              Result := FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(LPMediumBlockManager, AOptimalBlockSize);
+            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            Exit;
           end;
-
         end;
 
+        {1.2) Try to find a suitable free block in the free lists for all arenas}
+        if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
+        begin
+          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
+        end;
+
+        {A different thread grabbed the last block, unlock the manager and try the next arena.}
+        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+      end;
+
+      {Try the next arena.}
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
+        Break;
+
+      Inc(LPMediumBlockManager);
+    end;
+
+    {--------------Attempt 2--------------
+    Try to get a block from a sequential feed span.  This is likely to touch a new page and thus cause a page fault,
+    which is expensive.}
+
+    LPMediumBlockManager := @MediumBlockArenas[0];
+    while True do
+    begin
+
+      {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
+      if LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+      begin
+        Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
+          AMinimumBlockSize, AOptimalBlockSize);
+        if Result <> nil then
+          Exit;
+      end;
+
+      {Try the next arena.}
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
+        Break;
+
+      Inc(LPMediumBlockManager);
+    end;
+
+    {--------------Attempt 3--------------
+    At this point (a) all arenas are either locked, or (b) there are no pending free blocks, no free blocks, and all
+    the sequential feed spans are exhausted.  In this second attempt the first unlocked manager is locked and a block
+    will then be obtained from it in this sequence:
+
+      3.1) From the medium block free lists
+      3.2) From the existing sequential feed span
+      3.3) From the pending free list
+      3.4) From a new sequential feed span.}
+
+
+    LPMediumBlockManager := @MediumBlockArenas[0];
+    while True do
+    begin
+
+      {The first attempt failed to get a block from any manager, so in this second attempt we are more forceful:  Always
+      try to lock the manager, and allocate a new sequential feed span if necessary.}
+      if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
+      begin
+
+        {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
+        if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
+        begin
+          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
+        end;
+
+        {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second
+        attempt at feeding a block sequentially should be made before allocating a new span.}
+        if LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+        begin
+          Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
+            AMinimumBlockSize, AOptimalBlockSize);
+          if Result <> nil then
+          begin
+            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            Exit;
+          end;
+        end;
+
+        {3.3) Another thread may have added blocks to the pending free list in the meantime - again try to reuse a
+        pending free block.  Allocating a new span is very expensive, so has to be avoided if at all possible.}
+        if LPMediumBlockManager.PendingFreeList <> nil then
+        begin
+          Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
+            AOptimalBlockSize, AMaximumBlockSize);
+          if Result <> nil then
+          begin
+            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            Exit;
+          end;
+        end;
+
+        {3.4) If we get here then there are no suitable free blocks, pending free blocks, and the current sequential
+        feed span has no space:  Allocate a new sequential feed span and split off a block of the optimal size.}
+        Result := FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(LPMediumBlockManager, AOptimalBlockSize);
         LPMediumBlockManager.MediumBlockManagerLocked := 0;
         Exit;
       end;
 
       {The arena could not be locked - try the next one.}
-      if NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
-        Inc(LPMediumBlockManager)
-      else
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
         Break;
+
+      Inc(LPMediumBlockManager);
     end;
 
-    {--------Step 5: Back off and try again--------}
+    {--------Backoff--------}
 
+    {All arenas are currently locked:  Back off and try again.}
     OS_AllowOtherThreadToRun;
 
   end;
