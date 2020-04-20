@@ -465,6 +465,11 @@ var
   {This variable is incremented during every debug getmem call (wrapping to 0 once it hits 4G) and stored in the debug
   header.  It may be useful for debugging purposes.}
   FastMM_LastAllocationNumber: Cardinal;
+  {This variable is incremented every time all the arenas for the block size are locked simultaneously and FastMM had to
+  relinquish the thread's timeslice.  If this number is excessively high then it is an indication that the number of
+  small, medium and/or large block arenas are insufficient for the number of application threads and should be
+  increased.  (The CSmallBlockArenaCount, CMediumBlockArenaCount and CLargeBlockArenaCount constants.)}
+  FastMM_ThreadContentionCount: Cardinal;
 
   {---------Message and log file text configuration--------}
 
@@ -1697,6 +1702,7 @@ end;
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun;
 begin
+  Inc(FastMM_ThreadContentionCount);
   Winapi.Windows.SwitchToThread;
 end;
 
