@@ -143,7 +143,9 @@ type
     {When a corruption of the memory pool is detected.}
     mmetDebugBlockHeaderCorruption,
     mmetDebugBlockFooterCorruption,
-    mmetDebugBlockModifiedAfterFree);
+    mmetDebugBlockModifiedAfterFree,
+    {When a virtual method is called on a freed object.}
+    mmetVirtualMethodCallOnFreedObject);
   TFastMM_MemoryManagerEventTypeSet = set of TFastMM_MemoryManagerEventType;
 
   TFastMM_MemoryManagerInstallationState = (
@@ -449,17 +451,17 @@ var
   {The events that are passed to OutputDebugString.}
   FastMM_OutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
     mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
-    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+    mmetDebugBlockModifiedAfterFree, mmetVirtualMethodCallOnFreedObject, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {The events that are logged to file.}
   FastMM_LogToFileEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
     mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
-    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+    mmetDebugBlockModifiedAfterFree, mmetVirtualMethodCallOnFreedObject, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {The events that are displayed in a message box.}
   FastMM_MessageBoxEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
     mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
-    mmetDebugBlockModifiedAfterFree, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
+    mmetDebugBlockModifiedAfterFree, mmetVirtualMethodCallOnFreedObject, mmetAnotherThirdPartyMemoryManagerAlreadyInstalled,
     mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, mmetCannotSwitchToSharedMemoryManagerWithLivePointers];
   {All debug blocks are tagged with the current value of this variable when the block is allocated.  This may be used
   by the application to track memory issues.}
@@ -497,12 +499,13 @@ var
     14: Leak summary entries
     15: The size and offsets for modifications to a block after it was freed.
     16: The full path and filename of the event log.
-    17: The total kilobytes allocated (FastMM_LogStateToFile)
-    18: The total kilobytes overhead (FastMM_LogStateToFile)
-    19: The efficiency percentage (FastMM_LogStateToFile)
-    20: The total number of bytes used by the class (FastMM_LogStateToFile)
-    21: The number of instances of the class (FastMM_LogStateToFile)
-    22: The average number of bytes per instance for the class (FastMM_LogStateToFile)
+    17: The virtual method name for a virtual method calls on a freed object
+    18: The total kilobytes allocated (FastMM_LogStateToFile)
+    19: The total kilobytes overhead (FastMM_LogStateToFile)
+    20: The efficiency percentage (FastMM_LogStateToFile)
+    21: The total number of bytes used by the class (FastMM_LogStateToFile)
+    22: The number of instances of the class (FastMM_LogStateToFile)
+    23: The average number of bytes per instance for the class (FastMM_LogStateToFile)
 
   }
 
@@ -516,6 +519,7 @@ var
   FastMM_AnotherMemoryManagerAlreadyInstalledMessage: PWideChar = 'FastMM cannot be installed, because another third '
     + 'party memory manager has already been installed.';
   FastMM_CannotSwitchMemoryManagerMessageBoxCaption: PWideChar = 'Cannot Switch Memory Managers';
+
   {Memory leak messages.}
   FastMM_MemoryLeakDetailMessage_NormalBlock: PWideChar = 'A memory block has been leaked. The size is: {3}'#13#10#13#10
     + 'The block is currently used for an object of class: {8}'#13#10#13#10
@@ -546,6 +550,7 @@ var
     + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10;
+
   {Memory pool corruption messages.}
   FastMM_BlockModifiedAfterFreeMessage: PWideChar = 'A memory block was modified after it was freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
@@ -575,14 +580,28 @@ var
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_MemoryCorruptionMessageBoxCaption: PWideChar = 'Memory Corruption Detected';
+
+  {Virtual method call on a freed object.}
+  FastMM_VirtualMethodCallOnFreedObjectMessage: PWideChar = 'A virtual method was called on a freed object.'#13#10#13#10
+    + 'Freed object class: {8}'#13#10#13#10
+    + 'Virtual method: {17}'#13#10#13#10
+    + 'The block size is {3}.'#13#10#13#10
+    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + '{7}'#13#10#13#10
+    + 'The allocation number is: {9}'#13#10#13#10
+    + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
+    + '{12}'#13#10'{13}'#13#10;
+  FastMM_VirtualMethodCallOnFreedObjectMessageBoxCaption: PWideChar = 'Virtual Method Call On Freed Object';
+
   {Memory state logging messages}
   FastMM_LogStateToFileTemplate: PWideChar = 'FastMM State Capture:'#13#10
     + '---------------------'#13#10
-    + '{17}K Allocated'#13#10
-    + '{18}K Overhead'#13#10
-    + '{19}% Efficiency'#13#10#13#10
+    + '{18}K Allocated'#13#10
+    + '{19}K Overhead'#13#10
+    + '{20}% Efficiency'#13#10#13#10
     + 'Usage Detail:'#13#10;
-  FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{20} bytes: {8} x {21} ({22} bytes avg.)'#13#10;
+  FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{21} bytes: {8} x {22} ({23} bytes avg.)'#13#10;
   {Initialization error messages.}
   FastMM_DebugSupportLibraryNotAvailableError: PWideChar = 'The FastMM debug support library could not be loaded.';
   FastMM_DebugSupportLibraryNotAvailableError_Caption: PWideChar = 'Fatal Error';
@@ -638,8 +657,10 @@ const
 
   {$ifdef 32Bit}
   CPointerSizeBitShift = 2; //1 shl 2 = 4
+  CTObjectInstanceSize = 8;
   {$else}
   CPointerSizeBitShift = 3; //1 shl 3 = 8
+  CTObjectInstanceSize = 16;
   {$endif}
 
   {Block status flags}
@@ -744,13 +765,14 @@ const
   CEventLogTokenLeakSummaryEntries = 14;
   CEventLogTokenModifyAfterFreeDetail = 15;
   CEventLogTokenEventLogFilename = 16;
+  CEventLogTokenVirtualMethodName = 17;
 
-  CStateLogTokenAllocatedKB = 17;
-  CStateLogTokenOverheadKB = 18;
-  CStateLogTokenEfficiencyPercentage = 19;
-  CStateLogTokenClassTotalBytesUsed = 20;
-  CStateLogTokenClassInstanceCount = 21;
-  CStateLogTokenClassAverageBytesPerInstance = 22;
+  CStateLogTokenAllocatedKB = 18;
+  CStateLogTokenOverheadKB = 19;
+  CStateLogTokenEfficiencyPercentage = 20;
+  CStateLogTokenClassTotalBytesUsed = 21;
+  CStateLogTokenClassInstanceCount = 22;
+  CStateLogTokenClassAverageBytesPerInstance = 23;
 
   {The highest ID of an event log token.}
   CEventLogMaxTokenID = 30;
@@ -780,6 +802,8 @@ const
   protection is set at the page level.}
   CVirtualMemoryPageSize = 4096;
 
+  CCopyrightMessage: PAnsiChar = 'FastMM (c) 2004 - 2020 Pierre le Riche';
+
 type
 
   {Event log token values are pointers #0 terminated text strings.  The payload for the tokens is in TokenData.}
@@ -797,9 +821,6 @@ type
 
 {$PointerMath On}
   PBlockStatusFlags = ^TBlockStatusFlags;
-  PSmallIntArray = ^SmallInt;
-  PIntegerArray = ^Integer;
-  PInt64Array = ^Int64;
 {$PointerMath Off}
 
   {------------------------Small block structures------------------------}
@@ -1124,6 +1145,31 @@ type
     LeakCount: Integer;
   end;
   PMemoryLeakSummary = ^TMemoryLeakSummary;
+
+  {-------Catching virtual calls on freed objects--------}
+
+  {When a debug block is freed the header is set to point to this class in order to catch virtual method calls on a
+  freed object.}
+  TFastMM_FreedObject = class(TObject)
+  protected
+    procedure VirtualMethodOnFreedObject(APMethodName: PWideChar); overload;
+    procedure VirtualMethodOnFreedObject(AIndex: Byte); overload;
+  public
+    {Virtual method calls that will redirect to VirtualMethodOnFreedObject}
+    destructor Destroy; override;
+    procedure DefaultHandler(var Message); override;
+    {Cirtual method intercepts - these will redirect to VirtualMethodOnFreedObject}
+    procedure VirtualMethod0; virtual; procedure VirtualMethod1; virtual; procedure VirtualMethod2; virtual;
+    procedure VirtualMethod3; virtual; procedure VirtualMethod4; virtual; procedure VirtualMethod5; virtual;
+    procedure VirtualMethod6; virtual; procedure VirtualMethod7; virtual; procedure VirtualMethod8; virtual;
+    procedure VirtualMethod9; virtual; procedure VirtualMethod10; virtual; procedure VirtualMethod11; virtual;
+    procedure VirtualMethod12; virtual; procedure VirtualMethod13; virtual; procedure VirtualMethod14; virtual;
+    procedure VirtualMethod15; virtual; procedure VirtualMethod16; virtual; procedure VirtualMethod17; virtual;
+    procedure VirtualMethod18; virtual; procedure VirtualMethod19; virtual; procedure VirtualMethod20; virtual;
+    procedure VirtualMethod21; virtual; procedure VirtualMethod22; virtual; procedure VirtualMethod23; virtual;
+    procedure VirtualMethod24; virtual; procedure VirtualMethod25; virtual; procedure VirtualMethod26; virtual;
+    procedure VirtualMethod27; virtual; procedure VirtualMethod28; virtual; procedure VirtualMethod29; virtual;
+  end;
 
   {-------Legacy debug support DLL interface--------}
   {The interface for the legacy (version 4) stack trace conversion routine in the FastMM_FullDebugMode library.}
@@ -2015,8 +2061,8 @@ begin
   Result := TClass(PPointer(APointer)^);
   {No VM info yet}
   LMemoryRegionInfo.RegionSize := 0;
-  {Check the block}
-  if (not InternalIsValidClass(Pointer(Result), 0)) then
+  {Check the block.  Never return TFastMM_FreedObject as the class.}
+  if (Result = TFastMM_FreedObject) or (not InternalIsValidClass(Pointer(Result), 0)) then
     Result := nil;
 end;
 
@@ -2620,7 +2666,7 @@ begin
     APBufferEnd);
 
   {Add the token for the block adddress in hex.}
-  Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenBlockAddress, NativeUInt(APBlock), Result, 
+  Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenBlockAddress, NativeUInt(APBlock), Result,
     APBufferEnd);
 
   {Add the block dump tokens.  The maximum dump size is less than the size of a medium block, so it's safe to read
@@ -2658,6 +2704,12 @@ begin
 
       Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenFreeStackTrace, LPDebugBlockHeader.FreeStackTrace,
         Result, APBufferEnd);
+
+      {If it is a freed debug block then get the prior class from the debug header.}
+      LBlockContentType := NativeUInt(DetectClassInstance(@LPDebugBlockHeader.PreviouslyUsedByClass));
+      Result := AddTokenValue_BlockContentType(ATokenValues, CEventLogTokenObjectClass, LBlockContentType, Result,
+        APBufferEnd);
+
     end;
   end;
 
@@ -2823,6 +2875,12 @@ begin
       LPMessageBoxCaption := FastMM_MemoryCorruptionMessageBoxCaption;
     end;
 
+    mmetVirtualMethodCallOnFreedObject:
+    begin
+      LPTextTemplate := FastMM_VirtualMethodCallOnFreedObjectMessage;
+      LPMessageBoxCaption := FastMM_VirtualMethodCallOnFreedObjectMessageBoxCaption;
+    end;
+
   else
     begin
       {All event types should be handled above.}
@@ -2852,6 +2910,88 @@ begin
   end;
 
 end;
+
+
+{--------------------------------------}
+{--------Debug support class-----------}
+{--------------------------------------}
+
+{TFastMM_FreedObject is used to catch virtual method calls on a freed object.  Whenever a debug block is freed the
+first pointer in the block is set to point to TFastMM_FreedObject, so that an attempt to call a virtual method (like
+Destroy) will be caught.}
+
+{ TFastMM_FreedObject }
+
+procedure TFastMM_FreedObject.DefaultHandler(var Message);
+begin
+  VirtualMethodOnFreedObject('DefaultHandler');
+end;
+
+destructor TFastMM_FreedObject.Destroy;
+begin
+  VirtualMethodOnFreedObject('Destroy');
+end;
+
+procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(APMethodName: PWideChar);
+var
+  LTokenValues: TEventLogTokenValues;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
+  LPBufferPos, LPBufferEnd: PWideChar;
+begin
+  LTokenValues := Default(TEventLogTokenValues);
+
+  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
+  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
+  LPBufferPos := AddTokenValues_BlockTokens(LTokenValues, Pointer(Self), LPBufferPos, LPBufferEnd);
+  AddTokenValue(LTokenValues, CEventLogTokenVirtualMethodName, APMethodName, GetStringLength(APMethodName), LPBufferPos,
+    LPBufferEnd);
+
+  LogEvent(mmetVirtualMethodCallOnFreedObject, LTokenValues);
+
+  System.Error(reInvalidPtr);
+end;
+
+procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(AIndex: Byte);
+var
+  LTextBuffer: array[0..4] of WideChar;
+  LPEnd: PWideChar;
+begin
+  LTextBuffer[0] := '#';
+  LPEnd := NativeUIntToTextBuffer(AIndex, @LTextBuffer[1], @LTextBuffer[High(LTextBuffer)]);
+  LPEnd^ := #0;
+  VirtualMethodOnFreedObject(@LTextBuffer);
+end;
+
+procedure TFastMM_FreedObject.VirtualMethod0; begin VirtualMethodOnFreedObject(0); end;
+procedure TFastMM_FreedObject.VirtualMethod1; begin VirtualMethodOnFreedObject(1); end;
+procedure TFastMM_FreedObject.VirtualMethod2; begin VirtualMethodOnFreedObject(2); end;
+procedure TFastMM_FreedObject.VirtualMethod3; begin VirtualMethodOnFreedObject(3); end;
+procedure TFastMM_FreedObject.VirtualMethod4; begin VirtualMethodOnFreedObject(4); end;
+procedure TFastMM_FreedObject.VirtualMethod5; begin VirtualMethodOnFreedObject(5); end;
+procedure TFastMM_FreedObject.VirtualMethod6; begin VirtualMethodOnFreedObject(6); end;
+procedure TFastMM_FreedObject.VirtualMethod7; begin VirtualMethodOnFreedObject(7); end;
+procedure TFastMM_FreedObject.VirtualMethod8; begin VirtualMethodOnFreedObject(8); end;
+procedure TFastMM_FreedObject.VirtualMethod9; begin VirtualMethodOnFreedObject(9); end;
+procedure TFastMM_FreedObject.VirtualMethod10; begin VirtualMethodOnFreedObject(10); end;
+procedure TFastMM_FreedObject.VirtualMethod11; begin VirtualMethodOnFreedObject(11); end;
+procedure TFastMM_FreedObject.VirtualMethod12; begin VirtualMethodOnFreedObject(12); end;
+procedure TFastMM_FreedObject.VirtualMethod13; begin VirtualMethodOnFreedObject(13); end;
+procedure TFastMM_FreedObject.VirtualMethod14; begin VirtualMethodOnFreedObject(14); end;
+procedure TFastMM_FreedObject.VirtualMethod15; begin VirtualMethodOnFreedObject(15); end;
+procedure TFastMM_FreedObject.VirtualMethod16; begin VirtualMethodOnFreedObject(16); end;
+procedure TFastMM_FreedObject.VirtualMethod17; begin VirtualMethodOnFreedObject(17); end;
+procedure TFastMM_FreedObject.VirtualMethod18; begin VirtualMethodOnFreedObject(18); end;
+procedure TFastMM_FreedObject.VirtualMethod19; begin VirtualMethodOnFreedObject(19); end;
+procedure TFastMM_FreedObject.VirtualMethod20; begin VirtualMethodOnFreedObject(20); end;
+procedure TFastMM_FreedObject.VirtualMethod21; begin VirtualMethodOnFreedObject(21); end;
+procedure TFastMM_FreedObject.VirtualMethod22; begin VirtualMethodOnFreedObject(22); end;
+procedure TFastMM_FreedObject.VirtualMethod23; begin VirtualMethodOnFreedObject(23); end;
+procedure TFastMM_FreedObject.VirtualMethod24; begin VirtualMethodOnFreedObject(24); end;
+procedure TFastMM_FreedObject.VirtualMethod25; begin VirtualMethodOnFreedObject(25); end;
+procedure TFastMM_FreedObject.VirtualMethod26; begin VirtualMethodOnFreedObject(26); end;
+procedure TFastMM_FreedObject.VirtualMethod27; begin VirtualMethodOnFreedObject(27); end;
+procedure TFastMM_FreedObject.VirtualMethod28; begin VirtualMethodOnFreedObject(28); end;
+procedure TFastMM_FreedObject.VirtualMethod29; begin VirtualMethodOnFreedObject(29); end;
 
 
 {------------------------------------------}
@@ -2990,6 +3130,17 @@ begin
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
 
+  {Store a pointer to the freed object class if the block is large enough.}
+  if LByteOffset >= CTObjectInstanceSize then
+  begin
+    PPointerArray(LPUserArea)[0] := TFastMM_FreedObject;
+    {$ifdef 32Bit}
+    PIntegerArray(LPUserArea)[1] := Integer(CDebugFillPattern4B);
+    {$endif}
+    Dec(LByteOffset, 8);
+    Inc(LPUserArea, 8);
+  end;
+
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
@@ -3098,9 +3249,21 @@ var
   LPUserArea: PByte;
   LFillPatternIntact: Boolean;
 begin
-  LFillPatternIntact := True;
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
+  LFillPatternIntact := True;
+
+  {If the block is large enough the first 4/8 bytes should be a pointer to the freed object class.}
+  if LByteOffset >= CTObjectInstanceSize then
+  begin
+    LFillPatternIntact := (PPointer(LPUserArea)^ = TFastMM_FreedObject)
+    {$ifdef 32Bit}
+      and (PIntegerArray(LPUserArea)[1] = Integer(CDebugFillPattern4B));
+    {$endif};
+    Dec(LByteOffset, 8);
+    Inc(LPUserArea, 8);
+  end;
+
 
   if LByteOffset and 1 <> 0 then
   begin
@@ -3259,6 +3422,7 @@ begin
 
   end;
 end;
+
 
 {----------------------------------------------------}
 {------------Invalid Free/realloc handling-----------}
