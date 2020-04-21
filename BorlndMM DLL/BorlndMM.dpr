@@ -17,7 +17,7 @@ Usage:
 library BorlndMM;
 
 uses
-  FastMM5 in 'FastMM5.pas';
+  FastMM5;
 
 {$R *.RES}
 
