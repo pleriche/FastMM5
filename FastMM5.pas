@@ -6007,6 +6007,89 @@ begin
 end;
 
 function FastMM_ReallocMem_ReallocSmallBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
+{$ifdef X86ASM}
+asm
+  {Get the span pointer in esi}
+  movzx ecx, word ptr [eax - 2]
+  push esi
+  and ecx, CDropSmallBlockFlagsMask
+  shl ecx, CSmallBlockSpanOffsetBitShift
+  mov esi, eax
+  and esi, -CMediumBlockAlignment
+  sub esi, ecx
+
+  {Get the small block manager in esi}
+  mov esi, TSmallBlockSpanHeader(esi).SmallBlockManager
+
+  {Get the old available size in ecx}
+  movzx ecx, TSmallBlockManager(esi).BlockSize
+  sub ecx, CSmallBlockHeaderSize
+
+  {Is it an upsize or downsize?}
+  cmp ecx, edx
+  jb @IsUpSize
+
+  {It's a downsize.  Do we need to allocate a smaller block?  Only if the new block size is less than a quarter of the
+  available size less SmallBlockDownsizeCheckAdder bytes.}
+  lea esi, [edx * 4 + CSmallBlockDownsizeCheckAdder]
+  cmp esi, ecx
+  jae @Done2
+
+  {Keep the old pointer in ebx}
+  push ebx
+  mov ebx, eax
+
+  {Keep the new size in esi}
+  mov esi, edx
+
+  {Allocate the new block, move the old data across and then free the old block.}
+  mov eax, edx
+  call FastMM_GetMem
+  test eax, eax
+  jz @Done
+  mov ecx, esi
+  mov esi, eax
+  mov edx, eax
+  mov eax, ebx
+  call System.Move
+  mov eax, ebx
+  call FastMM_FreeMem
+  mov eax, esi
+  jmp @Done
+
+@IsUpSize:
+  {Keep the old pointer in ebx}
+  push ebx
+  mov ebx, eax
+
+  {This pointer is being reallocated to a larger block and therefore it is logical to assume that it may be enlarged
+  again.  Since reallocations are expensive, there is a minimum upsize percentage to avoid unnecessary future move
+  operations.}
+  lea eax, [ecx * 2 + CSmallBlockUpsizeAdder]
+  cmp eax, edx
+  ja @GotNewSize
+  mov eax, edx
+@GotNewSize:
+
+  {Allocate the new block, move the old data across and then free the old block.}
+  call FastMM_GetMem
+  test eax, eax
+  jz @Done
+  movzx ecx, TSmallBlockManager(esi).BlockSize
+  sub ecx, CSmallBlockHeaderSize
+  push eax
+  mov edx, eax
+  mov eax, ebx
+  call TSmallBlockManager(esi).UpsizeMoveProcedure
+  mov eax, ebx
+  call FastMM_FreeMem
+  pop eax
+
+@Done:
+  pop ebx
+@Done2:
+  pop esi
+{$else}
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LPSmallBlockManager: PSmallBlockManager;
@@ -6064,6 +6147,7 @@ begin
     end;
 
   end;
+{$endif}
 end;
 
 
