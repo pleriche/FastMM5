@@ -385,7 +385,6 @@ following minimum alignments are always in effect, regardless of any alignment r
   Allocations greater than 606 bytes: maa64Bytes}
 procedure FastMM_EnterMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
 procedure FastMM_ExitMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
-
 {Returns the current minimum address alignment in effect.}
 function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignment;
 
@@ -408,6 +407,9 @@ memory manager has changed.  Note that debug mode comes with a severe performanc
 metadata all blocks that are allocated while debug mode is active will use significantly more address space.}
 function FastMM_EnterDebugMode: Boolean;
 function FastMM_ExitDebugMode: Boolean;
+{Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
+FastMM_ExitDebugMode.}
+function FastMM_DebugModeActive: Boolean;
 
 {No-op call stack routines.}
 procedure FastMM_NoOpGetStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
@@ -1701,14 +1703,13 @@ end;
 
 {If another thread is ready to run on the current CPU, give it a chance to execute.  This is typically called if the
 current thread is unable to make any progress, because it is waiting for locked resources.}
-procedure OS_AllowOtherThreadToRun;
+procedure OS_AllowOtherThreadToRun; inline;
 begin
-  Inc(FastMM_ThreadContentionCount);
   Winapi.Windows.SwitchToThread;
 end;
 
 {Returns the thread ID for the calling thread.}
-function OS_GetCurrentThreadID: Cardinal;
+function OS_GetCurrentThreadID: Cardinal; inline;
 begin
   Result := Winapi.Windows.GetCurrentThreadID;
 end;
@@ -1796,7 +1797,7 @@ begin
   CloseHandle(LFileHandle);
 end;
 
-procedure OS_OutputDebugString(APDebugMessage: PWideChar);
+procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
 begin
   Winapi.Windows.OutputDebugString(APDebugMessage);
 end;
@@ -3172,6 +3173,12 @@ begin
 {$endif}
 end;
 
+{Logs a thread contention and yields execution to another thread that is ready to run.}
+procedure LogThreadContentionAndYieldToOtherThread;
+begin
+  Inc(FastMM_ThreadContentionCount);
+  OS_AllowOtherThreadToRun;
+end;
 
 {-----------------------------------------}
 {--------Debug block management-----------}
@@ -3482,7 +3489,7 @@ begin
     end;
 
     {All large block managers are locked:  Back off and try again.}
-    OS_AllowOtherThreadToRun;
+    LogThreadContentionAndYieldToOtherThread;
 
   end;
 end;
@@ -4594,7 +4601,7 @@ asm
   {--------Back off--------}
 
   {All arenas are currently locked:  Back off and try again.}
-  call OS_AllowOtherThreadToRun
+  call LogThreadContentionAndYieldToOtherThread
   jmp @OuterLoop
 
 @UnlockManagerAndExit:
@@ -4775,7 +4782,7 @@ begin
     {--------Back off--------}
 
     {All arenas are currently locked:  Back off and try again.}
-    OS_AllowOtherThreadToRun;
+    LogThreadContentionAndYieldToOtherThread;
 
   end;
 
@@ -5710,7 +5717,7 @@ asm
 
   {All arenas are currently locked:  Back off and start again at the first arena}
   push eax
-  call OS_AllowOtherThreadToRun
+  call LogThreadContentionAndYieldToOtherThread
   pop eax
   jmp @Attempt1Loop
 {$else}
@@ -5829,7 +5836,7 @@ begin
     {--------------Back off--------------
     All arenas are currently locked:  Back off and start again at the first arena}
 
-    OS_AllowOtherThreadToRun;
+    LogThreadContentionAndYieldToOtherThread;
 
   end;
 {$endif}
@@ -8264,6 +8271,11 @@ begin
   end
   else
     Result := False;
+end;
+
+function FastMM_DebugModeActive: Boolean;
+begin
+  Result := DebugModeCounter > 0;
 end;
 
 procedure FastMM_ApplyLegacyConditionalDefines;
