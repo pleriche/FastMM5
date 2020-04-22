@@ -3567,7 +3567,7 @@ begin
 
     if (LPLargeBlockManager.PendingFreeList <> nil)
       and (LPLargeBlockManager.LargeBlockManagerLocked = 0)
-      and (AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0) then
+      and (AtomicExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1) = 0) then
     begin
 
       Result := ProcessLargeBlockPendingFrees_ArenaAlreadyLocked(LPLargeBlockManager);
@@ -3623,7 +3623,7 @@ begin
       begin
 
         if (LPLargeBlockManager.LargeBlockManagerLocked = 0)
-          and (AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0) then
+          and (AtomicExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1) = 0) then
         begin
           PLargeBlockHeader(Result).LargeBlockArena := LPLargeBlockManager;
 
@@ -4000,7 +4000,8 @@ begin
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
     change the sequential feed span.}
-    if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue, 0, LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
+    if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue, 0,
+      LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
       LSequentialFeedFreeSize := LPreviousLastSequentialFeedBlockOffset - CMediumBlockSpanHeaderSize;
 
@@ -4716,9 +4717,10 @@ asm
   test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
   jz @Attempt1NextManager
 @Attempt1TryLock:
-  mov eax, $100
-  lock cmpxchg byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, ah
-  jne @Attempt1NextManager
+  mov al, 1
+  xchg byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, al
+  test al, al
+  jnz @Attempt1NextManager
 
   {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
   a block that is of sufficient size if possible.}
@@ -4912,7 +4914,7 @@ begin
         and ((LPMediumBlockManager.PendingFreeList <> nil)
           or ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
           or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0))
-        and (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0) then
+        and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
       begin
 
         {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
@@ -5081,7 +5083,7 @@ begin
         LPMediumBlockSpan := GetMediumBlockSpan(APointer);
         LPMediumBlockManager := LPMediumBlockSpan.MediumBlockArena;
         if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
-          and (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0) then
+          and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
         begin
 
           {We need to recheck this, since another thread could have grabbed the block before the manager could be
@@ -5476,7 +5478,7 @@ asm
 
   {Unlink the current pending free list}
   xor eax, eax
-  lock xchg TSmallBlockManager(esi).PendingFreeList, eax
+  xchg TSmallBlockManager(esi).PendingFreeList, eax
 
   {Process the pending free list.}
   pop esi
@@ -5743,7 +5745,7 @@ asm
   push esi
   {Get the old pending free list pointer in esi}
   xor esi, esi
-  lock xchg TSmallBlockManager(eax).PendingFreeList, esi
+  xchg TSmallBlockManager(eax).PendingFreeList, esi
   {Get the next block in the chain in eax}
   mov edx, [esi]
 
@@ -5933,12 +5935,10 @@ asm
 
 @Attempt1LockManagerAndTryGetBlock:
   {Try to lock the manager}
-  mov edx, eax
-  xor eax, eax
   mov cl, 1
-  lock cmpxchg byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, cl
-  mov eax, edx
-  jne @Attempt1TrySequentialFeed
+  xchg byte ptr TSmallBlockManager(eax).SmallBlockManagerLocked, cl
+  test cl, cl
+  jnz @Attempt1TrySequentialFeed
 
   {1.1) Try to get a pending free block.  If there's no pending free block after locking the arena, try reusing a free
   block.}
@@ -6064,7 +6064,7 @@ begin
         it has a partially free span.}
         if ((APSmallBlockManager.PendingFreeList <> nil)
             or (NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager)))
-          and (AtomicCmpExchange(APSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0) then
+          and (AtomicExchange(APSmallBlockManager.SmallBlockManagerLocked, 1) = 0) then
         begin
 
           {Try to reuse a pending free block first.}
@@ -6774,7 +6774,6 @@ begin
           {The small block manager has pending frees, but could not be locked.}
           Result := False;
         end;
-
       end;
 
       Inc(LPSmallBlockManager);
@@ -6788,13 +6787,12 @@ begin
 
     if LPMediumBlockManager.PendingFreeList <> nil then
     begin
-
       if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
       begin
         {Process the pending frees list.}
         LPPendingFreeBlock := AtomicExchange(LPMediumBlockManager.PendingFreeList, nil);
         if LPPendingFreeBlock <> nil then
-           FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LPPendingFreeBlock, True)
+          FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LPPendingFreeBlock, True)
         else
           LPMediumBlockManager.MediumBlockManagerLocked := 0;
       end
@@ -6817,18 +6815,14 @@ begin
     begin
       if AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0 then
       begin
-
         if ProcessLargeBlockPendingFrees_ArenaAlreadyLocked(LPLargeBlockManager) <> 0 then
-        begin
           System.Error(reInvalidPtr);
-        end;
-
+      end
+      else
+      begin
+        {The large block manager has pending frees, but could not be locked.}
+        Result := False;
       end;
-    end
-    else
-    begin
-      {The large block manager has pending frees, but could not be locked.}
-      Result := False;
     end;
 
     Inc(LPLargeBlockManager);
@@ -6886,12 +6880,8 @@ begin
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
-      while True do
-      begin
-        if AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0 then
-          Break;
+      while AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) <> 0 do
         OS_AllowOtherThreadToRun;
-      end;
 
       LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
       while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
@@ -6921,12 +6911,8 @@ begin
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
-      while True do
-      begin
-        if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
-          Break;
+      while AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) <> 0 do
         OS_AllowOtherThreadToRun;
-      end;
 
       LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
       while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
@@ -6983,12 +6969,8 @@ begin
               begin
                 LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
-                while True do
-                begin
-                  if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
-                    Break;
+                while AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) <> 0 do
                   OS_AllowOtherThreadToRun;
-                end;
 
                 {Memory fence required for ARM}
 
@@ -7774,11 +7756,8 @@ end;
 function LockExpectedMemoryLeaksList: Boolean;
 begin
   {Lock the expected leaks list}
-  while True do
-  begin
-    if AtomicCmpExchange(ExpectedMemoryLeaksListLocked, 1, 0) = 0 then
-      Break;
-  end;
+  while AtomicCmpExchange(ExpectedMemoryLeaksListLocked, 1, 0) <> 0 do
+    OS_AllowOtherThreadToRun;
 
   {Allocate the list if it does not exist}
   if ExpectedMemoryLeaks = nil then
@@ -8453,11 +8432,8 @@ var
   LNewMemoryManager: TMemoryManagerEx;
 begin
   {SetMemoryManager is not thread safe.}
-  while True do
-  begin
-    if AtomicCmpExchange(SettingMemoryManager, 1, 0) = 0 then
-      Break;
-  end;
+  while AtomicCmpExchange(SettingMemoryManager, 1, 0) <> 0 do
+    OS_AllowOtherThreadToRun;
 
   {Check that the memory manager has not been changed since the last time it was set.}
   if FastMM_InstalledMemoryManagerChangedExternally then
