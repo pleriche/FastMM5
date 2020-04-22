@@ -3521,12 +3521,7 @@ begin
   Result := 0;
 
   {Get the pending free list}
-  while True do
-  begin
-    LOldPendingFreeList := APLargeBlockManager.PendingFreeList;
-    if AtomicCmpExchange(APLargeBlockManager.PendingFreeList, nil, LOldPendingFreeList) = LOldPendingFreeList then
-      Break;
-  end;
+  LOldPendingFreeList := AtomicExchange(APLargeBlockManager.PendingFreeList, nil);
 
   {Unlink all the large blocks from the manager}
   LPCurrentLargeBlock := LOldPendingFreeList;
@@ -4171,17 +4166,8 @@ begin
         APMediumBlock, False);
 
       {Process the pending frees list.}
-      while True do
-      begin
-        LFirstPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
-        if (AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, nil, LFirstPendingFreeBlock) = LFirstPendingFreeBlock) then
-        begin
-          Result := Result or FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LFirstPendingFreeBlock, True);
-
-          Exit;
-        end;
-      end;
-
+      LFirstPendingFreeBlock := AtomicExchange(LPMediumBlockManager.PendingFreeList, nil);
+      Result := Result or FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LFirstPendingFreeBlock, True);
     end;
 
   end
@@ -4380,101 +4366,91 @@ var
   LPPendingFreeBlock, LPNextPendingFreeBlock: Pointer;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
 begin
-
   {Retrieve the pending free list pointer.}
+  LPPendingFreeBlock := AtomicExchange(APMediumBlockManager.PendingFreeList, nil);
+  if LPPendingFreeBlock = nil then
+    Exit(nil);
+
+  {Process all the pending frees, but keep the smallest block that is at least AMinimumBlockSize in size (if
+  there is one).}
+  LBestMatchBlockSize := MaxInt;
+  Result := nil;
+
   while True do
   begin
-    LPPendingFreeBlock := APMediumBlockManager.PendingFreeList;
-    if AtomicCmpExchange(APMediumBlockManager.PendingFreeList, nil, LPPendingFreeBlock) = LPPendingFreeBlock then
-      Break;
-  end;
+    LPNextPendingFreeBlock := PPointer(LPPendingFreeBlock)^;
+    LBlockSize := GetMediumBlockSize(LPPendingFreeBlock);
 
-  if LPPendingFreeBlock <> nil then
-  begin
-
-    {Process all the pending frees, but keep the smallest block that is at least AMinimumBlockSize in size (if
-    there is one).}
-    LBestMatchBlockSize := MaxInt;
-    Result := nil;
-
-    while True do
+    if (LBlockSize >= AMinimumBlockSize) and (LBlockSize < LBestMatchBlockSize) then
     begin
-      LPNextPendingFreeBlock := PPointer(LPPendingFreeBlock)^;
-      LBlockSize := GetMediumBlockSize(LPPendingFreeBlock);
-
-      if (LBlockSize >= AMinimumBlockSize) and (LBlockSize < LBestMatchBlockSize) then
+      {Free the previous best match block.}
+      if Result <> nil then
       begin
-        {Free the previous best match block.}
-        if Result <> nil then
-        begin
-          LPMediumBlockSpan := GetMediumBlockSpan(Result);
-          if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(
-            APMediumBlockManager, LPMediumBlockSpan, Result, False) <> 0 then
-          begin
-            System.Error(reInvalidPtr);
-          end;
-        end;
-        Result := LPPendingFreeBlock;
-        LBestMatchBlockSize := LBlockSize;
-      end
-      else
-      begin
-        LPMediumBlockSpan := GetMediumBlockSpan(LPPendingFreeBlock);
+        LPMediumBlockSpan := GetMediumBlockSpan(Result);
         if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(
-          APMediumBlockManager, LPMediumBlockSpan, LPPendingFreeBlock, False) <> 0 then
+          APMediumBlockManager, LPMediumBlockSpan, Result, False) <> 0 then
         begin
           System.Error(reInvalidPtr);
         end;
       end;
-
-      if LPNextPendingFreeBlock = nil then
-        Break;
-
-      LPPendingFreeBlock := LPNextPendingFreeBlock;
-    end;
-
-    {Was there a suitable block in the pending free list?}
-    if Result <> nil then
+      Result := LPPendingFreeBlock;
+      LBestMatchBlockSize := LBlockSize;
+    end
+    else
     begin
-
-      {If the block currently has debug info, check it for consistency.}
-      if BlockHasDebugInfo(Result)
-        and (not CheckFreeDebugBlockIntact(Result)) then
+      LPMediumBlockSpan := GetMediumBlockSpan(LPPendingFreeBlock);
+      if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(
+        APMediumBlockManager, LPMediumBlockSpan, LPPendingFreeBlock, False) <> 0 then
       begin
-        {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
-        APMediumBlockManager.MediumBlockManagerLocked := 0;
         System.Error(reInvalidPtr);
       end;
+    end;
 
-      {Should the block be split?}
-      if LBestMatchBlockSize > AMaximumBlockSize then
-      begin
-        {Get the size of the second split}
-        LSecondSplitSize := LBestMatchBlockSize - AOptimalBlockSize;
-        {Adjust the block size}
-        LBestMatchBlockSize := AOptimalBlockSize;
-        {Split the block in two}
-        LPSecondSplit := PMediumFreeBlockContent(PByte(Result) + LBestMatchBlockSize);
-        LPMediumBlockSpan := GetMediumBlockSpan(Result);
-        SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, True, False);
-        SetMediumBlockHeader_SetMediumBlockSpan(LPSecondSplit, LPMediumBlockSpan);
+    if LPNextPendingFreeBlock = nil then
+      Break;
 
-        {The second split is an entirely new block so all the header fields must be set.}
-        SetMediumBlockHeader_SetIsSmallBlockSpan(LPSecondSplit, False);
+    LPPendingFreeBlock := LPNextPendingFreeBlock;
+  end;
 
-        {Bin the second split.}
-        if LSecondSplitSize >= CMinimumMediumBlockSize then
-          InsertMediumBlockIntoBin(APMediumBlockManager, LPSecondSplit, LSecondSplitSize);
+  {Was there a suitable block in the pending free list?}
+  if Result <> nil then
+  begin
 
-      end;
+    {If the block currently has debug info, check it for consistency.}
+    if BlockHasDebugInfo(Result)
+      and (not CheckFreeDebugBlockIntact(Result)) then
+    begin
+      {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
+      APMediumBlockManager.MediumBlockManagerLocked := 0;
+      System.Error(reInvalidPtr);
+    end;
 
-      {Set the header and trailer for this block, clearing the debug info flag.}
-      SetMediumBlockHeader_SetSizeAndFlags(Result, LBestMatchBlockSize, False, False);
+    {Should the block be split?}
+    if LBestMatchBlockSize > AMaximumBlockSize then
+    begin
+      {Get the size of the second split}
+      LSecondSplitSize := LBestMatchBlockSize - AOptimalBlockSize;
+      {Adjust the block size}
+      LBestMatchBlockSize := AOptimalBlockSize;
+      {Split the block in two}
+      LPSecondSplit := PMediumFreeBlockContent(PByte(Result) + LBestMatchBlockSize);
+      LPMediumBlockSpan := GetMediumBlockSpan(Result);
+      SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, True, False);
+      SetMediumBlockHeader_SetMediumBlockSpan(LPSecondSplit, LPMediumBlockSpan);
+
+      {The second split is an entirely new block so all the header fields must be set.}
+      SetMediumBlockHeader_SetIsSmallBlockSpan(LPSecondSplit, False);
+
+      {Bin the second split.}
+      if LSecondSplitSize >= CMinimumMediumBlockSize then
+        InsertMediumBlockIntoBin(APMediumBlockManager, LPSecondSplit, LSecondSplitSize);
 
     end;
-  end
-  else
-    Result := nil;
+
+    {Set the header and trailer for this block, clearing the debug info flag.}
+    SetMediumBlockHeader_SetSizeAndFlags(Result, LBestMatchBlockSize, False, False);
+
+  end;
 end;
 
 {Allocates a free block of at least the size in AMinimumBlockSizeBinNumber.  The arena must be known to have a suitable
@@ -5499,11 +5475,8 @@ asm
   call FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked
 
   {Unlink the current pending free list}
-@GetPendingFreeListLoop:
-  mov eax, TSmallBlockManager(esi).PendingFreeList
-  xor ecx, ecx
-  lock cmpxchg TSmallBlockManager(esi).PendingFreeList, ecx
-  jne @GetPendingFreeListLoop
+  xor eax, eax
+  lock xchg TSmallBlockManager(esi).PendingFreeList, eax
 
   {Process the pending free list.}
   pop esi
@@ -5544,16 +5517,8 @@ begin
       FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, False);
 
       {Process the pending frees list.}
-      while True do
-      begin
-        LFirstPendingFreeBlock := LPSmallBlockManager.PendingFreeList;
-        if (AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, nil, LFirstPendingFreeBlock) = LFirstPendingFreeBlock) then
-        begin
-          Result := FastMM_FreeMem_FreeSmallBlockChain(LFirstPendingFreeBlock, True);
-          Exit;
-        end;
-      end;
-
+      LFirstPendingFreeBlock := AtomicExchange(LPSmallBlockManager.PendingFreeList, nil);
+      Result := FastMM_FreeMem_FreeSmallBlockChain(LFirstPendingFreeBlock, True);
     end;
 
   end
@@ -6778,9 +6743,8 @@ function FastMM_ProcessAllPendingFrees: Boolean;
 var
   LArenaIndex, LBlockTypeIndex: Integer;
   LPSmallBlockManager: PSmallBlockManager;
-  LPPendingFreeBlock, LPNextPendingFreeBlock: Pointer;
+  LPPendingFreeBlock: Pointer;
   LPMediumBlockManager: PMediumBlockManager;
-  LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPLargeBlockManager: PLargeBlockManager;
 begin
   {Assume success, until proven otherwise.}
@@ -6798,26 +6762,12 @@ begin
       begin
         if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
         begin
-
           {Process the pending frees list.}
-          while True do
-          begin
-
-            LPPendingFreeBlock := LPSmallBlockManager.PendingFreeList;
-            if LPPendingFreeBlock = nil then
-            begin
-              LPSmallBlockManager.SmallBlockManagerLocked := 0;
-              Break;
-            end;
-
-            if (AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, nil, LPPendingFreeBlock) = LPPendingFreeBlock) then
-            begin
-              FastMM_FreeMem_FreeSmallBlockChain(LPPendingFreeBlock, True);
-              Break;
-            end;
-
-          end;
-
+          LPPendingFreeBlock := AtomicExchange(LPSmallBlockManager.PendingFreeList, nil);
+          if LPPendingFreeBlock <> nil then
+            FastMM_FreeMem_FreeSmallBlockChain(LPPendingFreeBlock, True)
+          else
+            LPSmallBlockManager.SmallBlockManagerLocked := 0;
         end
         else
         begin
@@ -6841,32 +6791,12 @@ begin
 
       if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
       begin
-
-        {Retrieve the pending free list pointer.}
-        while True do
-        begin
-          LPPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
-          if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, nil, LPPendingFreeBlock) = LPPendingFreeBlock then
-            Break;
-        end;
-
-        while LPPendingFreeBlock <> nil do
-        begin
-          LPNextPendingFreeBlock := PPointer(LPPendingFreeBlock)^;
-
-          LPMediumBlockSpan := GetMediumBlockSpan(LPPendingFreeBlock);
-          if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(LPMediumBlockManager, LPMediumBlockSpan,
-            LPPendingFreeBlock, False) <> 0 then
-          begin
-            System.Error(reInvalidPtr);
-          end;
-
-          LPPendingFreeBlock := LPNextPendingFreeBlock;
-        end;
-
-        {Memory fence needed here for ARM}
-
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+        {Process the pending frees list.}
+        LPPendingFreeBlock := AtomicExchange(LPMediumBlockManager.PendingFreeList, nil);
+        if LPPendingFreeBlock <> nil then
+           FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LPPendingFreeBlock, True)
+        else
+          LPMediumBlockManager.MediumBlockManagerLocked := 0;
       end
       else
       begin
