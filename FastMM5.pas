@@ -5577,6 +5577,71 @@ end;
 manager is assumed to be locked, and will be unlocked before exit.  There may not be an existing sequential feed span
 with available space.}
 function FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager: PSmallBlockManager): Pointer;
+{$ifdef X86ASM}
+asm
+  push ebx
+  push esi
+
+  {Small block manager in esi}
+  mov esi, eax
+
+  mov eax, TSmallBlockManager(esi).MinimumSpanSize
+  mov edx, TSmallBlockManager(esi).OptimalSpanSize
+  lea ecx, [edx + CSmallBlockSpanMaximumAmountWithWhichOptimalSizeMayBeExceeded]
+  call FastMM_GetMem_GetMediumBlock
+  test eax, eax
+  jz @Done
+
+  {Save the span pointer in ebx}
+  mov ebx, eax
+
+  {Get the span size in eax}
+  movzx eax, TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize)
+  shl eax, CMediumBlockAlignmentBits
+
+  {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header,
+  as well as the difference in the medium and small block header sizes for the last block.  All the sequential
+  feed blocks are initially marked as used.  This implies that the sequential feed span can never be freed until
+  all blocks have been fed sequentially.}
+  sub eax, CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize
+  xor edx, edx
+  movzx ecx, TSmallBlockManager(esi).BlockSize
+  div ecx
+
+  {Update the medium block header to indicate that this medium block serves as a small block span.}
+  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
+
+  {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
+  mov TSmallBlockSpanHeader(ebx).SmallBlockManager, esi
+  mov TSmallBlockSpanHeader(ebx).FirstFreeBlock, 0
+  mov TSmallBlockSpanHeader(ebx).TotalBlocksInSpan, eax
+  mov TSmallBlockSpanHeader(ebx).BlocksInUse, eax
+
+  {This is the new sequential feed span.  This must be set before the offset is set.}
+  mov TSmallBlockManager(esi).SequentialFeedSmallBlockSpan, ebx
+
+  {Get the offset of the last block in eax}
+  dec eax
+  mul ecx
+  add eax, CSmallBlockSpanHeaderSize
+
+  {Set the span up for sequential block serving}
+  mov TSmallBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue, eax
+  mov TSmallBlockManager(esi).SmallBlockManagerLocked, False
+
+  {Return the last block in the span}
+  mov ecx, eax
+  add eax, ebx
+
+  {Set the header for the returned block.}
+  shr ecx, CMediumBlockAlignmentBits
+  lea ecx, [ecx * 8 + CIsSmallBlockFlag] //low 3 bits are used by flags
+  mov TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(eax - CSmallBlockHeaderSize), cx
+
+@Done:
+  pop esi
+  pop ebx
+{$else}
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LSpanSize, LLastBlockOffset, LTotalBlocksInSpan: Integer;
@@ -5596,6 +5661,7 @@ begin
   {Set up the block span}
   LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
   LPSmallBlockSpan.FirstFreeBlock := nil;
+  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
   APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
   {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header,
   as well as the difference in the medium and small block header sizes for the last block.  All the sequential
@@ -5606,11 +5672,11 @@ begin
   LPSmallBlockSpan.TotalBlocksInSpan := LTotalBlocksInSpan;
   LPSmallBlockSpan.BlocksInUse := LTotalBlocksInSpan;
 
+  {Memory fence required for ARM here.}
+
   {Set it up for sequential block serving}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
   APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue := LLastBlockOffset;
-
-  {Memory fence required for ARM here.}
 
   APSmallBlockManager.SmallBlockManagerLocked := 0;
 
@@ -5618,6 +5684,7 @@ begin
 
   {Set the header for the returned block.}
   SetSmallBlockHeader(Result, LPSmallBlockSpan, False, False);
+{$endif}
 end;
 
 {Attempts to split off a small block from the sequential feed span for the arena.  Returns the block on success, nil if
