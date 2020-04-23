@@ -83,6 +83,7 @@ uses
 {$StackFrames Off}
 {$TypedAddress Off}
 {$LongStrings On}
+{$Align 16} //The SmallBlockManagers array entries contain fields that should be in the same cache line.
 
 {Calling the deprecated GetHeapStatus is unavoidable, so suppress the warning.}
 {$warn Symbol_Deprecated Off}
@@ -90,10 +91,8 @@ uses
 
 {$if SizeOf(Pointer) = 8}
   {$define 64Bit}
-  {$align 8}
 {$else}
   {$define 32Bit}
-  {$align 4}
 {$endif}
 
 {$ifdef CPUX86}
@@ -853,8 +852,9 @@ type
 
   PSmallBlockSpanHeader = ^TSmallBlockSpanHeader;
 
-  {Always 64 bytes in size, under both 32-bit and 64-bit}
-  TSmallBlockManager = packed record
+  {Always 64 bytes in size, under both 32-bit and 64-bit.  This record is not declared as packed, because the
+  SmallBlockManagers array must be aligned on a 16 byte boundary.}
+  TSmallBlockManager = record
     {The first/last partially free span in the arena.  This field must be at the same offsets as
     TSmallBlockSpanHeader.NextPartiallyFreeSpan and TSmallBlockSpanHeader.PreviousPartiallyFreeSpan.}
     FirstPartiallyFreeSpan: PSmallBlockSpanHeader; //Do not change position
@@ -862,7 +862,7 @@ type
 
     {The offset from the start of SequentialFeedSmallBlockSpan of the last block that was fed sequentially, as well as
     an ABA counter to solve concurrency issues.}
-    LastSequentialFeedBlockOffset: TIntegerWithABACounter;
+    LastSmallBlockSequentialFeedOffset: TIntegerWithABACounter;
 
     {The span that is current being used to serve blocks in sequential order, from the last block down to the first.}
     SequentialFeedSmallBlockSpan: PSmallBlockSpanHeader;
@@ -960,12 +960,12 @@ type
   PMediumBlockSpanHeader = ^TMediumBlockSpanHeader;
   TMediumBlockSpanHeader = packed record
     {Points to the previous and next medium block spans.  This circular linked list is used to track memory leaks on
-    program shutdown.  Must be at the same offsets as TMediumBlockManager.FirstMediumBlockSpan and
-    TMediumBlockManager.LastMediumBlockSpan.}
+    program shutdown.  Must be at the same offsets as TMediumBlockManager.FirstMediumBlockSpanHeader and
+    TMediumBlockManager.LastMediumBlockSpanHeader.}
     NextMediumBlockSpanHeader: PMediumBlockSpanHeader; //Do not change position
     PreviousMediumBlockSpanHeader: PMediumBlockSpanHeader; //Do not change position
-    {The arena to which this medium block span belongs.}
-    MediumBlockArena: PMediumBlockManager;
+    {The manager for the arena to which this medium block span belongs.}
+    MediumBlockManager: PMediumBlockManager;
     {The size of this medium block span, in bytes.}
     SpanSize: Integer;
 {$ifdef 64Bit}
@@ -995,13 +995,16 @@ type
   PMediumFreeBlockFooter = ^TMediumFreeBlockFooter;
 {$PointerMath Off}
 
+  {Medium block manager.  The record is not declared as packed, because the MediumBlockManagers array must be aligned
+  on a 16 byte boundary.}
   TMediumBlockManager = record
-    {Maintains a circular list of all medium block spans to enable memory leak detection on program shutdown.}
+    {Maintains a circular list of all medium block spans to enable memory leak detection on program shutdown.  These
+    fields must be at the same position as the corresponding fields in TMediumBlockSpanHeader.}
     FirstMediumBlockSpanHeader: PMediumBlockSpanHeader; //Do not change position
     LastMediumBlockSpanHeader: PMediumBlockSpanHeader; //Do not change position
 
     {The sequential feed medium block span.}
-    LastSequentialFeedBlockOffset: TIntegerWithABACounter;
+    LastMediumBlockSequentialFeedOffset: TIntegerWithABACounter;
     SequentialFeedMediumBlockSpan: PMediumBlockSpanHeader;
 
     {Singly linked list of blocks in this arena that should be freed.  If a block must be freed but the arena is
@@ -1039,8 +1042,8 @@ type
     shutdown.}
     NextLargeBlockHeader: PLargeBlockHeader; //Do not change position
     PreviousLargeBlockHeader: PLargeBlockHeader; //Do not change position
-    {The large block arena to which this block belongs.}
-    LargeBlockArena: PLargeBlockManager;
+    {The large block manager for the arena to which this block belongs.}
+    LargeBlockManager: PLargeBlockManager;
     {The actual block size as obtained from the operating system.}
     ActualBlockSize: NativeInt;
     {The user allocated size of the large block}
@@ -1068,6 +1071,7 @@ type
     {0 = unlocked, 1 = locked, must be Integer due to RSP-25672}
     LargeBlockManagerLocked: Integer; //0 = unlocked, 1 = locked
   end;
+
   TLargeBlockArenas = array[0..CLargeBlockArenaCount - 1] of TLargeBlockManager;
 
   {---------Management variables----------}
@@ -1278,11 +1282,17 @@ const
 var
   AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
 
+  {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
   SmallBlockTypeLookup: array[0.. CMaximumSmallBlockSize div CSmallBlockGranularity - 1] of Byte;
 
-  SmallBlockArenas: TSmallBlockArenas;
-  MediumBlockArenas: TMediumBlockArenas;
-  LargeBlockArenas: TLargeBlockArenas;
+  {The small block managers.  Every arena has a separate manager for each small block size.}
+  SmallBlockManagers: TSmallBlockArenas;
+
+  {The medium block manager for each medium block arena.}
+  MediumBlockManagers: TMediumBlockArenas;
+
+  {The large block manager for each large block arena.}
+  LargeBlockManagers: TLargeBlockArenas;
 
   {The default size of new medium block spans.  Must be a multiple of 64K and may not exceed CMaximumMediumBlockSpanSize.}
   DefaultMediumBlockSpanSize: Integer;
@@ -1297,10 +1307,13 @@ var
   EmergencyReserveAddressSpace: Pointer;
 {$endif}
 
+  {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
 
   {The difference between the number of times EnterDebugMode has been called vs ExitDebugMode.}
   DebugModeCounter: Integer;
+
+  {A lock that allows switching between debug and normal mode to be thread safe.}
   SettingMemoryManager: Integer; //0 = False, 1 = True;
 
   {The memory manager that was in place before this memory manager was installed.}
@@ -3560,7 +3573,7 @@ var
 begin
   Result := 0;
 
-  LPLargeBlockManager := @LargeBlockArenas[0];
+  LPLargeBlockManager := @LargeBlockManagers[0];
   for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
   begin
 
@@ -3617,14 +3630,14 @@ begin
     while True do
     begin
 
-      LPLargeBlockManager := @LargeBlockArenas[0];
+      LPLargeBlockManager := @LargeBlockManagers[0];
       for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
       begin
 
         if (LPLargeBlockManager.LargeBlockManagerLocked = 0)
           and (AtomicExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1) = 0) then
         begin
-          PLargeBlockHeader(Result).LargeBlockArena := LPLargeBlockManager;
+          PLargeBlockHeader(Result).LargeBlockManager := LPLargeBlockManager;
 
           {Insert the large block into the linked list of large blocks}
           LOldFirstLargeBlock := LPLargeBlockManager.FirstLargeBlockHeader;
@@ -3660,7 +3673,7 @@ var
   LOldPendingFreeList: Pointer;
 begin
   LPLargeBlockHeader := @PLargeBlockHeader(APLargeBlock)[-1];
-  LPLargeBlockManager := LPLargeBlockHeader.LargeBlockArena;
+  LPLargeBlockManager := LPLargeBlockHeader.LargeBlockManager;
 
   {Try to lock the large block manager so that the block may be freed.}
   if AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0 then
@@ -3954,8 +3967,8 @@ begin
   begin
     {It's not a fully circular linked list:  Bins have no "previous" pointer.  Therefore we need to check whether
     LPNextFreeBlock points to the bin or not before setting the previous block pointer.}
-    if (NativeUInt(LPNextFreeBlock) > NativeUInt(@MediumBlockArenas) + SizeOf(MediumBlockArenas))
-      or (NativeUInt(LPNextFreeBlock) < NativeUInt(@MediumBlockArenas)) then
+    if (NativeUInt(LPNextFreeBlock) > NativeUInt(@MediumBlockManagers) + SizeOf(MediumBlockManagers))
+      or (NativeUInt(LPNextFreeBlock) < NativeUInt(@MediumBlockManagers)) then
     begin
       LPNextFreeBlock.PreviousFreeMediumBlock := LPPreviousFreeBlock;
     end;
@@ -3989,7 +4002,7 @@ begin
   while True do
   begin
 
-    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue;
+    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
 
     {Is there anything to bin?}
     if LPreviousLastSequentialFeedBlockOffset <= CMediumBlockSpanHeaderSize then
@@ -3997,7 +4010,7 @@ begin
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
     change the sequential feed span.}
-    if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue, 0,
+    if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, 0,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
       LSequentialFeedFreeSize := LPreviousLastSequentialFeedBlockOffset - CMediumBlockSpanHeaderSize;
@@ -4085,7 +4098,7 @@ begin
   optimization strategy).}
   if (LBlockSize <> (APMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize))
     or ((OptimizationStrategy <> mmosOptimizeForLowMemoryUsage)
-      and (APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue < CMaximumMediumBlockSize)
+      and (APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue < CMaximumMediumBlockSize)
       and (APMediumBlockManager.MediumBlockBinBitmaps[CMediumBlockBinGroupCount - 1] and (1 shl 31) = 0)) then
   begin
     if LBlockSize >= CMinimumMediumBlockSize then
@@ -4145,7 +4158,7 @@ var
   LFirstPendingFreeBlock: Pointer;
 begin
   LPMediumBlockSpan := GetMediumBlockSpan(APMediumBlock);
-  LPMediumBlockManager := LPMediumBlockSpan.MediumBlockArena;
+  LPMediumBlockManager := LPMediumBlockSpan.MediumBlockManager;
 
   {Try to lock the medium block manager so that the block may be freed.}
   if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
@@ -4202,7 +4215,7 @@ begin
   if LPNewSpan <> nil then
   begin
     LPNewSpan.SpanSize := LNewSpanSize;
-    LPNewSpan.MediumBlockArena := APMediumBlockManager;
+    LPNewSpan.MediumBlockManager := APMediumBlockManager;
 
     {Insert this span into the circular linked list of medium block spans}
     LOldFirstMediumBlockSpan := APMediumBlockManager.FirstMediumBlockSpanHeader;
@@ -4222,12 +4235,12 @@ begin
 
     {Install this is the new sequential feed span.  The new offset must be set after the new span and ABA counter,
     since other threads may immediately split off blocks the moment the new offset is set.}
-    Inc(APMediumBlockManager.LastSequentialFeedBlockOffset.ABACounter);
+    Inc(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.ABACounter);
     APMediumBlockManager.SequentialFeedMediumBlockSpan := LPNewSpan;
 
     {May need a memory fence here for ARM.}
 
-    APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue := NativeInt(Result) - NativeInt(LPNewSpan);
+    APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := NativeInt(Result) - NativeInt(LPNewSpan);
   end
   else
   begin
@@ -4254,8 +4267,8 @@ asm
 @TrySequentialFeedLoop:
 
   {Get the old ABA counter and offset in edx:eax}
-  mov eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
-  mov edx, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.ABACounter
+  mov eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
+  mov edx, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.ABACounter
 
   {Get the available size in ecx, and check that it is sufficient.}
   lea ecx, [eax - CMediumBlockSpanHeaderSize]
@@ -4277,7 +4290,7 @@ asm
   mov edi, TMediumBlockManager(esi).SequentialFeedMediumBlockSpan
 
   {Try to grab the block.  If it fails, try again from the start.}
-  lock cmpxchg8b TMediumBlockManager(esi).LastSequentialFeedBlockOffset
+  lock cmpxchg8b TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset
   jne @TrySequentialFeedLoop
 
   {Current state: eax = next block offset, ebx = this block offset, edi = sequential feed span}
@@ -4317,7 +4330,7 @@ begin
   {The arena is not necessarily locked, so we may have to try several times to split off a block.}
   while True do
   begin
-    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastSequentialFeedBlockOffset;
+    LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastMediumBlockSequentialFeedOffset;
 
     {Is there space available for at least the minimum size block?}
     LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
@@ -4332,7 +4345,7 @@ begin
 
       LPSequentialFeedSpan := APMediumBlockManager.SequentialFeedMediumBlockSpan;
 
-      if AtomicCmpExchange(APMediumBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
+      if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerAndABACounter,
         LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
         LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
       begin
@@ -4703,7 +4716,7 @@ asm
     1.1) The pending free list
     1.2) From the medium block free lists}
 
-  mov esi, offset MediumBlockArenas
+  mov esi, offset MediumBlockManagers
 @Attempt1Loop:
   cmp byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, 0
   jne @Attempt1NextManager
@@ -4750,7 +4763,7 @@ asm
   mov TMediumBlockManager(esi).MediumBlockManagerLocked, 0
 
 @Attempt1NextManager:
-  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
   jnb @Attempt1Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt1Loop
@@ -4763,11 +4776,11 @@ asm
   {edx = AMinimumBlockSize, eax = AMinimumBlockSize + CMediumBlockSpanHeaderSize}
   mov edx, [esp + CMinimumBlockSizeOffset]
   lea eax, [edx + CMediumBlockSpanHeaderSize]
-  mov esi, offset MediumBlockArenas
+  mov esi, offset MediumBlockManagers
 @Attempt2Loop:
 
   {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
-  cmp eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  cmp eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
   ja @Attempt2NextManager
   mov eax, esi
   mov ecx, [esp + COptimalBlockSizeOffset]
@@ -4779,7 +4792,7 @@ asm
   lea eax, [edx + CMediumBlockSpanHeaderSize]
 
 @Attempt2NextManager:
-  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
   jnb @Attempt2Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt2Loop
@@ -4795,7 +4808,7 @@ asm
     3.3) From the pending free list
     3.4) From a new sequential feed span.}
 
-  mov esi, offset MediumBlockArenas
+  mov esi, offset MediumBlockManagers
 @Attempt3Loop:
 
   {Try to lock the manager}
@@ -4821,7 +4834,7 @@ asm
   at feeding a block sequentially should be made before allocating a new span.}
   mov edx, [esp + CMinimumBlockSizeOffset]
   lea eax, [edx + CMediumBlockSpanHeaderSize]
-  cmp eax, TMediumBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
+  cmp eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
   ja @Attempt3NoSequentialFeed
   mov eax, esi
   mov ecx, [esp + COptimalBlockSizeOffset]
@@ -4851,7 +4864,7 @@ asm
   jmp @UnlockManagerAndExit
 
 @Attempt3NextManager:
-  cmp esi, offset MediumBlockArenas + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
   jnb @Attempt3Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt3Loop
@@ -4900,7 +4913,7 @@ begin
       1.2) From the medium block free lists}
 
 
-    LPMediumBlockManager := @MediumBlockArenas[0];
+    LPMediumBlockManager := @MediumBlockManagers[0];
     while True do
     begin
 
@@ -4940,7 +4953,7 @@ begin
       end;
 
       {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -4950,12 +4963,12 @@ begin
     Try to get a block from a sequential feed span.  This is likely to touch a new page and thus cause a page fault,
     which is expensive.}
 
-    LPMediumBlockManager := @MediumBlockArenas[0];
+    LPMediumBlockManager := @MediumBlockManagers[0];
     while True do
     begin
 
       {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
-      if LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+      if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
       begin
         Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
           AMinimumBlockSize, AOptimalBlockSize);
@@ -4964,7 +4977,7 @@ begin
       end;
 
       {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -4981,7 +4994,7 @@ begin
       3.4) From a new sequential feed span.}
 
 
-    LPMediumBlockManager := @MediumBlockArenas[0];
+    LPMediumBlockManager := @MediumBlockManagers[0];
     while True do
     begin
 
@@ -5000,7 +5013,7 @@ begin
 
         {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second
         attempt at feeding a block sequentially should be made before allocating a new span.}
-        if LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+        if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
         begin
           Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
             AMinimumBlockSize, AOptimalBlockSize);
@@ -5032,7 +5045,7 @@ begin
       end;
 
       {The arena could not be locked - try the next one.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockArenas[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -5074,7 +5087,7 @@ begin
       medium block manager.  If it can be locked and the next block is still free and large enough then stretch the
       medium block in place.}
       LPMediumBlockSpan := GetMediumBlockSpan(APointer);
-      LPMediumBlockManager := LPMediumBlockSpan.MediumBlockArena;
+      LPMediumBlockManager := LPMediumBlockSpan.MediumBlockManager;
       if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
         and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
       begin
@@ -5563,8 +5576,8 @@ begin
 end;
 
 {Allocates a new sequential feed small block span and splits off the first block, returning it.  The small block
-manager is assumed to be locked, and will be unlocked before exit.  There may not be an existing sequential feed span
-with available space.}
+manager for the block size and arena is assumed to be locked, and will be unlocked before exit.  There may not be an
+existing sequential feed span with available space.}
 function FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager: PSmallBlockManager): Pointer;
 {$ifdef X86ASM}
 asm
@@ -5615,7 +5628,7 @@ asm
   add eax, CSmallBlockSpanHeaderSize
 
   {Set the span up for sequential block serving}
-  mov TSmallBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue, eax
+  mov TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue, eax
   mov TSmallBlockManager(esi).SmallBlockManagerLocked, False
 
   {Return the last block in the span}
@@ -5665,7 +5678,7 @@ begin
 
   {Set it up for sequential block serving}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
-  APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue := LLastBlockOffset;
+  APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := LLastBlockOffset;
 
   APSmallBlockManager.SmallBlockManagerLocked := 0;
 
@@ -5689,8 +5702,8 @@ asm
 @TrySequentialFeedLoop:
 
   {Get the old ABA counter and offset in edx:eax}
-  mov eax, TSmallBlockManager(esi).LastSequentialFeedBlockOffset.IntegerValue
-  mov edx, TSmallBlockManager(esi).LastSequentialFeedBlockOffset.ABACounter
+  mov eax, TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue
+  mov edx, TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.ABACounter
 
   {Get the new ABA counter and offset in ecx:ebx}
   movzx edi, TSmallBlockManager(esi).BlockSize
@@ -5705,7 +5718,7 @@ asm
   jle @NoSequentialFeedAvailable
 
   {Try to grab the block.  If it fails, try again from the start.}
-  lock cmpxchg8b TSmallBlockManager(esi).LastSequentialFeedBlockOffset
+  lock cmpxchg8b TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset
   jne @TrySequentialFeedLoop
 
   {The block address is the span + offset.}
@@ -5732,7 +5745,7 @@ var
 begin
   while True do
   begin
-    LPreviousLastSequentialFeedBlockOffset := APSmallBlockManager.LastSequentialFeedBlockOffset;
+    LPreviousLastSequentialFeedBlockOffset := APSmallBlockManager.LastSmallBlockSequentialFeedOffset;
 
     {Subtract the block size and increment the ABA counter to the new sequential feed offset.}
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
@@ -5743,7 +5756,7 @@ begin
     if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
       Exit(nil);
 
-    if AtomicCmpExchange(APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter,
+    if AtomicCmpExchange(APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter,
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
       LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
     begin
@@ -5976,7 +5989,7 @@ asm
 
 @Attempt1TrySequentialFeed:
   {1.3) Could not reuse a free block nor a pending free block:  Try sequential feed.}
-  cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
+  cmp TSmallBlockManager(eax).LastSmallBlockSequentialFeedOffset.IntegerValue, CSmallBlockSpanHeaderSize
   jle @Attempt1NoSequentialFeedBlockAvailable
   push eax
   call FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan
@@ -5989,7 +6002,7 @@ asm
 @Attempt1NoSequentialFeedBlockAvailable:
 
   {Is this the last arena?  If not, try the next one.}
-  cmp eax, offset SmallBlockArenas + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
   jnb @Attempt1Failed
   add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
   jmp @Attempt1Loop
@@ -6027,7 +6040,7 @@ asm
   jne FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena
 
   {2.3) Could not reuse a free block nor a pending free block:  Try sequential feed.}
-  cmp TSmallBlockManager(eax).LastSequentialFeedBlockOffset.IntegerValue, CSmallBlockSpanHeaderSize
+  cmp TSmallBlockManager(eax).LastSmallBlockSequentialFeedOffset.IntegerValue, CSmallBlockSpanHeaderSize
   jle @Attempt2NoSequentialFeedBlockAvailable
   push eax
   call FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan
@@ -6045,7 +6058,7 @@ asm
 
 @Attempt2ManagerAlreadyLocked:
   {Is this the last arena?  If not, try the next one.}
-  cmp eax, offset SmallBlockArenas + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
   jnb @Attempt2Failed
   add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
   jmp @Attempt2Loop
@@ -6104,7 +6117,7 @@ begin
 
       {Try to split off a block from the sequential feed span (if there is one).  Splitting off a sequential feed block
       does not require the manager to be locked.}
-      if APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue > CSmallBlockSpanHeaderSize then
+      if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
       begin
         Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
         if Result <> nil then
@@ -6112,7 +6125,7 @@ begin
       end;
 
       {There are no available blocks in this arena:  Move on to the next arena.}
-      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockArenas[CSmallBlockArenaCount - 1]) then
+      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CSmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
         Break;
@@ -6148,7 +6161,7 @@ begin
 
         {It's possible another thread could have allocated a new sequential feed span in the meantime, so we need to
         check again before allocating a new one.}
-        if APSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue > CSmallBlockSpanHeaderSize then
+        if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
         begin
           Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
           if Result <> nil then
@@ -6164,7 +6177,7 @@ begin
       end;
 
       {Try the next small block arena}
-      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockArenas[CSmallBlockArenaCount - 1]) then
+      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CSmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
         Break;
@@ -6340,7 +6353,7 @@ asm
   movzx eax, byte ptr SmallBlockTypeLookup[eax]
   {Get a pointer to the small block manager for arena 0 in eax}
   shl eax, 6 // * CSmallBlockManagerSize
-  add eax, offset SmallBlockArenas
+  add eax, offset SmallBlockManagers
   jmp FastMM_GetMem_GetSmallBlock
 @NotASmallBlock:
   cmp eax, (CMaximumMediumBlockSize - CMediumBlockHeaderSize)
@@ -6380,7 +6393,7 @@ begin
   begin
     {Convert the size to a pointer to the corresponding manager in the first arena.}
     LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ASize) + (CSmallBlockHeaderSize - 1)) shr CSmallBlockGranularityBits];
-    LPSmallBlockManager := @SmallBlockArenas[0][LSmallBlockTypeIndex];
+    LPSmallBlockManager := @SmallBlockManagers[0][LSmallBlockTypeIndex];
     Result := FastMM_GetMem_GetSmallBlock(LPSmallBlockManager);
   end
   else
@@ -6775,7 +6788,7 @@ begin
   {-------Small blocks-------}
   for LArenaIndex := 0 to CSmallBlockArenaCount - 1 do
   begin
-    LPSmallBlockManager := @SmallBlockArenas[LArenaIndex][0];
+    LPSmallBlockManager := @SmallBlockManagers[LArenaIndex][0];
 
     for LBlockTypeIndex := 0 to CSmallBlockTypeCount - 1 do
     begin
@@ -6803,7 +6816,7 @@ begin
   end;
 
   {-------Medium blocks-------}
-  LPMediumBlockManager := @MediumBlockArenas[0];
+  LPMediumBlockManager := @MediumBlockManagers[0];
   for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
   begin
 
@@ -6829,7 +6842,7 @@ begin
   end;
 
   {-------Large blocks-------}
-  LPLargeBlockManager := @LargeBlockArenas[0];
+  LPLargeBlockManager := @LargeBlockManagers[0];
   for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
   begin
 
@@ -6898,7 +6911,7 @@ begin
 
     for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
     begin
-      LPLargeBlockManager := @LargeBlockArenas[LArenaIndex];
+      LPLargeBlockManager := @LargeBlockManagers[LArenaIndex];
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
@@ -6929,7 +6942,7 @@ begin
 
     for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
     begin
-      LPMediumBlockManager := @MediumBlockArenas[LArenaIndex];
+      LPMediumBlockManager := @MediumBlockManagers[LArenaIndex];
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
@@ -6942,7 +6955,7 @@ begin
 
         if LPMediumBlockManager.SequentialFeedMediumBlockSpan = LPMediumBlockSpan then
         begin
-          LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue;
+          LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
           if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
             LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
         end
@@ -7002,7 +7015,7 @@ begin
                 begin
                   if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
                   begin
-                    LSmallBlockOffset := LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue;
+                    LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
                     if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
                       LSmallBlockOffset := CSmallBlockSpanHeaderSize;
                   end
@@ -7078,7 +7091,7 @@ begin
                     begin
                       LBlockInfo.BlockSize := LPSmallBlockManager.BlockSize;
                       LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize - CSmallBlockHeaderSize;
-                      LBlockInfo.ArenaIndex := (NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockArenas)) div SizeOf(TSmallBlockArena);
+                      LBlockInfo.ArenaIndex := (NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena);
                       LBlockInfo.BlockType := btSmallBlock;
                       LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                       LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
@@ -7216,14 +7229,14 @@ var
 begin
   for i := 0 to CMediumBlockArenaCount - 1 do
   begin
-    LPMediumBlockManager := @MediumBlockArenas[i];
+    LPMediumBlockManager := @MediumBlockManagers[i];
     if NativeUInt(LPMediumBlockManager.FirstMediumBlockSpanHeader) <> NativeUInt(LPMediumBlockManager) then
       Exit(True);
   end;
 
   for i := 0 to CLargeBlockArenaCount - 1 do
   begin
-    LPLargeBlockManager := @LargeBlockArenas[i];
+    LPLargeBlockManager := @LargeBlockManagers[i];
     if NativeUInt(LPLargeBlockManager.FirstLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) then
       Exit(True);
   end;
@@ -8157,19 +8170,6 @@ begin
   Result := OptimizationStrategy;
 end;
 
-{Returns the current minimum address alignment in effect.}
-function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignment;
-begin
-  if AlignmentRequestCounters[maa64Bytes] > 0 then
-    Result := maa64Bytes
-  else if AlignmentRequestCounters[maa32Bytes] > 0 then
-    Result := maa32Bytes
-  else if (SizeOf(Pointer) = 8) or (AlignmentRequestCounters[maa16Bytes] > 0) then
-    Result := maa16Bytes
-  else
-    Result := maa8Bytes;
-end;
-
 {Builds the lookup table used for translating a small block allocation request size to a small block type.}
 procedure FastMM_BuildSmallBlockTypeLookupTable;
 var
@@ -8226,6 +8226,19 @@ begin
   {Rebuild the small block type lookup table if the minimum alignment changed.}
   if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
     FastMM_BuildSmallBlockTypeLookupTable;
+end;
+
+{Returns the current minimum address alignment in effect.}
+function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignment;
+begin
+  if AlignmentRequestCounters[maa64Bytes] > 0 then
+    Result := maa64Bytes
+  else if AlignmentRequestCounters[maa32Bytes] > 0 then
+    Result := maa32Bytes
+  else if (SizeOf(Pointer) = 8) or (AlignmentRequestCounters[maa16Bytes] > 0) then
+    Result := maa16Bytes
+  else
+    Result := maa8Bytes;
 end;
 
 procedure FastMM_InitializeMemoryManager;
@@ -8289,13 +8302,13 @@ begin
 
     for LArenaInd := 0 to CSmallBlockArenaCount - 1 do
     begin
-      LPSmallBlockManager := @SmallBlockArenas[LArenaInd, LBlockTypeInd];
+      LPSmallBlockManager := @SmallBlockManagers[LArenaInd, LBlockTypeInd];
 
       {The circular list is empty initially.}
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
 
-      LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerAndABACounter := 0; //superfluous
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0; //superfluous
       LPSmallBlockManager.BlockSize := LPSmallBlockTypeInfo.BlockSize;
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
@@ -8308,7 +8321,7 @@ begin
   {---------Medium blocks-------}
   for LArenaInd := 0 to CMediumBlockArenaCount - 1 do
   begin
-    LPMediumBlockManager := @MediumBlockArenas[LArenaInd];
+    LPMediumBlockManager := @MediumBlockManagers[LArenaInd];
 
     {The circular list of spans is empty initially.}
     LPMediumBlockManager.FirstMediumBlockSpanHeader := PMediumBlockSpanHeader(LPMediumBlockManager);
@@ -8328,7 +8341,7 @@ begin
   {The circular list is empty initially.}
   for LArenaInd := 0 to CLargeBlockArenaCount - 1 do
   begin
-    LPLargeBlockManager := @LargeBlockArenas[LArenaInd];
+    LPLargeBlockManager := @LargeBlockManagers[LArenaInd];
 
     LPLargeBlockManager.FirstLargeBlockHeader := PLargeBlockHeader(LPLargeBlockManager);
     LPLargeBlockManager.LastLargeBlockHeader := PLargeBlockHeader(LPLargeBlockManager)
@@ -8367,7 +8380,7 @@ begin
   {Free all medium block spans.}
   for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
   begin
-    LPMediumBlockManager := @MediumBlockArenas[LArenaIndex];
+    LPMediumBlockManager := @MediumBlockManagers[LArenaIndex];
     LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
     while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
     begin
@@ -8383,22 +8396,22 @@ begin
     FilLChar(LPMediumBlockManager.MediumBlockBinBitmaps, SizeOf(LPMediumBlockManager.MediumBlockBinBitmaps), 0);
     for LBinIndex := 0 to CMediumBlockBinCount - 1 do
       LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex] := @LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex];
-    LPMediumBlockManager.LastSequentialFeedBlockOffset.IntegerValue := 0;
+    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := 0;
     LPMediumBlockManager.SequentialFeedMediumBlockSpan := nil;
     LPMediumBlockManager.PendingFreeList := nil;
   end;
 
   {Clear all small block types}
-  for LArenaIndex := 0 to High(SmallBlockArenas) do
+  for LArenaIndex := 0 to High(SmallBlockManagers) do
   begin
-    LPSmallBlockArena := @SmallBlockArenas[LArenaIndex];
+    LPSmallBlockArena := @SmallBlockManagers[LArenaIndex];
 
     for LBlockTypeIndex := 0 to CSmallBlockTypeCount - 1 do
     begin
       LPSmallBlockManager := @LPSmallBlockArena[LBlockTypeIndex];
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
-      LPSmallBlockManager.LastSequentialFeedBlockOffset.IntegerValue := 0;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := 0;
       LPSmallBlockManager.SequentialFeedSmallBlockSpan := nil;
       LPSmallBlockManager.PendingFreeList := nil;
     end;
@@ -8407,7 +8420,7 @@ begin
   {Free all large blocks.}
   for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
   begin
-    LPLargeBlockManager := @LargeBlockArenas[LArenaIndex];
+    LPLargeBlockManager := @LargeBlockManagers[LArenaIndex];
 
     LPLargeBlock := LPLargeBlockManager.FirstLargeBlockHeader;
     while NativeUInt(LPLargeBlock) <> NativeUInt(LPLargeBlockManager) do
