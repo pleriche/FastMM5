@@ -897,7 +897,10 @@ type
   TSmallBlockArena = array[0..CSmallBlockTypeCount - 1] of TSmallBlockManager;
   PSmallBlockArena = ^TSmallBlockArena;
 
-  TSmallBlockArenas = array[0..CSmallBlockArenaCount - 1] of TSmallBlockArena;
+  {There's an extra unused small block manager at the end of every arena.  This is to prevent a cache line overlap
+  between the last manager of one arena and the first manager of the next, as well as an overlap between the last
+  manager of the last arena and the variable that follows thereafter.}
+  TSmallBlockArenas = array[0..CSmallBlockArenaCount] of TSmallBlockArena;
 
   {This is always 64 bytes in size in order to ensure proper alignment of small blocks under all circumstances.}
   TSmallBlockSpanHeader = packed record
@@ -8170,10 +8173,21 @@ begin
   Result := OptimizationStrategy;
 end;
 
+{Adjacent small block managers may straddle the same cache line and thus have a false dependency.  We do not want
+the managers for similarly sized blocks to have such a false dependency, so small block managers are not kept in
+memory in ascending block size order.}
+function SmallBlockManagerIndexFromSizeIndex(ASizeIndex: Integer): Integer; inline;
+begin
+  {Fill up the even slots first from the front to the back, and then the uneven slots from the back to the front.}
+  Result := ASizeIndex * 2;
+  if Result >= CSmallBlockTypeCount then
+    Result := (2 * CSmallBlockTypeCount - 1) - Result;
+end;
+
 {Builds the lookup table used for translating a small block allocation request size to a small block type.}
 procedure FastMM_BuildSmallBlockTypeLookupTable;
 var
-  LBlockTypeInd, LStartIndex, LNextStartIndex, LAndValue: Integer;
+  LBlockSizeIndex, LManagerIndex, LStartIndex, LNextStartIndex, LAndValue: Integer;
 begin
   {Determine the allowed small block alignments.  Under 64-bit the minimum alignment is always 16 bytes.}
   if AlignmentRequestCounters[maa64Bytes] > 0 then
@@ -8186,16 +8200,17 @@ begin
     LAndValue := 0;
 
   LStartIndex := 0;
-  for LBlockTypeInd := 0 to High(CSmallBlockTypeInfo) do
+  for LBlockSizeIndex := 0 to High(CSmallBlockTypeInfo) do
   begin
     {Is this a valid block type for the alignment restriction?}
-    if CSmallBlockTypeInfo[LBlockTypeInd].BlockSize and LAndValue = 0 then
+    if CSmallBlockTypeInfo[LBlockSizeIndex].BlockSize and LAndValue = 0 then
     begin
-      LNextStartIndex := CSmallBlockTypeInfo[LBlockTypeInd].BlockSize div CSmallBlockGranularity;
       {Store the block type index in the appropriate slots.}
+      LManagerIndex := SmallBlockManagerIndexFromSizeIndex(LBlockSizeIndex);
+      LNextStartIndex := CSmallBlockTypeInfo[LBlockSizeIndex].BlockSize div CSmallBlockGranularity;
       while LStartIndex < LNextStartIndex do
       begin
-        SmallBlockTypeLookup[LStartIndex] := LBlockTypeInd;
+        SmallBlockTypeLookup[LStartIndex] := LManagerIndex;
         Inc(LStartIndex);
       end;
       {Set the start of the next block type}
@@ -8243,7 +8258,8 @@ end;
 
 procedure FastMM_InitializeMemoryManager;
 var
-  LBlockTypeInd, LArenaInd, LMinimumSmallBlockSpanSize, LBinInd, LOptimalSmallBlockSpanSize, LBlocksPerSpan: Integer;
+  LBlockSizeIndex, LArenaInd, LMinimumSmallBlockSpanSize, LBinInd, LOptimalSmallBlockSpanSize, LBlocksPerSpan,
+    LManagerIndex: Integer;
   LPSmallBlockTypeInfo: PSmallBlockTypeInfo;
   LPSmallBlockManager: PSmallBlockManager;
   LPMediumBlockManager: PMediumBlockManager;
@@ -8278,9 +8294,9 @@ begin
   FastMM_BuildSmallBlockTypeLookupTable;
 
   {Initialize all the small block arenas}
-  for LBlockTypeInd := 0 to CSmallBlockTypeCount - 1 do
+  for LBlockSizeIndex := 0 to CSmallBlockTypeCount - 1 do
   begin
-    LPSmallBlockTypeInfo := @CSmallBlockTypeInfo[LBlockTypeInd];
+    LPSmallBlockTypeInfo := @CSmallBlockTypeInfo[LBlockSizeIndex];
 
     {The minimum useable small block span size.  The first small block's header is inside the span header, so we need
     space for one less small block heaader.}
@@ -8300,9 +8316,13 @@ begin
     LOptimalSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(LBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize
       + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
 
+    {Small block managers are not kept in memory in size order, because they may straddle the same cache lines and we
+    want to avoid false dependencies between managers for similar block sizes.}
+    LManagerIndex := SmallBlockManagerIndexFromSizeIndex(LBlockSizeIndex);
+
     for LArenaInd := 0 to CSmallBlockArenaCount - 1 do
     begin
-      LPSmallBlockManager := @SmallBlockManagers[LArenaInd, LBlockTypeInd];
+      LPSmallBlockManager := @SmallBlockManagers[LArenaInd, LManagerIndex];
 
       {The circular list is empty initially.}
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
