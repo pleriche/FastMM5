@@ -734,8 +734,7 @@ const
   CSmallBlockDownsizeCheckAdder = 64;
   CSmallBlockUpsizeAdder = 32;
   {When a medium block is reallocated to a size smaller than this, then it must be reallocated to a small block and the
-  data moved. If not, then it is shrunk in place down to MinimumMediumBlockSize.  Currently the limit is set at a
-  quarter of the minimum medium block size.}
+  data moved.  If not, then it is shrunk in place.}
   CMediumInPlaceDownsizeLimit = CMinimumMediumBlockSize div 4;
 
   {------Debug constants-------}
@@ -3697,7 +3696,7 @@ end;
 function FastMM_ReallocMem_ReallocLargeBlock(APointer: Pointer; ANewSize: NativeInt): Pointer;
 var
   LPLargeBlockHeader: PLargeBlockHeader;
-  LOldAvailableSize, LMinimumUpsize, LNewAllocSize, LNewSegmentSize, LOldUserSize: NativeInt;
+  LOldAvailableSize, LNewAllocSize, LNewSegmentSize, LOldUserSize: NativeInt;
   LMemoryRegionInfo: TMemoryRegionInfo;
   LPNextSegment: Pointer;
 begin
@@ -3712,10 +3711,8 @@ begin
     again.  Since reallocations are expensive, there is a minimum upsize percentage to avoid unnecessary future move
     operations.}
     {Add 25% for large block upsizes}
-    LMinimumUpsize := LOldAvailableSize + (LOldAvailableSize shr 2);
-    if ANewSize < LMinimumUpsize then
-      LNewAllocSize := LMinimumUpsize
-    else
+    LNewAllocSize := LOldAvailableSize + (LOldAvailableSize shr 2);
+    if LNewAllocSize < ANewSize then
       LNewAllocSize := ANewSize;
 
     {Can another large block segment be allocated directly after this segment, thus negating the need to move the data?}
@@ -5051,10 +5048,10 @@ begin
 {$endif}
 end;
 
-function FastMM_ReallocMem_ReallocMediumBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
+function FastMM_ReallocMem_ReallocMediumBlock_Upsize(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
 var
   LPNextBlock: Pointer;
-  LBlockSize, LOldUserSize, LNextBlockSize, LCombinedUserSize, LMinimumUpsize, LNewAllocSize, LNewBlockSize, LSecondSplitSize: NativeInt;
+  LBlockSize, LOldUserSize, LNextBlockSize, LCombinedUserSize, LNewAllocSize, LNewBlockSize, LSecondSplitSize: NativeInt;
   LPMediumBlockSpan: PMediumBlockSpanHeader;
   LPMediumBlockManager: PMediumBlockManager;
 begin
@@ -5065,167 +5062,192 @@ begin
   {Subtract the block header size from the old available size}
   LOldUserSize := LBlockSize - CMediumBlockHeaderSize;
 
-  {Is it an upsize or a downsize?}
-  if ANewUserSize > LOldUserSize then
+  {If the next block is free then we need to check if this block can be upsized in-place.}
+  if BlockIsFree(LPNextBlock) then
   begin
-
-    {If the next block is free then we need to check if this block can be upsized in-place.}
-    if BlockIsFree(LPNextBlock) then
+    LNextBlockSize := GetMediumBlockSize(LPNextBlock);
+    LCombinedUserSize := LOldUserSize + LNextBlockSize;
+    if ANewUserSize <= LCombinedUserSize then
     begin
-      LNextBlockSize := GetMediumBlockSize(LPNextBlock);
-      LCombinedUserSize := LOldUserSize + LNextBlockSize;
-      if ANewUserSize <= LCombinedUserSize then
+
+      {The next block is currently free and there is enough space to grow this block in place.  Try to lock the
+      medium block manager.  If it can be locked and the next block is still free and large enough then stretch the
+      medium block in place.}
+      LPMediumBlockSpan := GetMediumBlockSpan(APointer);
+      LPMediumBlockManager := LPMediumBlockSpan.MediumBlockArena;
+      if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
+        and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
       begin
 
-        {The next block is currently free and there is enough space to grow this block in place.  Try to lock the
-        medium block manager.  If it can be locked and the next block is still free and large enough then stretch the
-        medium block in place.}
-        LPMediumBlockSpan := GetMediumBlockSpan(APointer);
-        LPMediumBlockManager := LPMediumBlockSpan.MediumBlockArena;
-        if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
-          and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
+        {We need to recheck this, since another thread could have grabbed the block before the manager could be
+        locked.}
+        LNextBlockSize := GetMediumBlockSize(LPNextBlock);
+        LCombinedUserSize := LOldUserSize + LNextBlockSize;
+
+        if (ANewUserSize <= LCombinedUserSize)
+          and BlockIsFree(LPNextBlock) then
         begin
+          if LNextBlockSize >= CMinimumMediumBlockSize then
+            RemoveMediumFreeBlockFromBin(LPMediumBlockManager, LPNextBlock);
 
-          {We need to recheck this, since another thread could have grabbed the block before the manager could be
-          locked.}
-          LNextBlockSize := GetMediumBlockSize(LPNextBlock);
-          LCombinedUserSize := LOldUserSize + LNextBlockSize;
-
-          if (ANewUserSize <= LCombinedUserSize)
-            and BlockIsFree(LPNextBlock) then
+          {Grow by at least 25% for medium block in-place upsizes}
+          LNewAllocSize := LOldUserSize + (LOldUserSize shr 2);
+          if LNewAllocSize < ANewUserSize then
+            LNewAllocSize := ANewUserSize;
+          {Round up to the nearest block size granularity}
+          LNewBlockSize := ((LNewAllocSize + (CMediumBlockHeaderSize + CMediumBlockAlignment - 1))
+            and -CMediumBlockAlignment);
+          {Calculate the size of the second split}
+          LSecondSplitSize := LCombinedUserSize + CMediumBlockHeaderSize - LNewBlockSize;
+          {Does it fit?}
+          if LSecondSplitSize <= 0 then
           begin
-            if LNextBlockSize >= CMinimumMediumBlockSize then
-              RemoveMediumFreeBlockFromBin(LPMediumBlockManager, LPNextBlock);
+            {The block size is the full available size plus header}
+            LNewBlockSize := LCombinedUserSize + CMediumBlockHeaderSize;
+          end
+          else
+          begin
+            {Split the block in two}
+            LPNextBlock := PMediumFreeBlockContent(PByte(APointer) + LNewBlockSize);
 
-            {Add 25% for medium block in-place upsizes}
-            LMinimumUpsize := LOldUserSize + (LOldUserSize shr 2);
-            if ANewUserSize < LMinimumUpsize then
-              LNewAllocSize := LMinimumUpsize
-            else
-              LNewAllocSize := ANewUserSize;
-            {Round up to the nearest block size granularity}
-            LNewBlockSize := ((LNewAllocSize + (CMediumBlockHeaderSize + CMediumBlockAlignment - 1))
-              and -CMediumBlockAlignment);
-            {Calculate the size of the second split}
-            LSecondSplitSize := LCombinedUserSize + CMediumBlockHeaderSize - LNewBlockSize;
-            {Does it fit?}
-            if LSecondSplitSize <= 0 then
-            begin
-              {The block size is the full available size plus header}
-              LNewBlockSize := LCombinedUserSize + CMediumBlockHeaderSize;
-            end
-            else
-            begin
-              {Split the block in two}
-              LPNextBlock := PMediumFreeBlockContent(PByte(APointer) + LNewBlockSize);
+            SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, True, False);
+            SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
+            {The second split is an entirely new block so all the header fields must be set.}
+            SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
 
-              SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, True, False);
-              SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
-              {The second split is an entirely new block so all the header fields must be set.}
-              SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
-
-              {Put the remainder in a bin if it is big enough}
-              if LSecondSplitSize >= CMinimumMediumBlockSize then
-                InsertMediumBlockIntoBin(LPMediumBlockManager, LPNextBlock, LSecondSplitSize);
-            end;
-
-            {Set the size and flags for this block}
-            SetMediumBlockHeader_SetSizeAndFlags(APointer, LNewBlockSize, False, False);
-
-            {Unlock the medium blocks}
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
-
-            Exit(APointer);
+            {Put the remainder in a bin if it is big enough}
+            if LSecondSplitSize >= CMinimumMediumBlockSize then
+              InsertMediumBlockIntoBin(LPMediumBlockManager, LPNextBlock, LSecondSplitSize);
           end;
 
-          {Couldn't use the next block, because another thread grabbed it:  Unlock the medium blocks}
-          LPMediumBlockManager.MediumBlockManagerLocked := 0;
-        end;
-      end;
-    end;
-
-    {Couldn't upsize in place.  Allocate a new block and move the data across:  If we have to reallocate and move
-    medium blocks, we grow by at least 25%}
-    LMinimumUpsize := LOldUserSize + (LOldUserSize shr 2);
-    if ANewUserSize < LMinimumUpsize then
-      LNewAllocSize := LMinimumUpsize
-    else
-      LNewAllocSize := ANewUserSize;
-    {Allocate the new block}
-    Result := FastMM_GetMem(LNewAllocSize);
-    if Result <> nil then
-    begin
-      {If it's a large block - store the actual user requested size}
-      if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
-        PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewUserSize;
-      {Move the data across}
-      MoveMultipleOf64(APointer^, Result^, LOldUserSize);
-      {Free the old block}
-      FastMM_FreeMem(APointer);
-    end;
-
-  end
-  else
-  begin
-    {Must be less than half the current size or we don't bother resizing.}
-    if (ANewUserSize shl 1) >= LOldUserSize then
-    begin
-      Result := APointer;
-    end
-    else
-    begin
-
-      {In-place downsize?  Balance the cost of moving the data vs. the cost of fragmenting the address space.}
-      if ANewUserSize >= CMediumInPlaceDownsizeLimit then
-      begin
-
-        {Medium blocks in use may never be smaller than CMinimumMediumBlockSize.}
-        if ANewUserSize < (CMinimumMediumBlockSize - CMediumBlockHeaderSize) then
-          ANewUserSize := CMinimumMediumBlockSize - CMediumBlockHeaderSize;
-
-        {Round up to the next medium block size}
-        LNewBlockSize := ((ANewUserSize + (CMediumBlockHeaderSize + CMediumBlockAlignment - 1))
-          and -CMediumBlockAlignment);
-
-        LSecondSplitSize := (LOldUserSize + CMediumBlockHeaderSize) - LNewBlockSize;
-        if LSecondSplitSize > 0 then
-        begin
-
-          LPMediumBlockSpan := GetMediumBlockSpan(APointer);
-
-          {Set a proper header for the second split.}
-          LPNextBlock := PMediumBlockHeader(PByte(APointer) + LNewBlockSize);
-          SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, False, False);
-          SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
-          {The second split is an entirely new block so all the header fields must be set.}
-          SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
-
-          {Adjust the size of this block.}
+          {Set the size and flags for this block}
           SetMediumBlockHeader_SetSizeAndFlags(APointer, LNewBlockSize, False, False);
 
-          {Free the second split.}
-          FastMM_FreeMem(LPNextBlock);
+          {Unlock the medium blocks}
+          LPMediumBlockManager.MediumBlockManagerLocked := 0;
+
+          Exit(APointer);
         end;
 
-        Result := APointer;
-      end
-      else
-      begin
-
-        {Allocate the new block, move the data across and then free the old block.}
-        Result := FastMM_GetMem(ANewUserSize);
-        if Result <> nil then
-        begin
-          System.Move(APointer^, Result^, ANewUserSize);
-          FastMM_FreeMem(APointer);
-        end;
-
+        {Couldn't use the next block, because another thread grabbed it:  Unlock the medium blocks}
+        LPMediumBlockManager.MediumBlockManagerLocked := 0;
       end;
     end;
   end;
 
+  {Couldn't upsize in place.  Allocate a new block and move the data across:  If we have to reallocate and move
+  medium blocks, we grow by at least 25%}
+  LNewAllocSize := LOldUserSize + (LOldUserSize shr 2);
+  if LNewAllocSize < ANewUserSize then
+    LNewAllocSize := ANewUserSize;
+  {Allocate the new block}
+  Result := FastMM_GetMem(LNewAllocSize);
+  if Result <> nil then
+  begin
+    {If it's a large block - store the actual user requested size}
+    if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
+      PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewUserSize;
+    {Move the data across}
+    MoveMultipleOf64(APointer^, Result^, LOldUserSize);
+    {Free the old block}
+    FastMM_FreeMem(APointer);
+  end;
 end;
 
+function FastMM_ReallocMem_ReallocMediumBlock_Downsize(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
+var
+  LPNextBlock: Pointer;
+  LBlockSize, LOldUserSize, LNewBlockSize, LSecondSplitSize: NativeInt;
+  LPMediumBlockSpan: PMediumBlockSpanHeader;
+begin
+  {What is the available size in the block being reallocated?}
+  LBlockSize := GetMediumBlockSize(APointer);
+  {Subtract the block header size from the old available size}
+  LOldUserSize := LBlockSize - CMediumBlockHeaderSize;
+
+  {In-place downsize?  Balance the cost of moving the data vs. the cost of fragmenting the address space.}
+  if ANewUserSize >= CMediumInPlaceDownsizeLimit then
+  begin
+
+    {Medium blocks in use may never be smaller than CMinimumMediumBlockSize.}
+    if ANewUserSize < (CMinimumMediumBlockSize - CMediumBlockHeaderSize) then
+      ANewUserSize := CMinimumMediumBlockSize - CMediumBlockHeaderSize;
+
+    {Round up to the next medium block size}
+    LNewBlockSize := ((ANewUserSize + (CMediumBlockHeaderSize + CMediumBlockAlignment - 1))
+      and -CMediumBlockAlignment);
+
+    LSecondSplitSize := (LOldUserSize + CMediumBlockHeaderSize) - LNewBlockSize;
+    if LSecondSplitSize > 0 then
+    begin
+
+      LPMediumBlockSpan := GetMediumBlockSpan(APointer);
+
+      {Set a proper header for the second split.}
+      LPNextBlock := PMediumBlockHeader(PByte(APointer) + LNewBlockSize);
+      SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, False, False);
+      SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
+      {The second split is an entirely new block so all the header fields must be set.}
+      SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
+
+      {Adjust the size of this block.}
+      SetMediumBlockHeader_SetSizeAndFlags(APointer, LNewBlockSize, False, False);
+
+      {Free the second split.}
+      FastMM_FreeMem(LPNextBlock);
+    end;
+
+    Result := APointer;
+  end
+  else
+  begin
+
+    {Allocate the new block, move the data across and then free the old block.}
+    Result := FastMM_GetMem(ANewUserSize);
+    if Result <> nil then
+    begin
+      System.Move(APointer^, Result^, ANewUserSize);
+      FastMM_FreeMem(APointer);
+    end;
+
+  end;
+
+end;
+
+function FastMM_ReallocMem_ReallocMediumBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
+{$ifdef X86ASM}
+asm
+  {Get the old user size in ecx}
+  movzx ecx, TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize)
+  shl ecx, CMediumBlockAlignmentBits
+  sub ecx, CMediumBlockHeaderSize
+
+  cmp ecx, edx
+  jb FastMM_ReallocMem_ReallocMediumBlock_Upsize
+
+  {The requested size must be less than half the current size or we don't bother resizing.}
+  shr ecx, 1
+  cmp ecx, edx
+  ja FastMM_ReallocMem_ReallocMediumBlock_Downsize
+{$else}
+var
+  LOldUserSize: NativeInt;
+begin
+  LOldUserSize := GetMediumBlockSize(APointer) - CMediumBlockHeaderSize;
+  if LOldUserSize < ANewUserSize then
+  begin
+    Result := FastMM_ReallocMem_ReallocMediumBlock_Upsize(APointer, ANewUserSize);
+  end
+  else
+  begin
+    {The requested size must be less than half the current size or we don't bother resizing.}
+    if (LOldUserSize shr 1) > ANewUserSize then
+      Result := FastMM_ReallocMem_ReallocMediumBlock_Downsize(APointer, ANewUserSize)
+    else
+      Result := APointer;
+  end;
+{$endif}
+end;
 
 {-----------------------------------------}
 {--------Small block management-----------}
