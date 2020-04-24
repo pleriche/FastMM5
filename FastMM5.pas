@@ -4521,7 +4521,7 @@ asm
   call RemoveMediumFreeBlockFromBin
 
   {If the block currently has debug info, check it for consistency before resetting the flag.}
-  test byte ptr [edi - 2], CIsDebugBlockFlag
+  test byte ptr [edi - 2], CHasDebugInfoFlag
   jz @DebugInfoOK
   mov eax, edi
   call CheckFreeDebugBlockIntact
@@ -5784,7 +5784,7 @@ asm
   {Get the old pending free list pointer in esi}
   xor esi, esi
   xchg TSmallBlockManager(eax).PendingFreeList, esi
-  {Get the next block in the chain in eax}
+  {Get the next block in the chain in edx}
   mov edx, [esi]
 
   {Free all subsequent blocks in the chain, if there are any.}
@@ -5802,10 +5802,10 @@ asm
 @CheckDebugInfo:
   test word ptr [esi - CSmallBlockHeaderSize], CHasDebugInfoFlag
   jz @BlockHasNoDebugInfo
+  mov eax, esi
   call CheckFreeDebugBlockIntact
   test al, al
   jnz @DebugBlockOK
-@DebugBlockError:
   mov al, reInvalidPtr
   call System.Error
 @DebugBlockOK:
@@ -5885,7 +5885,6 @@ asm
   test al, al
   pop eax
   jnz @DebugBlockOK
-@DebugBlockError:
   mov al, reInvalidPtr
   call System.Error
 @DebugBlockOK:
