@@ -5317,7 +5317,7 @@ end;
 
 {Subroutine for FastMM_FreeMem_FreeSmallBlock.  The small block manager must already be locked.  Optionally unlocks the
 small block manager before exit.  Returns 0 on success.}
-function FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(APSmallBlockSpan: PSmallBlockSpanHeader;
+function FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked(APSmallBlockSpan: PSmallBlockSpanHeader;
   APSmallBlock: Pointer; AUnlockSmallBlockManager: Boolean): Integer;
 {$ifdef X86ASM}
 asm
@@ -5464,7 +5464,7 @@ begin
     LPNextBlock := PPointer(APPendingFreeSmallBlock)^;
 
     LPSmallBlockSpan := GetSpanForSmallBlock(APPendingFreeSmallBlock);
-    FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APPendingFreeSmallBlock,
+    FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APPendingFreeSmallBlock,
       AUnlockSmallBlockManagerWhenDone and (LPNextBlock = nil));
 
     if LPNextBlock = nil then
@@ -5477,63 +5477,7 @@ begin
 end;
 
 {Returns a small block to the memory pool.  Returns 0 on success.}
-function FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer): Integer;
-{$ifdef X86ASM}
-asm
-  {Get the span pointer in ecx}
-  movzx edx, word ptr [eax - 2]
-  and edx, CDropSmallBlockFlagsMask
-  shl edx, CSmallBlockSpanOffsetBitShift
-  mov ecx, eax
-  and ecx, -CMediumBlockAlignment
-  sub ecx, edx
-
-  {Get the small block manager in esi}
-  push esi
-  mov esi, TSmallBlockSpanHeader(ecx).SmallBlockManager
-
-  {Get the block pointer in edx}
-  mov edx, eax
-
-  mov eax, $100
-  lock cmpxchg byte ptr TSmallBlockManager(esi).SmallBlockManagerLocked, ah
-  jne @ManagerCurrentlyLocked
-
-  {Get the span in eax}
-  mov eax, ecx
-
-  cmp TSmallBlockManager(esi).PendingFreeList, 0
-  jne @HasPendingFreeList
-
-  {No pending free list:  Just free this block and unlock the block manager.}
-  pop esi
-  mov cl, 1
-  jmp FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked
-
-@HasPendingFreeList:
-  xor ecx, ecx
-  call FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked
-
-  {Unlink the current pending free list}
-  xor eax, eax
-  xchg TSmallBlockManager(esi).PendingFreeList, eax
-
-  {Process the pending free list.}
-  pop esi
-  mov dl, 1
-  jmp FastMM_FreeMem_FreeSmallBlockChain
-
-  {The small block manager is currently locked, so we need to add this block to its pending free list.}
-@ManagerCurrentlyLocked:
-  mov eax, TSmallBlockManager(esi).PendingFreeList
-  mov [edx], eax
-  lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
-  jne @ManagerCurrentlyLocked
-
-  xor eax, eax
-  pop esi
-
-{$else}
+function FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer): Integer; inline;
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LPSmallBlockManager: PSmallBlockManager;
@@ -5549,12 +5493,12 @@ begin
 
     if LPSmallBlockManager.PendingFreeList = nil then
     begin
-      Result := FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, True);
+      Result := FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, True);
       Exit;
     end
     else
     begin
-      FastMM_FreeMem_InternalFreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, False);
+      FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked(LPSmallBlockSpan, APSmallBlock, False);
 
       {Process the pending frees list.}
       LFirstPendingFreeBlock := AtomicExchange(LPSmallBlockManager.PendingFreeList, nil);
@@ -5574,8 +5518,6 @@ begin
     end;
     Result := 0;
   end;
-
-{$endif}
 end;
 
 {Allocates a new sequential feed small block span and splits off the first block, returning it.  The small block
@@ -6425,8 +6367,64 @@ asm
   mov ecx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
   and ecx, edx
   cmp ecx, CIsSmallBlockFlag
-  je FastMM_FreeMem_FreeSmallBlock
+  jne @NotASmallBlock
 
+  {----Start: Inline of FastMM_FreeMem_FreeSmallBlock----}
+  {Get the span pointer in ecx}
+  and edx, CDropSmallBlockFlagsMask
+  shl edx, CSmallBlockSpanOffsetBitShift
+  mov ecx, eax
+  and ecx, -CMediumBlockAlignment
+  sub ecx, edx
+
+  {Get the small block manager in esi}
+  push esi
+  mov esi, TSmallBlockSpanHeader(ecx).SmallBlockManager
+
+  {Get the block pointer in edx}
+  mov edx, eax
+
+  mov eax, $100
+  lock cmpxchg byte ptr TSmallBlockManager(esi).SmallBlockManagerLocked, ah
+  jne @ManagerCurrentlyLocked
+
+  {Get the span in eax}
+  mov eax, ecx
+
+  cmp TSmallBlockManager(esi).PendingFreeList, 0
+  jne @HasPendingFreeList
+
+  {No pending free list:  Just free this block and unlock the block manager.}
+  pop esi
+  mov cl, 1
+  jmp FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked
+
+@HasPendingFreeList:
+  xor ecx, ecx
+  call FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked
+
+  {Unlink the current pending free list}
+  xor eax, eax
+  xchg TSmallBlockManager(esi).PendingFreeList, eax
+
+  {Process the pending free list.}
+  pop esi
+  mov dl, 1
+  jmp FastMM_FreeMem_FreeSmallBlockChain
+
+  {The small block manager is currently locked, so we need to add this block to its pending free list.}
+@ManagerCurrentlyLocked:
+  mov eax, TSmallBlockManager(esi).PendingFreeList
+  mov [edx], eax
+  lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
+  jne @ManagerCurrentlyLocked
+
+  xor eax, eax
+  pop esi
+  ret
+  {----End: Inline of FastMM_FreeMem_FreeSmallBlock----}
+
+@NotASmallBlock:
   mov ecx, (not CHasDebugInfoFlag)
   and ecx, edx
   cmp ecx, CIsMediumBlockFlag
