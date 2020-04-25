@@ -4556,10 +4556,13 @@ free block, the arena must be locked, and AOptimalBlockSize and AMaximumBlockSiz
 Unlocks the arena before returning.  Returns a pointer to the allocated block.}
 function FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(APMediumBlockManager: PMediumBlockManager;
   AMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 const
-  CMaximumSizeStackOffset = 20; //Stack layout:  AMaximumBlockSize, return address, ebp, ebx, esi, edi
+  {The maximum block size is stored on the stack.}
+  CMaximumSizeStackOffset = {$ifdef 32Bit}20{$else}80{$endif};
 asm
+{$ifdef X86ASM}
+  {-------x86 Assembly language codepath--------}
   push ebx
   push esi
   push edi
@@ -4675,6 +4678,124 @@ asm
   pop edi
   pop esi
   pop ebx
+{$else}
+  {-------x64 Assembly language codepath--------}
+  .pushnv rbx
+  .pushnv rsi
+  .pushnv rdi
+  .params 3
+
+  {rsi = medium block manager, edi = bin number, on stack = optimal block size, on stack = maximum block size}
+  mov rsi, rcx
+  mov edi, edx
+  mov [rsp + CMaximumSizeStackOffset + 8], r8d //save the optimal block size in the shadow space.
+  mov [rsp + CMaximumSizeStackOffset], r9d //save the maximum block size in the shadow space.
+
+  {Get the bin group in edx}
+  shr edx, 5
+
+  {Check the group corresponding to the minimum block size bin for available blocks.}
+  mov ecx, 31
+  and ecx, edi
+  or eax, -1
+  shl eax, cl
+  and eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(rsi + rdx * 4)
+  jnz @GotBin
+  {There are no suitable free blocks in the group containing AMinimumBlockSizeBinNumber, so get a free block from any
+  subsequent group.}
+  mov ecx, edx
+  mov edx, -2
+  shl edx, cl
+  and edx, TMediumBlockManager(rsi).MediumBlockBinGroupBitmap
+  {Get the first group with large enough blocks in edx}
+  bsf edx, edx
+  {Get the bin bitmap for the next group with free blocks}
+  mov eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(rsi + rdx * 4)
+@GotBin:
+
+  {Group bitmap is in eax, group number in edx:  Find the first bin with free blocks in the group}
+  bsf eax, eax
+  {Add the index of the first bin in the group.}
+  shl edx, 5
+  add eax, edx
+
+  {Get the first free block in the bin}
+  mov rdi, qword ptr TMediumBlockManager.FirstFreeBlockInBin(rsi + rax * 8)
+
+  mov rcx, rsi
+  mov rdx, rdi
+  call RemoveMediumFreeBlockFromBin
+
+  {If the block currently has debug info, check it for consistency before resetting the flag.}
+  test byte ptr [rdi - 2], CHasDebugInfoFlag
+  jz @DebugInfoOK
+  mov rcx, rdi
+  call CheckFreeDebugBlockIntact
+  test al, al
+  jnz @DebugInfoOK
+  mov byte ptr TMediumBlockManager(rsi).MediumBlockManagerLocked, 0
+  mov cl, reInvalidPtr
+  call System.Error
+@DebugInfoOK:
+
+  {Get the block size in ebx}
+  movzx ebx, TMediumBlockHeader.MediumBlockSizeMultiple(rdi - CMediumBlockHeaderSize)
+  shl ebx, CMediumBlockAlignmentBits
+
+  {Should the block be split?}
+  cmp ebx, [esp + CMaximumSizeStackOffset]
+  jbe @SecondSplitDone
+
+  {Use the optimal block size, second split size in ecx}
+  mov ecx, ebx
+  mov ebx, [rsp + CMaximumSizeStackOffset + 8]
+  sub ecx, ebx
+
+  {Second split pointer in rdx}
+  lea rdx, [rdi + rbx]
+
+  {Get the span offset multiple of the first split in r9.}
+  movzx r9d, TMediumBlockHeader.MediumBlockSpanOffsetMultiple(rdi - CMediumBlockHeaderSize)
+
+  {The second split should already be tagged as a free block in the next block's header, but we need to set the size of
+  the second split in its own footer.}
+  mov TMediumFreeBlockFooter.MediumFreeBlockSize(rdx + rcx - CMediumFreeBlockFooterSize), ecx
+  {Set the second split's block size in its header}
+  mov eax, ecx
+  shr eax, CMediumBlockAlignmentBits
+  mov TMediumBlockHeader.MediumBlockSizeMultiple(rdx - CMediumBlockHeaderSize), ax
+  {Set the span offset for the second split.  It is the sum of the offset and size multiples of the first split.}
+  mov eax, ebx
+  shr eax, CMediumBlockAlignmentBits
+  add eax, r9d
+  mov TMediumBlockHeader.MediumBlockSpanOffsetMultiple(rdx - CMediumBlockHeaderSize), ax
+  {Set the block flags for the second split}
+  mov TMediumBlockHeader.BlockStatusFlags(rdx - CMediumBlockHeaderSize), CBlockIsFreeFlag + CIsMediumBlockFlag
+  {Ensure the second split is not marked as a small block span.}
+  mov TMediumBlockHeader.IsSmallBlockSpan(rdx - CMediumBlockHeaderSize), False
+
+  {Bin the second split.}
+  cmp ecx, CMinimumMediumBlockSize
+  jb @SecondSplitDone
+  mov r8d, ecx
+  mov rcx, rsi
+  call InsertMediumBlockIntoBin
+@SecondSplitDone:
+
+  {Update the flag in the next block to indicate that this block is now in use.  The block size is not stored before
+  the header of the next block if it is not free.}
+  mov TMediumBlockHeader.PreviousBlockIsFree(rdi + rbx - CMediumBlockHeaderSize), False
+  {Set the block flags}
+  mov TMediumBlockHeader.BlockStatusFlags(rdi - CMediumBlockHeaderSize), CIsMediumBlockFlag
+  {Update the block size.}
+  shr ebx, CMediumBlockAlignmentBits
+  mov TMediumBlockHeader.MediumBlockSizeMultiple(rdi - CMediumBlockHeaderSize), bx
+
+  mov byte ptr TMediumBlockManager(rsi).MediumBlockManagerLocked, 0
+
+  mov rax, rdi
+
+{$endif}
 {$else}
 var
   LBinGroupNumber, LBinNumber, LBinGroupMasked, LBinGroupsMasked, LBlockSize, LSecondSplitSize: Integer;
