@@ -6377,8 +6377,10 @@ end;
 {--------------------------------------------------------}
 
 function FastMM_GetMem(ASize: NativeInt): Pointer;
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
+  {--------x86 Assembly language codepath---------}
   cmp eax, (CMaximumSmallBlockSize - CSmallBlockHeaderSize)
   ja @NotASmallBlock
   {Small block:  Get the small block manager index in eax}
@@ -6418,6 +6420,50 @@ asm
   mov ecx, eax
   jmp FastMM_GetMem_GetMediumBlock
 {$else}
+  .noframe
+  {--------x64 Assembly language codepath---------}
+  cmp rcx, (CMaximumSmallBlockSize - CSmallBlockHeaderSize)
+  ja @NotASmallBlock
+  {Small block:  Get the small block manager index in ecx}
+  add ecx, 1
+  shr ecx, 3
+  lea rdx, SmallBlockTypeLookup
+  movzx ecx, byte ptr [rdx + rcx]
+  {Get a pointer to the small block manager for arena 0 in rcx}
+  shl rcx, 6 // * CSmallBlockManagerSize
+  lea rdx, SmallBlockManagers
+  add rcx, rdx
+  jmp FastMM_GetMem_GetSmallBlock
+@NotASmallBlock:
+  cmp rcx, (CMaximumMediumBlockSize - CMediumBlockHeaderSize)
+  ja FastMM_GetMem_GetLargeBlock
+  {Medium block:  Round the requested size up to the next medium block bin.}
+  cmp ecx, (CMediumBlockMiddleBinsStart - CMediumBlockHeaderSize)
+  ja @NotFirstMediumBlockGroup
+  add ecx, (CMediumBlockHeaderSize - CMinimumMediumBlockSize + CInitialBinSpacing - 1)
+  and ecx, -CInitialBinSpacing
+  add ecx, CMinimumMediumBlockSize
+  mov edx, ecx
+  mov r8d, ecx
+  jmp FastMM_GetMem_GetMediumBlock
+@NotFirstMediumBlockGroup:
+  cmp ecx, (CMediumBlockFinalBinsStart - CMediumBlockHeaderSize)
+  ja @LastMediumBlockGroup
+  add ecx, (CMediumBlockHeaderSize - CMediumBlockMiddleBinsStart + CMiddleBinSpacing - 1)
+  and ecx, -CMiddleBinSpacing
+  add ecx, CMediumBlockMiddleBinsStart
+  mov edx, ecx
+  mov r8d, ecx
+  jmp FastMM_GetMem_GetMediumBlock
+@LastMediumBlockGroup:
+  add ecx, (CMediumBlockHeaderSize - CMediumBlockFinalBinsStart + CFinalBinSpacing - 1)
+  and ecx, -CFinalBinSpacing
+  add ecx, CMediumBlockFinalBinsStart
+  mov edx, ecx
+  mov r8d, ecx
+  jmp FastMM_GetMem_GetMediumBlock
+{$endif}
+{$else}
 var
   LPSmallBlockManager: PSmallBlockManager;
   LSmallBlockTypeIndex: Integer;
@@ -6451,6 +6497,9 @@ function FastMM_FreeMem(APointer: Pointer): Integer;
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
+
+  {--------x86 Assembly language codepath---------}
+
   {Read the flags from the block header.}
   movzx edx, word ptr [eax - 2]
 
@@ -6530,6 +6579,9 @@ asm
   xor edx,edx
   jmp HandleInvalidFreeMemOrReallocMem
 {$else}
+
+  {--------x64 Assembly language codepath---------}
+
   .params 3
   .pushnv rsi
 
@@ -6656,20 +6708,23 @@ begin
 end;
 
 function FastMM_ReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
+  {--------x86 Assembly language codepath---------}
+
   {Is it a small block that is in use?}
-  mov cl, (CBlockIsFreeFlag or CIsSmallBlockFlag)
-  and cl, [eax - 2]
-  cmp cl, CIsSmallBlockFlag
+  movzx ecx, word ptr [eax - 2]
+  and ecx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
+  cmp ecx, CIsSmallBlockFlag
   je FastMM_ReallocMem_ReallocSmallBlock
 
-  mov cx, (not CHasDebugInfoFlag)
-  and cx, [eax - 2]
-  cmp cx, CIsMediumBlockFlag
+  movzx ecx, word ptr [eax - 2]
+  and ecx, (not CHasDebugInfoFlag)
+  cmp ecx, CIsMediumBlockFlag
   je FastMM_ReallocMem_ReallocMediumBlock
 
-  cmp cx, CIsLargeBlockFlag
+  cmp ecx, CIsLargeBlockFlag
   je FastMM_ReallocMem_ReallocLargeBlock
 
   cmp word ptr [eax - 2], CIsDebugBlockFlag
@@ -6677,6 +6732,33 @@ asm
 
   xor edx,edx
   jmp HandleInvalidFreeMemOrReallocMem
+{$else}
+  {--------x64 Assembly language codepath---------}
+  .noframe
+  {Get the block flags in r8}
+  movzx r8d, word ptr [rcx - 2]
+
+  {Is it a small block that is in use?}
+  mov eax, r8d
+  and eax, (CBlockIsFreeFlag or CIsSmallBlockFlag)
+  cmp eax, CIsSmallBlockFlag
+  je FastMM_ReallocMem_ReallocSmallBlock
+
+  mov eax, r8d
+  and eax, (not CHasDebugInfoFlag)
+  cmp eax, CIsMediumBlockFlag
+  je FastMM_ReallocMem_ReallocMediumBlock
+
+  cmp eax, CIsLargeBlockFlag
+  je FastMM_ReallocMem_ReallocLargeBlock
+
+  cmp r8d, CIsDebugBlockFlag
+  je FastMM_ReallocMem_ReallocDebugBlock
+
+  xor edx,edx
+  jmp HandleInvalidFreeMemOrReallocMem
+
+{$endif}
 {$else}
 var
   LBlockHeader: Integer;
