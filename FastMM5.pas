@@ -107,6 +107,7 @@ uses
   {$else}
     {x86/x64 CPUs do not reorder writes, but ARM CPUs do.}
     {$define WeakMemoryOrdering}
+    {$define PurePascal}
   {$endif}
 {$endif}
 
@@ -1182,7 +1183,7 @@ type
   TFastMM_LegacyConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
     APBuffer: PAnsiChar): PAnsiChar;
 
-{Fixed size move procedures.  The 64-bit versions assume 16-byte alignment.}
+{Fixed size move procedures.  The 64-bit versions assume 16-byte alignment.  Moves are assumed to be non-overlapping.}
 procedure Move8(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move16(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move24(const ASource; var ADest; ACount: NativeInt); forward;
@@ -1191,7 +1192,7 @@ procedure Move40(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move48(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move56(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move64(const ASource; var ADest; ACount: NativeInt); forward;
-{Variable size move routines.}
+{Variable size move routines.  Moves are assumed to be non-overlapping.}
 procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt); forward;
 procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt); forward;
 procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt); forward;
@@ -1366,12 +1367,18 @@ begin
 end;
 
 procedure Move16(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   fild qword ptr [eax]
   fild qword ptr [eax + 8]
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
+{$else}
+  .noframe
+  movdqa xmm0, [rcx]
+  movdqa [rdx], xmm0
+{$endif}
 {$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
@@ -1397,8 +1404,9 @@ begin
 end;
 
 procedure Move32(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   fild qword ptr [eax]
   fild qword ptr [eax + 8]
   fild qword ptr [eax + 16]
@@ -1407,6 +1415,13 @@ asm
   fistp qword ptr [edx + 16]
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
+{$else}
+  .noframe
+  movdqa xmm0, [rcx]
+  movdqa xmm1, [rcx + 16]
+  movdqa [rdx], xmm0
+  movdqa [rdx + 16], xmm1
+{$endif}
 {$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
@@ -1440,8 +1455,9 @@ begin
 end;
 
 procedure Move48(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   fild qword ptr [eax]
   fild qword ptr [eax + 8]
   fild qword ptr [eax + 16]
@@ -1454,6 +1470,15 @@ asm
   fistp qword ptr [edx + 16]
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
+{$else}
+  .noframe
+  movdqa xmm0, [rcx]
+  movdqa xmm1, [rcx + 16]
+  movdqa xmm2, [rcx + 32]
+  movdqa [rdx], xmm0
+  movdqa [rdx + 16], xmm1
+  movdqa [rdx + 32], xmm2
+{$endif}
 {$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
@@ -1495,8 +1520,9 @@ begin
 end;
 
 procedure Move64(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   fild qword ptr [eax]
   fild qword ptr [eax + 8]
   fild qword ptr [eax + 16]
@@ -1514,6 +1540,17 @@ asm
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
 {$else}
+  .noframe
+  movdqa xmm0, [rcx]
+  movdqa xmm1, [rcx + 16]
+  movdqa xmm2, [rcx + 32]
+  movdqa xmm3, [rcx + 48]
+  movdqa [rdx], xmm0
+  movdqa [rdx + 16], xmm1
+  movdqa [rdx + 32], xmm2
+  movdqa [rdx + 48], xmm3
+{$endif}
+{$else}
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
@@ -1527,7 +1564,7 @@ begin
 end;
 
 {Moves 8x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a 8
-byte boundary.}
+byte boundary.  The source and destination buffers may not overlap.}
 procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1559,10 +1596,11 @@ begin
 end;
 
 {Moves 16x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-16 byte boundary.}
+16 byte boundary.  The source and destination buffers may not overlap.}
 procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   add eax, ecx
   add edx, ecx
   neg ecx
@@ -1573,6 +1611,17 @@ asm
   fistp qword ptr [edx + ecx]
   add ecx, 16
   js @MoveLoop
+{$else}
+  .noframe
+  add rcx, r8
+  add rdx, r8
+  neg r8
+@MoveLoop:
+  movdqa xmm0, [rcx + r8]
+  movdqa [rdx + r8], xmm0
+  add r8, 16
+  js @MoveLoop
+{$endif}
 {$else}
 var
   LPSource, LPDest: PByte;
@@ -1594,10 +1643,11 @@ begin
 end;
 
 {Moves 32x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-32 byte boundary.}
+32 byte boundary.  The source and destination buffers may not overlap.}
 procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   add eax, ecx
   add edx, ecx
   neg ecx
@@ -1612,6 +1662,19 @@ asm
   fistp qword ptr [edx + ecx]
   add ecx, 32
   js @MoveLoop
+{$else}
+  .noframe
+  add rcx, r8
+  add rdx, r8
+  neg r8
+@MoveLoop:
+  movdqa xmm0, [rcx + r8]
+  movdqa xmm1, [rcx + r8 + 16]
+  movdqa [rdx + r8], xmm0
+  movdqa [rdx + r8 + 16], xmm1
+  add r8, 32
+  js @MoveLoop
+{$endif}
 {$else}
 var
   LPSource, LPDest: PByte;
@@ -1635,10 +1698,11 @@ begin
 end;
 
 {Moves 64x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-64 byte boundary.}
+64 byte boundary.  The source and destination buffers may not overlap.}
 procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   add eax, ecx
   add edx, ecx
   neg ecx
@@ -1661,6 +1725,23 @@ asm
   fistp qword ptr [edx + ecx]
   add ecx, 64
   js @MoveLoop
+{$else}
+  .noframe
+  add rcx, r8
+  add rdx, r8
+  neg r8
+@MoveLoop:
+  movdqa xmm0, [rcx + r8]
+  movdqa xmm1, [rcx + r8 + 16]
+  movdqa xmm2, [rcx + r8 + 32]
+  movdqa xmm3, [rcx + r8 + 48]
+  movdqa [rdx + r8], xmm0
+  movdqa [rdx + r8 + 16], xmm1
+  movdqa [rdx + r8 + 32], xmm2
+  movdqa [rdx + r8 + 48], xmm3
+  add r8, 64
+  js @MoveLoop
+{$endif}
 {$else}
 var
   LPSource, LPDest: PByte;
@@ -3614,7 +3695,7 @@ begin
 
   {Pad the block size to include the header and granularity, checking for overflow.}
   LLargeBlockActualSize := (ASize + CLargeBlockHeaderSize + CLargeBlockGranularity - 1) and -CLargeBlockGranularity;
-  if LLargeBlockActualSize <= 0 then
+  if LLargeBlockActualSize <= CMaximumMediumBlockSize then
     Exit(nil);
   {Get the large block.  For segmented large blocks to work in practice without excessive move operations we need to
   allocate top down.}
@@ -5324,10 +5405,52 @@ asm
   push ebx
 
   sub TSmallBlockSpanHeader(eax).BlocksInUse, 1
-  jnz @DoNotFreeSpan
+  jz @SpanIsEmpty
+@DoNotFreeSpan:
+
+  {Get the old first free block in ebx}
+  mov ebx, TSmallBlockSpanHeader(eax).FirstFreeBlock
+
+  {Mark the block as free, keeping the other flags (e.g. debug info) intact.}
+  or TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(edx - CSmallBlockHeaderSize), CBlockIsFreeFlag
+
+  {Store the old first free block}
+  mov [edx], ebx
+
+  {Store this as the new first free block}
+  mov TSmallBlockSpanHeader(eax).FirstFreeBlock, edx
+
+  {Get the small block manager in edx}
+  mov edx, TSmallBlockSpanHeader(eax).SmallBlockManager
+
+  {Was the span previously full?}
+  test ebx, ebx
+  jnz @SpanWasNotFull
+
+  {Insert this as the first partially free span for the block size}
+  mov ebx, TSmallBlockManager(edx).FirstPartiallyFreeSpan
+
+  mov TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan, edx
+  mov TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan, ebx
+  mov TSmallBlockManager(edx).FirstPartiallyFreeSpan, eax
+  mov TSmallBlockSpanHeader(ebx).PreviousPartiallyFreeSpan, eax
+
+@SpanWasNotFull:
+
+  pop ebx
+  xor eax, eax
+
+  test cl, cl
+  jz @DoNotUnlock2
+  mov byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, 0
+@DoNotUnlock2:
+
+  ret
+
+@SpanIsEmpty:
+  {In debug mode spans are never freed.}
   cmp DebugModeCounter, 0
   jg @DoNotFreeSpan
-
   {Remove this span from the circular linked list of partially free spans for the block type.}
   mov edx, TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan
   mov ebx, TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan
@@ -5348,42 +5471,6 @@ asm
   {Free the span}
   pop ebx
   jmp FastMM_FreeMem_FreeMediumBlock
-@DoNotFreeSpan:
-  mov ebx, TSmallBlockSpanHeader(eax).FirstFreeBlock
-
-  {Mark the block as free, keeping the other flags (e.g. debug info) intact.}
-  or TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(edx - CSmallBlockHeaderSize), CBlockIsFreeFlag
-
-  {Store the old first free block}
-  mov [edx], ebx
-
-  {Store this as the new first free block}
-  mov TSmallBlockSpanHeader(eax).FirstFreeBlock, edx
-
-  {Was the span previously full?}
-  test ebx, ebx
-  jnz @SpanWasNotFull
-
-  {Insert this as the first partially free span for the block size}
-  mov edx, TSmallBlockSpanHeader(eax).SmallBlockManager
-  mov ebx, TSmallBlockManager(edx).FirstPartiallyFreeSpan
-
-  mov TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan, edx
-  mov TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan, ebx
-  mov TSmallBlockManager(edx).FirstPartiallyFreeSpan, eax
-  mov TSmallBlockSpanHeader(ebx).PreviousPartiallyFreeSpan, eax
-
-@SpanWasNotFull:
-
-  test cl, cl
-  jz @DoNotUnlock2
-  mov edx, TSmallBlockSpanHeader(eax).SmallBlockManager
-  mov byte ptr TSmallBlockManager(edx).SmallBlockManagerLocked, 0
-@DoNotUnlock2:
-
-  pop ebx
-  xor eax, eax
-
 {$else}
 var
   LPSmallBlockManager: PSmallBlockManager;
@@ -5395,29 +5482,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse = 0) and (DebugModeCounter <= 0) then
-  begin
-    {Remove this span from the circular linked list of partially free spans for the block type.}
-    LPPreviousSpan := APSmallBlockSpan.PreviousPartiallyFreeSpan;
-    LPNextSpan := APSmallBlockSpan.NextPartiallyFreeSpan;
-    LPPreviousSpan.NextPartiallyFreeSpan := LPNextSpan;
-    LPNextSpan.PreviousPartiallyFreeSpan := LPPreviousSpan;
-
-    {Unlock the small block manager if required}
-    if AUnlockSmallBlockManager then
-      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
-
-    {Clear the small block span flag in the header of the medium block.  This is important in case the block is ever
-    reused and allocated blocks subsequently enumerated.}
-    SetMediumBlockHeader_SetIsSmallBlockSpan(APSmallBlockSpan, False);
-
-    {It's not necessary to check nor update the sequential feed details, since BlocksInUse can only hit 0 after the
-    sequential feed range has been exhausted and all the blocks subsequently freed.}
-
-    {Free the block pool}
-    FastMM_FreeMem_FreeMediumBlock(APSmallBlockSpan);
-  end
-  else
+  if (APSmallBlockSpan.BlocksInUse <> 0) or (DebugModeCounter > 0) then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
@@ -5444,6 +5509,28 @@ begin
     {Unlock the small block manager if required}
     if AUnlockSmallBlockManager then
       APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
+  end
+  else
+  begin
+    {Remove this span from the circular linked list of partially free spans for the block type.}
+    LPPreviousSpan := APSmallBlockSpan.PreviousPartiallyFreeSpan;
+    LPNextSpan := APSmallBlockSpan.NextPartiallyFreeSpan;
+    LPPreviousSpan.NextPartiallyFreeSpan := LPNextSpan;
+    LPNextSpan.PreviousPartiallyFreeSpan := LPPreviousSpan;
+
+    {Unlock the small block manager if required}
+    if AUnlockSmallBlockManager then
+      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
+
+    {Clear the small block span flag in the header of the medium block.  This is important in case the block is ever
+    reused and allocated blocks subsequently enumerated.}
+    SetMediumBlockHeader_SetIsSmallBlockSpan(APSmallBlockSpan, False);
+
+    {It's not necessary to check nor update the sequential feed details, since BlocksInUse can only hit 0 after the
+    sequential feed range has been exhausted and all the blocks subsequently freed.}
+
+    {Free the block pool}
+    FastMM_FreeMem_FreeMediumBlock(APSmallBlockSpan);
   end;
 
   Result := 0;
@@ -6196,7 +6283,7 @@ asm
   {This pointer is being reallocated to a larger block and therefore it is logical to assume that it may be enlarged
   again.  Since reallocations are expensive, there is a minimum upsize percentage to avoid unnecessary future move
   operations.}
-  lea eax, [ecx * 2 + CSmallBlockUpsizeAdder]
+  lea eax, [ecx + ecx + CSmallBlockUpsizeAdder]
   cmp eax, edx
   ja @GotNewSize
   mov eax, edx
