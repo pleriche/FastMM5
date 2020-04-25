@@ -1200,6 +1200,7 @@ procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt); forward
 
 const
   {Structure size constants}
+  CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
   CSmallBlockHeaderSize = SizeOf(TSmallBlockHeader);
   CMediumBlockHeaderSize = SizeOf(TMediumBlockHeader);
   CMediumFreeBlockFooterSize = SizeOf(TMediumFreeBlockFooter);
@@ -4608,7 +4609,7 @@ asm
   call RemoveMediumFreeBlockFromBin
 
   {If the block currently has debug info, check it for consistency before resetting the flag.}
-  test byte ptr [edi - 2], CHasDebugInfoFlag
+  test byte ptr [edi - CBlockStatusFlagsSize], CHasDebugInfoFlag
   jz @DebugInfoOK
   mov eax, edi
   call CheckFreeDebugBlockIntact
@@ -4727,7 +4728,7 @@ asm
   call RemoveMediumFreeBlockFromBin
 
   {If the block currently has debug info, check it for consistency before resetting the flag.}
-  test byte ptr [rdi - 2], CHasDebugInfoFlag
+  test byte ptr [rdi - CBlockStatusFlagsSize], CHasDebugInfoFlag
   jz @DebugInfoOK
   mov rcx, rdi
   call CheckFreeDebugBlockIntact
@@ -6352,7 +6353,7 @@ function FastMM_ReallocMem_ReallocSmallBlock(APointer: Pointer; ANewUserSize: Na
 {$ifdef X86ASM}
 asm
   {Get the span pointer in esi}
-  movzx ecx, word ptr [eax - 2]
+  movzx ecx, word ptr [eax - CBlockStatusFlagsSize]
   push esi
   and ecx, CDropSmallBlockFlagsMask
   shl ecx, CSmallBlockSpanOffsetBitShift
@@ -6622,7 +6623,7 @@ asm
   {--------x86 Assembly language codepath---------}
 
   {Read the flags from the block header.}
-  movzx edx, word ptr [eax - 2]
+  movzx edx, word ptr [eax - CBlockStatusFlagsSize]
 
   {Is it a small block that is in use?}
   mov ecx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
@@ -6707,7 +6708,7 @@ asm
   .pushnv rsi
 
   {Read the flags from the block header.}
-  movzx eax, word ptr [rcx - 2]
+  movzx eax, word ptr [rcx - CBlockStatusFlagsSize]
 
   {Is it a small block that is in use?}
   mov edx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
@@ -6835,12 +6836,12 @@ asm
   {--------x86 Assembly language codepath---------}
 
   {Is it a small block that is in use?}
-  movzx ecx, word ptr [eax - 2]
+  movzx ecx, word ptr [eax - CBlockStatusFlagsSize]
   and ecx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
   cmp ecx, CIsSmallBlockFlag
   je FastMM_ReallocMem_ReallocSmallBlock
 
-  movzx ecx, word ptr [eax - 2]
+  movzx ecx, word ptr [eax - CBlockStatusFlagsSize]
   and ecx, (not CHasDebugInfoFlag)
   cmp ecx, CIsMediumBlockFlag
   je FastMM_ReallocMem_ReallocMediumBlock
@@ -6848,7 +6849,7 @@ asm
   cmp ecx, CIsLargeBlockFlag
   je FastMM_ReallocMem_ReallocLargeBlock
 
-  cmp word ptr [eax - 2], CIsDebugBlockFlag
+  cmp word ptr [eax - CBlockStatusFlagsSize], CIsDebugBlockFlag
   je FastMM_ReallocMem_ReallocDebugBlock
 
   xor edx,edx
@@ -6857,7 +6858,7 @@ asm
   {--------x64 Assembly language codepath---------}
   .noframe
   {Get the block flags in r8}
-  movzx r8d, word ptr [rcx - 2]
+  movzx r8d, word ptr [rcx - CBlockStatusFlagsSize]
 
   {Is it a small block that is in use?}
   mov eax, r8d
