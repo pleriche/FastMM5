@@ -3525,7 +3525,8 @@ end;
 {------------Invalid Free/realloc handling-----------}
 {----------------------------------------------------}
 
-procedure HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
+{Always returns - 1.}
+function HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean): Integer;
 var
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
   LHeaderChecksum: NativeUInt;
@@ -3536,13 +3537,13 @@ begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
   not much that can be done to provide additional error information.}
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
-    Exit;
+    Exit(-1);
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit;
+    Exit(-1);
 
   LTokenValues := Default(TEventLogTokenValues);
 
@@ -3554,6 +3555,8 @@ begin
     LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
   else
     LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
+
+  Result := -1;
 end;
 
 
@@ -6445,8 +6448,9 @@ begin
 end;
 
 function FastMM_FreeMem(APointer: Pointer): Integer;
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
   {Read the flags from the block header.}
   movzx edx, word ptr [eax - 2]
 
@@ -6524,9 +6528,93 @@ asm
   je FastMM_FreeMem_FreeDebugBlock
 
   xor edx,edx
-  call HandleInvalidFreeMemOrReallocMem
-  or eax, -1
+  jmp HandleInvalidFreeMemOrReallocMem
+{$else}
+  .params 3
+  .pushnv rsi
 
+  {Read the flags from the block header.}
+  movzx eax, word ptr [rcx - 2]
+
+  {Is it a small block that is in use?}
+  mov edx, (CBlockIsFreeFlag or CIsSmallBlockFlag)
+  and edx, eax
+  cmp edx, CIsSmallBlockFlag
+  jne @NotASmallBlock
+
+  {----Start: Inline of FastMM_FreeMem_FreeSmallBlock----}
+
+  {Get the block pointer in rdx}
+  mov rdx, rcx
+
+  {Get the span pointer in rcx}
+  and eax, CDropSmallBlockFlagsMask
+  shl eax, CSmallBlockSpanOffsetBitShift
+  and rcx, -CMediumBlockAlignment
+  sub rcx, rax
+
+  {Get the small block manager in rsi}
+  mov rsi, TSmallBlockSpanHeader(rcx).SmallBlockManager
+
+  mov eax, $100
+  lock cmpxchg byte ptr TSmallBlockManager(rsi).SmallBlockManagerLocked, ah
+  jne @ManagerCurrentlyLocked
+
+  cmp TSmallBlockManager(rsi).PendingFreeList, 0
+  jne @HasPendingFreeList
+
+  {No pending free list:  Just free this block and unlock the block manager.}
+  add rsp, $28
+  pop rsi
+  pop rbp
+  mov r8b, 1
+  jmp FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked
+
+@HasPendingFreeList:
+  xor r8d, r8d
+  call FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked
+
+  {Unlink the current pending free list}
+  xor ecx, ecx
+  xchg TSmallBlockManager(rsi).PendingFreeList, rcx
+
+  {Process the pending free list.}
+  add rsp, $28
+  pop rsi
+  pop rbp
+  mov dl, 1
+  jmp FastMM_FreeMem_FreeSmallBlockChain
+
+  {The small block manager is currently locked, so we need to add this block to its pending free list.}
+@ManagerCurrentlyLocked:
+  mov rax, TSmallBlockManager(rsi).PendingFreeList
+  mov [rdx], rax
+  lock cmpxchg TSmallBlockManager(rsi).PendingFreeList, rdx
+  jne @ManagerCurrentlyLocked
+
+  xor eax, eax
+  jmp @Done
+  {----End: Inline of FastMM_FreeMem_FreeSmallBlock----}
+
+@NotASmallBlock:
+  add rsp, $28
+  pop rsi
+  pop rbp
+
+  mov edx, (not CHasDebugInfoFlag)
+  and edx, eax
+  cmp edx, CIsMediumBlockFlag
+  je FastMM_FreeMem_FreeMediumBlock
+
+  cmp edx, CIsLargeBlockFlag
+  je FastMM_FreeMem_FreeLargeBlock
+  cmp eax, CIsDebugBlockFlag
+  je FastMM_FreeMem_FreeDebugBlock
+  xor edx,edx
+  jmp HandleInvalidFreeMemOrReallocMem
+@Done:
+
+{$endif}
 {$else}
 var
   LBlockHeader: Integer;
@@ -6559,8 +6647,7 @@ begin
         end
         else
         begin
-          HandleInvalidFreeMemOrReallocMem(APointer, False);
-          Result := -1;
+          Result := HandleInvalidFreeMemOrReallocMem(APointer, False);
         end;
       end;
     end;
@@ -6589,8 +6676,7 @@ asm
   je FastMM_ReallocMem_ReallocDebugBlock
 
   xor edx,edx
-  call HandleInvalidFreeMemOrReallocMem
-  or eax, -1
+  jmp HandleInvalidFreeMemOrReallocMem
 {$else}
 var
   LBlockHeader: Integer;
