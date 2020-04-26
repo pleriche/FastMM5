@@ -83,7 +83,7 @@ uses
 {$StackFrames Off}
 {$TypedAddress Off}
 {$LongStrings On}
-{$Align 16} //The SmallBlockManagers array entries contain fields that should be in the same cache line.
+{$Align 8}
 
 {Calling the deprecated GetHeapStatus is unavoidable, so suppress the warning.}
 {$warn Symbol_Deprecated Off}
@@ -855,8 +855,8 @@ type
 
   PSmallBlockSpanHeader = ^TSmallBlockSpanHeader;
 
-  {Always 64 bytes in size, under both 32-bit and 64-bit.  This record is not declared as packed, because the
-  SmallBlockManagers array must be aligned on a 16 byte boundary.}
+  {Always 64 bytes in size in order to fit inside a cache line, under both 32-bit and 64-bit.  It should preferably be
+  aligned to 64 bytes.}
   TSmallBlockManager = record
     {The first/last partially free span in the arena.  This field must be at the same offsets as
     TSmallBlockSpanHeader.NextPartiallyFreeSpan and TSmallBlockSpanHeader.PreviousPartiallyFreeSpan.}
@@ -900,10 +900,7 @@ type
   TSmallBlockArena = array[0..CSmallBlockTypeCount - 1] of TSmallBlockManager;
   PSmallBlockArena = ^TSmallBlockArena;
 
-  {There's an extra unused small block manager at the end of every arena.  This is to prevent a cache line overlap
-  between the last manager of one arena and the first manager of the next, as well as an overlap between the last
-  manager of the last arena and the variable that follows thereafter.}
-  TSmallBlockArenas = array[0..CSmallBlockArenaCount] of TSmallBlockArena;
+  TSmallBlockArenas = array[0..CSmallBlockArenaCount - 1] of TSmallBlockArena;
 
   {This is always 64 bytes in size in order to ensure proper alignment of small blocks under all circumstances.}
   TSmallBlockSpanHeader = packed record
@@ -1001,8 +998,7 @@ type
   PMediumFreeBlockFooter = ^TMediumFreeBlockFooter;
 {$PointerMath Off}
 
-  {Medium block manager.  The record is not declared as packed, because the MediumBlockManagers array must be aligned
-  on a 16 byte boundary.}
+  {Medium block manager.  It should preferably be aligned to 64 bytes.}
   TMediumBlockManager = record
     {Maintains a circular list of all medium block spans to enable memory leak detection on program shutdown.  These
     fields must be at the same position as the corresponding fields in TMediumBlockSpanHeader.}
@@ -8592,9 +8588,11 @@ begin
   Result := OptimizationStrategy;
 end;
 
-{Adjacent small block managers may straddle the same cache line and thus have a false dependency.  We do not want
-the managers for similarly sized blocks to have such a false dependency, so small block managers are not kept in
-memory in ascending block size order.}
+{Adjacent small block managers may straddle the same cache line and thus have a false dependency.  Many CPUs also
+prefetch adjacent cache lines on a cache miss (e.g. the "Adjacent Cache Line Prefetch" BIOS option), so even if the
+small block managers are perfectly aligned on cache line (64-byte) boundaries, these prefetch mechanisms may still
+introduce false dependencies.  We do not want the managers for frequently used block sizes to have false dependencies
+between them, so the frequently used (small) sizes are interspersed with the less frequently used (larger) sizes.}
 function SmallBlockManagerIndexFromSizeIndex(ASizeIndex: Integer): Integer; inline;
 begin
   {Fill up the even slots first from the front to the back, and then the uneven slots from the back to the front.}
@@ -8735,8 +8733,9 @@ begin
     LOptimalSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(LBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize
       + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
 
-    {Small block managers are not kept in memory in size order, because they may straddle the same cache lines and we
-    want to avoid false dependencies between managers for similar block sizes.}
+    {Small block managers are not kept in memory in size order, because they may straddle the same cache lines (or may
+    be prefetched together) and we want to avoid false dependencies between frequently used managers (usually similarly
+    sized small blocks).}
     LManagerIndex := SmallBlockManagerIndexFromSizeIndex(LBlockSizeIndex);
 
     for LArenaInd := 0 to CSmallBlockArenaCount - 1 do
