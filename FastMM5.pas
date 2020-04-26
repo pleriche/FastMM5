@@ -112,6 +112,8 @@ uses
 {$endif}
 
 const
+  {The current version of FastMM.  The first digit is the major version, followed by a two digit minor version number.}
+  FastMM_Version = 500;
   {The number of entries per stack trace differs between 32-bit and 64-bit in order to ensure that the debug header is
   always a multiple of 64 bytes.}
 {$ifdef 32Bit}
@@ -5786,7 +5788,7 @@ asm
 
   {Set the span up for sequential block serving}
   mov TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue, eax
-  mov TSmallBlockManager(esi).SmallBlockManagerLocked, False
+  mov TSmallBlockManager(esi).SmallBlockManagerLocked, 0
 
   {Return the last block in the span}
   mov ecx, eax
@@ -5849,8 +5851,10 @@ end;
 {Attempts to split off a small block from the sequential feed span for the arena.  Returns the block on success, nil if
 there is no available sequential feed block.  The arena does not have to be locked.}
 function FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager: PSmallBlockManager): Pointer;
-{$ifdef X86ASM}
+{$ifndef PurePascal}
 asm
+{$ifdef X86ASM}
+  {--------x86 Assembly language codepath---------}
   push ebx
   push esi
   push edi
@@ -5875,7 +5879,7 @@ asm
   jle @NoSequentialFeedAvailable
 
   {Try to grab the block.  If it fails, try again from the start.}
-  lock cmpxchg8b TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset
+  lock cmpxchg8b TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerAndABACounter
   jne @TrySequentialFeedLoop
 
   {The block address is the span + offset.}
@@ -5895,6 +5899,47 @@ asm
   pop edi
   pop esi
   pop ebx
+{$else}
+  {--------x64 Assembly language codepath---------}
+  .noframe
+
+@TrySequentialFeedLoop:
+
+  {Get the old ABA counter and offset in rax}
+  mov rax, TSmallBlockManager(rcx).LastSmallBlockSequentialFeedOffset.IntegerAndABACounter
+
+  {Get the new ABA counter and offset in rdx}
+  movzx edx, TSmallBlockManager(rcx).BlockSize
+  neg edx
+  add rdx, rax
+
+  {Get the current sequential feed span in r8}
+  mov r8, TSmallBlockManager(rcx).SequentialFeedSmallBlockSpan
+
+  cmp eax, CSmallBlockSpanHeaderSize
+  jle @NoSequentialFeedAvailable
+
+  {Try to grab the block.  If it fails, try again from the start.}
+  lock cmpxchg TSmallBlockManager(rcx).LastSmallBlockSequentialFeedOffset.IntegerAndABACounter, rdx
+  jne @TrySequentialFeedLoop
+
+  {The block address is the span + offset.}
+  mov edx, edx
+  lea rax, [r8 + rdx]
+
+  {Set the header for the small block.}
+  and edx, -CMediumBlockAlignment
+  shr edx, CSmallBlockSpanOffsetBitShift
+  or edx, CIsSmallBlockFlag
+  mov [rax - CSmallBlockHeaderSize], dx
+
+  ret
+
+@NoSequentialFeedAvailable:
+  xor eax, eax
+@Done:
+
+{$endif}
 {$else}
 var
   LPreviousLastSequentialFeedBlockOffset, LNewLastSequentialFeedBlockOffset: TIntegerWithABACounter;
