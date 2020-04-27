@@ -1,12 +1,12 @@
 {
 
-FastMM 5 Beta 2
+FastMM 5.00
 
 Description:
   A fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU
   cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
-Copyright:
+Developed by:
   Pierre le Riche
 
 Sponsored by:
@@ -16,14 +16,14 @@ Homepage:
   https://github.com/pleriche/FastMM5
 
 Licence:
-  FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the GPL v3 licence at no cost, or you
-  may purchase a commercial licence.  The commercial licence pricing is as follows:
-    1 User = $99
-    2 Users = $189
-    3 Users = $269
-    4 Users = $339
-    5 Users = $399
-    >5 Users = $399 + $50 per user from the 6th onwards
+  FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the GPL v3 licence at no cost to you,
+  or you may purchase a commercial licence.  The commercial licence pricing is as follows:
+    1 developer = $99
+    2 developers = $189
+    3 developers = $269
+    4 developers = $339
+    5 developers = $399
+    >5 developers = $399 + $50 per developer from the 6th onwards
   Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to
   fastmm@leriche.org for confirmation.  Support is available for users with a commercial licence via the same e-mail
   address.
@@ -674,8 +674,13 @@ const
   CIsDebugBlockFlag = 32;
 
   {-----Small block constants-----}
+{$ifdef 32Bit}
   CSmallBlockTypeCount = 61;
   CSmallBlockGranularityBits = 3;
+{$else}
+  CSmallBlockTypeCount = 51;
+  CSmallBlockGranularityBits = 4;
+{$endif}
   CSmallBlockGranularity = 1 shl CSmallBlockGranularityBits;
   CMaximumSmallBlockSize = 2624; //Must be a multiple of 64 for the 64-byte alignment option to work
   CSmallBlockArenaCount = 4;
@@ -1080,7 +1085,6 @@ type
 
   TSmallBlockTypeInfo = record
     BlockSize: Word;
-    UpsizeMoveProcedure: TMoveProc;
   end;
   PSmallBlockTypeInfo = ^TSmallBlockTypeInfo;
 
@@ -1181,21 +1185,6 @@ type
   TFastMM_LegacyConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
     APBuffer: PAnsiChar): PAnsiChar;
 
-{Fixed size move procedures.  The 64-bit versions assume 16-byte alignment.  Moves are assumed to be non-overlapping.}
-procedure Move8(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move16(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move24(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move32(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move40(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move48(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move56(const ASource; var ADest; ACount: NativeInt); forward;
-procedure Move64(const ASource; var ADest; ACount: NativeInt); forward;
-{Variable size move routines.  Moves are assumed to be non-overlapping.}
-procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt); forward;
-procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt); forward;
-procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt); forward;
-procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt); forward;
-
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -1210,86 +1199,111 @@ const
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
 
   CSmallBlockManagerSize = SizeOf(TSmallBlockManager);
+  CSmallBlockManagerSizeBits = 6;
+
   CMediumBlockManagerSize = SizeOf(TMediumBlockManager);
 
-  {Small block sizes (including the header)}
+  {Small block sizes (including the header).  The 8 byte aligned sizes are not available under 64-bit.}
   CSmallBlockTypeInfo: array[0..CSmallBlockTypeCount - 1] of TSmallBlockTypeInfo = (
     {8 byte jumps}
-    (BlockSize: 8; UpsizeMoveProcedure: Move8),
-    (BlockSize: 16; UpsizeMoveProcedure: Move16),
-    (BlockSize: 24; UpsizeMoveProcedure: Move24),
-    (BlockSize: 32; UpsizeMoveProcedure: Move32),
-    (BlockSize: 40; UpsizeMoveProcedure: Move40),
-    (BlockSize: 48; UpsizeMoveProcedure: Move48),
-    (BlockSize: 56; UpsizeMoveProcedure: Move56),
-    (BlockSize: 64; UpsizeMoveProcedure: Move64),
-    (BlockSize: 72; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 80; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 88; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 96; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 104; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 112; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 120; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 128; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 136; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 144; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 152; UpsizeMoveProcedure: MoveMultipleOf8),
-    (BlockSize: 160; UpsizeMoveProcedure: MoveMultipleOf32),
+{$ifdef 32Bit}
+    (BlockSize: 8),
+{$endif}
+    (BlockSize: 16),
+{$ifdef 32Bit}
+    (BlockSize: 24),
+{$endif}
+    (BlockSize: 32),
+{$ifdef 32Bit}
+    (BlockSize: 40),
+{$endif}
+    (BlockSize: 48),
+{$ifdef 32Bit}
+    (BlockSize: 56),
+{$endif}
+    (BlockSize: 64),
+{$ifdef 32Bit}
+    (BlockSize: 72),
+{$endif}
+    (BlockSize: 80),
+{$ifdef 32Bit}
+    (BlockSize: 88),
+{$endif}
+    (BlockSize: 96),
+{$ifdef 32Bit}
+    (BlockSize: 104),
+{$endif}
+    (BlockSize: 112),
+{$ifdef 32Bit}
+    (BlockSize: 120),
+{$endif}
+    (BlockSize: 128),
+{$ifdef 32Bit}
+    (BlockSize: 136),
+{$endif}
+    (BlockSize: 144),
+{$ifdef 32Bit}
+    (BlockSize: 152),
+{$endif}
+    (BlockSize: 160),
     {16 byte jumps}
-    (BlockSize: 176; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 192; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 208; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 224; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 240; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 256; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 272; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 288; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 304; UpsizeMoveProcedure: MoveMultipleOf16),
-    (BlockSize: 320; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 176),
+    (BlockSize: 192),
+    (BlockSize: 208),
+    (BlockSize: 224),
+    (BlockSize: 240),
+    (BlockSize: 256),
+    (BlockSize: 272),
+    (BlockSize: 288),
+    (BlockSize: 304),
+    (BlockSize: 320),
     {32 byte jumps}
-    (BlockSize: 352; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 384; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 416; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 448; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 480; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 512; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 544; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 576; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 608; UpsizeMoveProcedure: MoveMultipleOf32),
-    (BlockSize: 640; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 352),
+    (BlockSize: 384),
+    (BlockSize: 416),
+    (BlockSize: 448),
+    (BlockSize: 480),
+    (BlockSize: 512),
+    (BlockSize: 544),
+    (BlockSize: 576),
+    (BlockSize: 608),
+    (BlockSize: 640),
     {64 byte jumps}
-    (BlockSize: 704; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 768; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 832; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 896; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 960; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1024; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1088; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1152; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1216; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1280; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1344; UpsizeMoveProcedure: MoveMultipleOf64),
+    (BlockSize: 704),
+    (BlockSize: 768),
+    (BlockSize: 832),
+    (BlockSize: 896),
+    (BlockSize: 960),
+    (BlockSize: 1024),
+    (BlockSize: 1088),
+    (BlockSize: 1152),
+    (BlockSize: 1216),
+    (BlockSize: 1280),
+    (BlockSize: 1344),
     {128 byte jumps}
-    (BlockSize: 1472; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1600; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1728; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1856; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 1984; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 2112; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 2240; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 2368; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: 2496; UpsizeMoveProcedure: MoveMultipleOf64),
-    (BlockSize: CMaximumSmallBlockSize; UpsizeMoveProcedure: MoveMultipleOf64)
+    (BlockSize: 1472),
+    (BlockSize: 1600),
+    (BlockSize: 1728),
+    (BlockSize: 1856),
+    (BlockSize: 1984),
+    (BlockSize: 2112),
+    (BlockSize: 2240),
+    (BlockSize: 2368),
+    (BlockSize: 2496),
+    (BlockSize: CMaximumSmallBlockSize)
   );
 
 var
-  AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
-
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
   SmallBlockTypeLookup: array[0.. CMaximumSmallBlockSize div CSmallBlockGranularity - 1] of Byte;
 
-  {The small block managers.  Every arena has a separate manager for each small block size.}
+  {The small block managers.  Every arena has a separate manager for each small block size.  This should ideally be
+  aligned on a 64-byte (cache line) boundary in order to prevent false dependencies between adjacent small block
+  managers (RSP-28144).}
   SmallBlockManagers: TSmallBlockArenas;
+
+  {The default size of new medium block spans.  Must be a multiple of 64K and may not exceed CMaximumMediumBlockSpanSize.}
+  DefaultMediumBlockSpanSize: Integer;
 
   {The medium block manager for each medium block arena.}
   MediumBlockManagers: TMediumBlockArenas;
@@ -1297,8 +1311,9 @@ var
   {The large block manager for each large block arena.}
   LargeBlockManagers: TLargeBlockArenas;
 
-  {The default size of new medium block spans.  Must be a multiple of 64K and may not exceed CMaximumMediumBlockSpanSize.}
-  DefaultMediumBlockSpanSize: Integer;
+  {Counts the number of time FastMM_EnterMinimumAddressAlignment less the number of times
+  FastMM_ExitMinimumAddressAlignment has been called for each alignment type.}
+  AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
 
   {The current optimization stategy in effect.}
   OptimizationStrategy: TFastMM_MemoryManagerOptimizationStrategy;
@@ -1354,17 +1369,6 @@ var
 {--------------Move routines---------------}
 {------------------------------------------}
 
-procedure Move8(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
-asm
-  fild qword ptr [eax]
-  fistp qword ptr [edx]
-{$else}
-begin
-  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
-{$endif}
-end;
-
 procedure Move16(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -1382,23 +1386,6 @@ asm
 begin
   PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
-{$endif}
-end;
-
-procedure Move24(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
-asm
-  fild qword ptr [eax]
-  fild qword ptr [eax + 8]
-  fild qword ptr [eax + 16]
-  fistp qword ptr [edx + 16]
-  fistp qword ptr [edx + 8]
-  fistp qword ptr [edx]
-{$else}
-begin
-  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
-  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
-  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
 {$endif}
 end;
 
@@ -1427,29 +1414,6 @@ begin
   PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
   PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
   PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
-{$endif}
-end;
-
-procedure Move40(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
-asm
-  fild qword ptr [eax]
-  fild qword ptr [eax + 8]
-  fild qword ptr [eax + 16]
-  fild qword ptr [eax + 24]
-  fild qword ptr [eax + 32]
-  fistp qword ptr [edx + 32]
-  fistp qword ptr [edx + 24]
-  fistp qword ptr [edx + 16]
-  fistp qword ptr [edx + 8]
-  fistp qword ptr [edx]
-{$else}
-begin
-  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
-  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
-  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
-  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
-  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
 {$endif}
 end;
 
@@ -1486,35 +1450,6 @@ begin
   PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
   PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
   PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
-{$endif}
-end;
-
-procedure Move56(const ASource; var ADest; ACount: NativeInt);
-{$ifdef X86ASM}
-asm
-  fild qword ptr [eax]
-  fild qword ptr [eax + 8]
-  fild qword ptr [eax + 16]
-  fild qword ptr [eax + 24]
-  fild qword ptr [eax + 32]
-  fild qword ptr [eax + 40]
-  fild qword ptr [eax + 48]
-  fistp qword ptr [edx + 48]
-  fistp qword ptr [edx + 40]
-  fistp qword ptr [edx + 32]
-  fistp qword ptr [edx + 24]
-  fistp qword ptr [edx + 16]
-  fistp qword ptr [edx + 8]
-  fistp qword ptr [edx]
-{$else}
-begin
-  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
-  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
-  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
-  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
-  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
-  PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
-  PInt64Array(@ADest)[6] := PInt64Array(@ASource)[6];
 {$endif}
 end;
 
@@ -1562,6 +1497,89 @@ begin
 {$endif}
 end;
 
+{64-bit is always 16 byte aligned, so the 8 byte aligned moves are not needed under 64-bit.}
+{$ifdef 32Bit}
+procedure Move8(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+{$endif}
+end;
+
+procedure Move24(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+{$endif}
+end;
+
+procedure Move40(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
+  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
+{$endif}
+end;
+
+
+procedure Move56(const ASource; var ADest; ACount: NativeInt);
+{$ifdef X86ASM}
+asm
+  fild qword ptr [eax]
+  fild qword ptr [eax + 8]
+  fild qword ptr [eax + 16]
+  fild qword ptr [eax + 24]
+  fild qword ptr [eax + 32]
+  fild qword ptr [eax + 40]
+  fild qword ptr [eax + 48]
+  fistp qword ptr [edx + 48]
+  fistp qword ptr [edx + 40]
+  fistp qword ptr [edx + 32]
+  fistp qword ptr [edx + 24]
+  fistp qword ptr [edx + 16]
+  fistp qword ptr [edx + 8]
+  fistp qword ptr [edx]
+{$else}
+begin
+  PInt64Array(@ADest)[0] := PInt64Array(@ASource)[0];
+  PInt64Array(@ADest)[1] := PInt64Array(@ASource)[1];
+  PInt64Array(@ADest)[2] := PInt64Array(@ASource)[2];
+  PInt64Array(@ADest)[3] := PInt64Array(@ASource)[3];
+  PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
+  PInt64Array(@ADest)[5] := PInt64Array(@ASource)[5];
+  PInt64Array(@ADest)[6] := PInt64Array(@ASource)[6];
+{$endif}
+end;
+
 {Moves 8x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a 8
 byte boundary.  The source and destination buffers may not overlap.}
 procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt);
@@ -1593,6 +1611,54 @@ begin
   end;
 {$endif}
 end;
+
+{$ifdef X86ASM}
+procedure MoveMultipleOf16_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  movdqa xmm0, [eax + ecx]
+  movdqa [edx + ecx], xmm0
+  add ecx, 16
+  js @MoveLoop
+end;
+
+procedure MoveMultipleOf32_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  movdqa xmm0, [eax + ecx]
+  movdqa xmm1, [eax + ecx + 16]
+  movdqa [edx + ecx], xmm0
+  movdqa [edx + ecx + 16], xmm1
+  add ecx, 32
+  js @MoveLoop
+end;
+
+procedure MoveMultipleOf64_Small_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  add eax, ecx
+  add edx, ecx
+  neg ecx
+@MoveLoop:
+  movdqa xmm0, [eax + ecx]
+  movdqa xmm1, [eax + ecx + 16]
+  movdqa xmm2, [eax + ecx + 32]
+  movdqa xmm3, [eax + ecx + 48]
+  movdqa [edx + ecx], xmm0
+  movdqa [edx + ecx + 16], xmm1
+  movdqa [edx + ecx + 32], xmm2
+  movdqa [edx + ecx + 48], xmm3
+  add ecx, 64
+  js @MoveLoop
+end;
+{$endif}
+
+{$endif}
 
 {Moves 16x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
 16 byte boundary.  The source and destination buffers may not overlap.}
@@ -1698,7 +1764,7 @@ end;
 
 {Moves 64x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
 64 byte boundary.  The source and destination buffers may not overlap.}
-procedure MoveMultipleOf64(const ASource; var ADest; ACount: NativeInt);
+procedure MoveMultipleOf64_Small(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -1740,6 +1806,58 @@ asm
   movdqa [rdx + r8 + 48], xmm3
   add r8, 64
   js @MoveLoop
+{$endif}
+{$else}
+var
+  LPSource, LPDest: PByte;
+begin
+  LPSource := @PByte(@ASource)[ACount];
+  LPDest := @PByte(@ADest)[ACount];
+  ACount := - ACount;
+
+  while True do
+  begin
+    PInt64Array(@LPDest[ACount])[0] := PInt64Array(@LPSource[ACount])[0];
+    PInt64Array(@LPDest[ACount])[1] := PInt64Array(@LPSource[ACount])[1];
+    PInt64Array(@LPDest[ACount])[2] := PInt64Array(@LPSource[ACount])[2];
+    PInt64Array(@LPDest[ACount])[3] := PInt64Array(@LPSource[ACount])[3];
+    PInt64Array(@LPDest[ACount])[4] := PInt64Array(@LPSource[ACount])[4];
+    PInt64Array(@LPDest[ACount])[5] := PInt64Array(@LPSource[ACount])[5];
+    PInt64Array(@LPDest[ACount])[6] := PInt64Array(@LPSource[ACount])[6];
+    PInt64Array(@LPDest[ACount])[7] := PInt64Array(@LPSource[ACount])[7];
+
+    Inc(ACount, 64);
+    if ACount >= 0 then
+      Break;
+  end;
+{$endif}
+end;
+
+{As above, but optimized for larger blocks.  The startup cost for REP MOVS is high, but it is significantly faster with
+large blocks on modern CPUs.}
+procedure MoveMultipleOf64_Large(const ASource; var ADest; ACount: NativeInt);
+{$ifndef PurePascal}
+asm
+{$ifdef X86ASM}
+  cld
+  shr ecx, 2
+  push esi
+  push edi
+  mov esi, eax
+  mov edi, edx
+  rep movsd
+  pop edi
+  pop esi
+{$else}
+  .noframe
+  .pushnv rsi
+  .pushnv rdi
+  cld
+  shr r8, 3
+  mov rsi, rcx
+  mov rdi, rdx
+  mov rcx, r8
+  rep movsq
 {$endif}
 {$else}
 var
@@ -3852,7 +3970,7 @@ begin
       {The user allocated size is stored for large blocks}
       LOldUserSize := LPLargeBlockHeader.UserAllocatedSize;
       {The number of bytes to move is the old user size.}
-      MoveMultipleOf64(APointer^, Result^, LOldUserSize);
+      MoveMultipleOf64_Large(APointer^, Result^, LOldUserSize);
       {Free the old block.}
       FastMM_FreeMem(APointer);
     end;
@@ -5368,7 +5486,7 @@ begin
     if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
       PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewUserSize;
     {Move the data across}
-    MoveMultipleOf64(APointer^, Result^, LOldUserSize);
+    MoveMultipleOf64_Large(APointer^, Result^, LOldUserSize);
     {Free the old block}
     FastMM_FreeMem(APointer);
   end;
@@ -6548,10 +6666,10 @@ asm
   ja @NotASmallBlock
   {Small block:  Get the small block manager index in eax}
   add eax, 1
-  shr eax, 3
+  shr eax, CSmallBlockGranularityBits
   movzx eax, byte ptr SmallBlockTypeLookup[eax]
   {Get a pointer to the small block manager for arena 0 in eax}
-  shl eax, 6 // * CSmallBlockManagerSize
+  shl eax, CSmallBlockManagerSizeBits
   add eax, offset SmallBlockManagers
   jmp FastMM_GetMem_GetSmallBlock
 @NotASmallBlock:
@@ -6589,11 +6707,11 @@ asm
   ja @NotASmallBlock
   {Small block:  Get the small block manager index in ecx}
   add ecx, 1
-  shr ecx, 3
+  shr ecx, CSmallBlockGranularityBits
   lea rdx, SmallBlockTypeLookup
   movzx ecx, byte ptr [rdx + rcx]
   {Get a pointer to the small block manager for arena 0 in rcx}
-  shl rcx, 6 // * CSmallBlockManagerSize
+  shl rcx, CSmallBlockManagerSizeBits
   lea rdx, SmallBlockManagers
   add rcx, rdx
   jmp FastMM_GetMem_GetSmallBlock
@@ -8595,8 +8713,8 @@ introduce false dependencies.  We do not want the managers for frequently used b
 between them, so the frequently used (small) sizes are interspersed with the less frequently used (larger) sizes.}
 function SmallBlockManagerIndexFromSizeIndex(ASizeIndex: Integer): Integer; inline;
 begin
-  {Fill up the even slots first from the front to the back, and then the uneven slots from the back to the front.}
-  Result := ASizeIndex * 2;
+  {Fill up the uneven slots first from the front to the back, and then the even slots from the back to the front.}
+  Result := ASizeIndex * 2 + 1;
   if Result >= CSmallBlockTypeCount then
     Result := (2 * CSmallBlockTypeCount - 1) - Result;
 end;
@@ -8673,6 +8791,73 @@ begin
     Result := maa8Bytes;
 end;
 
+{Gets the optimal move procedure for the given small block size.}
+function FastMM_InitializeMemoryManager_GetOptimalMoveProc(ASmallBlockSize: Integer): TMoveProc;
+begin
+  case ASmallBlockSize of
+
+    {64-bit is always 16 byte aligned, so the 8 byte aligned moves are not needed under 64-bit.}
+{$ifdef 32Bit}
+    8: Result := @Move8;
+    24: Result := @Move24;
+    40: Result := @Move40;
+    56: Result := @Move56;
+{$endif}
+
+    16: Result := @Move16;
+    32: Result := @Move32;
+    48: Result := @Move48;
+    64: Result := @Move64;
+
+  else
+    begin
+      if (ASmallBlockSize and 63) = 0 then
+      begin
+        if ASmallBlockSize < 1024 then
+        begin
+{$ifdef X86ASM}
+          if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+            Result := @MoveMultipleOf64_Small_x86_SSE2
+          else
+{$endif}
+            Result := @MoveMultipleOf64_Small;
+        end
+        else
+          Result := @MoveMultipleOf64_Large;
+      end else if (ASmallBlockSize and 31) = 0 then
+      begin
+{$ifdef X86ASM}
+        if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+          Result := @MoveMultipleOf32_x86_SSE2
+        else
+{$endif}
+          Result := @MoveMultipleOf32;
+      end else if (ASmallBlockSize and 15) = 0 then
+      begin
+{$ifdef X86ASM}
+        if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+          Result := @MoveMultipleOf16_x86_SSE2
+        else
+{$endif}
+          Result := @MoveMultipleOf16;
+{$ifdef 32Bit}
+      {Under 64-bit there are no block sizes that are a multiple of 8.}
+      end else if (ASmallBlockSize and 7) = 0 then
+      begin
+        Result := @MoveMultipleOf8;
+{$endif}
+      end
+      else
+      begin
+        {Sanity check - should never get here.}
+        System.Error(reRangeError);
+        Result := nil;
+      end;
+    end;
+
+  end;
+end;
+
 procedure FastMM_InitializeMemoryManager;
 var
   LBlockSizeIndex, LArenaInd, LMinimumSmallBlockSpanSize, LBinInd, LOptimalSmallBlockSpanSize, LBlocksPerSpan,
@@ -8683,6 +8868,8 @@ var
   LPLargeBlockManager: PLargeBlockManager;
   LPBin: PPointer;
 begin
+  {---------Bug checks-------}
+
   Assert(CSmallBlockHeaderSize = 2);
   Assert(CMediumBlockHeaderSize = 8);
 
@@ -8697,6 +8884,9 @@ begin
   Assert(CSmallBlockSpanHeaderSize = 64);
 
   Assert(CSmallBlockManagerSize = 64);
+  Assert(CSmallBlockManagerSize = (1 shl CSmallBlockManagerSizeBits));
+
+  {---------General configuration-------}
 
   FastMM_SetOptimizationStrategy(mmosBalanced);
 
@@ -8751,7 +8941,8 @@ begin
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
 
-      LPSmallBlockManager.UpsizeMoveProcedure := LPSmallBlockTypeInfo.UpsizeMoveProcedure;
+      LPSmallBlockManager.UpsizeMoveProcedure := FastMM_InitializeMemoryManager_GetOptimalMoveProc(
+        LPSmallBlockManager.BlockSize);
 
     end;
   end;
