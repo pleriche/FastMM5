@@ -5868,7 +5868,7 @@ asm
   lea ecx, [edx + CSmallBlockSpanMaximumAmountWithWhichOptimalSizeMayBeExceeded]
   call FastMM_GetMem_GetMediumBlock
   test eax, eax
-  jz @Done
+  jz @OutOfMemory
 
   {Save the span pointer in ebx}
   mov ebx, eax
@@ -5919,6 +5919,11 @@ asm
 @Done:
   pop esi
   pop ebx
+  ret
+@OutOfMemory:
+  mov TSmallBlockManager(esi).SmallBlockManagerLocked, 0
+  pop esi
+  pop ebx
 {$else}
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
@@ -5929,7 +5934,10 @@ begin
 
   {Handle "out of memory".}
   if LPSmallBlockSpan = nil then
+  begin
+    APSmallBlockManager.SmallBlockManagerLocked := 0;
     Exit(nil);
+  end;
 
   {Update the medium block header to indicate that this medium block serves as a small block span.}
   SetMediumBlockHeader_SetIsSmallBlockSpan(LPSmallBlockSpan, True);
