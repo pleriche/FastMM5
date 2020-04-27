@@ -1834,12 +1834,14 @@ begin
 end;
 
 {As above, but optimized for larger blocks.  The startup cost for REP MOVS is high, but it is significantly faster with
-large blocks on modern CPUs.}
+large blocks on modern CPUs.  If ACount is not a multiple of 64 then at least ACount bytes will be moved, possibly
+more.}
 procedure MoveMultipleOf64_Large(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
   cld
+  add ecx, 3 //round up the number of dwords
   shr ecx, 2
   push esi
   push edi
@@ -1853,6 +1855,7 @@ asm
   .pushnv rsi
   .pushnv rdi
   cld
+  add r8, 7 //round up the number of qwords
   shr r8, 3
   mov rsi, rcx
   mov rdi, rdx
