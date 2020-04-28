@@ -471,11 +471,14 @@ var
   {This variable is incremented during every debug getmem call (wrapping to 0 once it hits 4G) and stored in the debug
   header.  It may be useful for debugging purposes.}
   FastMM_LastAllocationNumber: Cardinal;
-  {This variable is incremented every time all the arenas for the block size are locked simultaneously and FastMM had to
-  relinquish the thread's timeslice.  If this number is excessively high then it is an indication that the number of
-  small, medium and/or large block arenas are insufficient for the number of application threads and should be
+  {These variables are incremented every time all the arenas for the block size are locked simultaneously and FastMM had
+  to relinquish the thread's timeslice during a GetMem or ReallocMem call. (FreeMem frees can always be deferred, so
+  will never cause a thread contention).  If these numbers are excessively high then it is an indication that the number
+  of small, medium and/or large block arenas are insufficient for the number of application threads and should be
   increased.  (The CSmallBlockArenaCount, CMediumBlockArenaCount and CLargeBlockArenaCount constants.)}
-  FastMM_ThreadContentionCount: Cardinal;
+  FastMM_SmallBlockThreadContentionCount: Cardinal;
+  FastMM_MediumBlockThreadContentionCount: Cardinal;
+  FastMM_LargeBlockThreadContentionCount: Cardinal;
 
   {---------Message and log file text configuration--------}
 
@@ -690,10 +693,12 @@ const
 
   {-----Medium block constants-----}
   CMediumBlockArenaCount = 4;
-  {Medium blocks are always aligned to at least 64 bytes (which is the typical cache line size).}
+  {Medium blocks are always aligned to at least 64 bytes (which is the typical cache line size).  Spans must be a
+  multiple of 64K (to make optimal use of the virtual address space), and offsets divided by the granularity must fit
+  inside a 16-bit word.}
   CMediumBlockAlignmentBits = 6;
   CMediumBlockAlignment = 1 shl CMediumBlockAlignmentBits;
-  CMaximumMediumBlockSpanSize = 4 * 1024 * 1024; //64K * CMediumBlockAlignment = 4MB
+  CMaximumMediumBlockSpanSize = 64 * 1024 * CMediumBlockAlignment; // = 4MB
 
   {Medium blocks are binned in linked lists - one linked list for each size.}
   CMediumBlockBinsPerGroup = 32;
@@ -707,17 +712,17 @@ const
   {The spacing between medium block bins is not constant.  There are three groups: initial, middle and final.}
   CInitialBinCount = 384;
   CInitialBinSpacingBits = 8;
-  CInitialBinSpacing = 1 shl CInitialBinSpacingBits; //256
+  CInitialBinSpacing = 1 shl CInitialBinSpacingBits; // = 256
 
   CMediumBlockMiddleBinsStart = CMinimumMediumBlockSize + CInitialBinSpacing * CInitialBinCount;
   CMiddleBinCount = 384;
   CMiddleBinSpacingBits = 9;
-  CMiddleBinSpacing = 1 shl CMiddleBinSpacingBits; //512
+  CMiddleBinSpacing = 1 shl CMiddleBinSpacingBits; // = 512
 
   CMediumBlockFinalBinsStart = CMediumBlockMiddleBinsStart + CMiddleBinSpacing * CMiddleBinCount;
   CFinalBinCount = CMediumBlockBinCount - CMiddleBinCount - CInitialBinCount;
   CFinalBinSpacingBits = 10;
-  CFinalBinSpacing = 1 shl CFinalBinSpacingBits; //1024
+  CFinalBinSpacing = 1 shl CFinalBinSpacingBits; // = 1024
 
   {The maximum size allocatable through medium blocks.  Blocks larger than this are allocated via the OS from the
   virtual memory pool ( = large blocks).}
@@ -884,7 +889,7 @@ type
     (which typically occurs less often) the variable size move routine is used.}
     UpsizeMoveProcedure: TMoveProc;
 
-    {0 = unlocked, 1 = locked, must be Integer due to RSP-25672}
+    {0 = unlocked, 1 = locked, cannot be Boolean due to RSP-25672}
     SmallBlockManagerLocked: Integer;
 
     {The minimum and optimal size of a small block span for this block type}
@@ -1018,7 +1023,7 @@ type
     currently locked by another thread then the block is added to the head of this list.  It is the responsibility of
     the next thread that locks this arena to clean up this list.}
     PendingFreeList: Pointer;
-    {0 = unlocked, 1 = locked, must be Integer due to RSP-25672}
+    {0 = unlocked, 1 = locked, cannot be Boolean due to RSP-25672}
     MediumBlockManagerLocked: Integer;
 
     {The medium block bins are divided into groups of 32 bins.  If a bit is set in this group bitmap, then at least one
@@ -1075,18 +1080,16 @@ type
     currently locked by another thread then the block is added to the head of this list.  It is the responsibility of
     the next thread that locks this arena to clean up this list.}
     PendingFreeList: Pointer;
-    {0 = unlocked, 1 = locked, must be Integer due to RSP-25672}
+    {0 = unlocked, 1 = locked, cannot be Boolean due to RSP-25672}
     LargeBlockManagerLocked: Integer; //0 = unlocked, 1 = locked
+{$ifdef 64Bit}
+    Padding: array[0..35] of Byte;
+{$else}
+    Padding: array[0..47] of Byte;
+{$endif}
   end;
 
   TLargeBlockArenas = array[0..CLargeBlockArenaCount - 1] of TLargeBlockManager;
-
-  {---------Management variables----------}
-
-  TSmallBlockTypeInfo = record
-    BlockSize: Word;
-  end;
-  PSmallBlockTypeInfo = ^TSmallBlockTypeInfo;
 
   {-------------------------Expected Memory Leak Structures--------------------}
 
@@ -1203,94 +1206,96 @@ const
 
   CMediumBlockManagerSize = SizeOf(TMediumBlockManager);
 
+  CLargeBlockManagerSize = SizeOf(TLargeBlockManager);
+
   {Small block sizes (including the header).  The 8 byte aligned sizes are not available under 64-bit.}
-  CSmallBlockTypeInfo: array[0..CSmallBlockTypeCount - 1] of TSmallBlockTypeInfo = (
+  CSmallBlockSizes: array[0..CSmallBlockTypeCount - 1] of Word = (
     {8 byte jumps}
 {$ifdef 32Bit}
-    (BlockSize: 8),
+    8,
 {$endif}
-    (BlockSize: 16),
+    16,
 {$ifdef 32Bit}
-    (BlockSize: 24),
+    24,
 {$endif}
-    (BlockSize: 32),
+    32,
 {$ifdef 32Bit}
-    (BlockSize: 40),
+    40,
 {$endif}
-    (BlockSize: 48),
+    48,
 {$ifdef 32Bit}
-    (BlockSize: 56),
+    56,
 {$endif}
-    (BlockSize: 64),
+    64,
 {$ifdef 32Bit}
-    (BlockSize: 72),
+    72,
 {$endif}
-    (BlockSize: 80),
+    80,
 {$ifdef 32Bit}
-    (BlockSize: 88),
+    88,
 {$endif}
-    (BlockSize: 96),
+    96,
 {$ifdef 32Bit}
-    (BlockSize: 104),
+    104,
 {$endif}
-    (BlockSize: 112),
+    112,
 {$ifdef 32Bit}
-    (BlockSize: 120),
+    120,
 {$endif}
-    (BlockSize: 128),
+    128,
 {$ifdef 32Bit}
-    (BlockSize: 136),
+    136,
 {$endif}
-    (BlockSize: 144),
+    144,
 {$ifdef 32Bit}
-    (BlockSize: 152),
+    152,
 {$endif}
-    (BlockSize: 160),
+    160,
     {16 byte jumps}
-    (BlockSize: 176),
-    (BlockSize: 192),
-    (BlockSize: 208),
-    (BlockSize: 224),
-    (BlockSize: 240),
-    (BlockSize: 256),
-    (BlockSize: 272),
-    (BlockSize: 288),
-    (BlockSize: 304),
-    (BlockSize: 320),
+    176,
+    192,
+    208,
+    224,
+    240,
+    256,
+    272,
+    288,
+    304,
+    320,
     {32 byte jumps}
-    (BlockSize: 352),
-    (BlockSize: 384),
-    (BlockSize: 416),
-    (BlockSize: 448),
-    (BlockSize: 480),
-    (BlockSize: 512),
-    (BlockSize: 544),
-    (BlockSize: 576),
-    (BlockSize: 608),
-    (BlockSize: 640),
+    352,
+    384,
+    416,
+    448,
+    480,
+    512,
+    544,
+    576,
+    608,
+    640,
     {64 byte jumps}
-    (BlockSize: 704),
-    (BlockSize: 768),
-    (BlockSize: 832),
-    (BlockSize: 896),
-    (BlockSize: 960),
-    (BlockSize: 1024),
-    (BlockSize: 1088),
-    (BlockSize: 1152),
-    (BlockSize: 1216),
-    (BlockSize: 1280),
-    (BlockSize: 1344),
+    704,
+    768,
+    832,
+    896,
+    960,
+    1024,
+    1088,
+    1152,
+    1216,
+    1280,
+    1344,
     {128 byte jumps}
-    (BlockSize: 1472),
-    (BlockSize: 1600),
-    (BlockSize: 1728),
-    (BlockSize: 1856),
-    (BlockSize: 1984),
-    (BlockSize: 2112),
-    (BlockSize: 2240),
-    (BlockSize: 2368),
-    (BlockSize: 2496),
-    (BlockSize: CMaximumSmallBlockSize)
+    1472,
+    1600,
+    1728,
+    1856,
+    1984,
+    2112,
+    2240,
+    2368,
+    2496,
+    CMaximumSmallBlockSize // = 2624
   );
 
 var
@@ -1549,7 +1554,6 @@ begin
   PInt64Array(@ADest)[4] := PInt64Array(@ASource)[4];
 {$endif}
 end;
-
 
 procedure Move56(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
@@ -2651,7 +2655,7 @@ end;
 function AddTokenValue_HexDump(var ATokenValues: TEventLogTokenValues; ATokenID: Integer; APBlock: PByte;
   ANumBytes: Integer; APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 var
-  LTempBuffer: array[0..CMemoryDumpMaxBytes * 5] of WideChar; //worst case scenario: allow for CRLF after every byte
+  LTempBuffer: array[0..CMemoryDumpMaxBytes * 5] of WideChar; //Worst case scenario:  Allow for CRLF after every byte
   LPTarget: PWideChar;
   LBytesLeftInLine: Integer;
   LByteVal: Byte;
@@ -2704,7 +2708,7 @@ end;
 function AddTokenValue_ASCIIDump(var ATokenValues: TEventLogTokenValues; ATokenID: Integer; APBlock: PByte;
   ANumBytes: Integer; APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 var
-  LTempBuffer: array[0..CMemoryDumpMaxBytes * 5] of WideChar; //worst case scenario: allow for CRLF after every byte
+  LTempBuffer: array[0..CMemoryDumpMaxBytes * 5] of WideChar; //Worst case scenario:  Allow for CRLF after every byte
   LPTarget: PWideChar;
   LBytesLeftInLine: Integer;
   LByteVal: Byte;
@@ -3554,9 +3558,21 @@ begin
 end;
 
 {Logs a thread contention and yields execution to another thread that is ready to run.}
-procedure LogThreadContentionAndYieldToOtherThread;
+procedure LogSmallBlockThreadContentionAndYieldToOtherThread;
 begin
-  Inc(FastMM_ThreadContentionCount);
+  Inc(FastMM_SmallBlockThreadContentionCount);
+  OS_AllowOtherThreadToRun;
+end;
+
+procedure LogMediumBlockThreadContentionAndYieldToOtherThread;
+begin
+  Inc(FastMM_MediumBlockThreadContentionCount);
+  OS_AllowOtherThreadToRun;
+end;
+
+procedure LogLargeBlockThreadContentionAndYieldToOtherThread;
+begin
+  Inc(FastMM_LargeBlockThreadContentionCount);
   OS_AllowOtherThreadToRun;
 end;
 
@@ -3868,7 +3884,7 @@ begin
     end;
 
     {All large block managers are locked:  Back off and try again.}
-    LogThreadContentionAndYieldToOtherThread;
+    LogLargeBlockThreadContentionAndYieldToOtherThread;
 
   end;
 end;
@@ -4808,8 +4824,8 @@ asm
   {rsi = medium block manager, edi = bin number, on stack = optimal block size, on stack = maximum block size}
   mov rsi, rcx
   mov edi, edx
-  mov [rsp + CMaximumSizeStackOffset + 8], r8d //save the optimal block size in the shadow space.
-  mov [rsp + CMaximumSizeStackOffset], r9d //save the maximum block size in the shadow space.
+  mov [rsp + CMaximumSizeStackOffset + 8], r8d //Save the optimal block size in the shadow space.
+  mov [rsp + CMaximumSizeStackOffset], r9d //Save the maximum block size in the shadow space.
 
   {Get the bin group in edx}
   shr edx, 5
@@ -5201,7 +5217,7 @@ asm
   {--------Back off--------}
 
   {All arenas are currently locked:  Back off and try again.}
-  call LogThreadContentionAndYieldToOtherThread
+  call LogMediumBlockThreadContentionAndYieldToOtherThread
   jmp @OuterLoop
 
 @UnlockManagerAndExit:
@@ -5382,7 +5398,7 @@ begin
     {--------Back off--------}
 
     {All arenas are currently locked:  Back off and try again.}
-    LogThreadContentionAndYieldToOtherThread;
+    LogMediumBlockThreadContentionAndYieldToOtherThread;
 
   end;
 
@@ -5913,7 +5929,7 @@ asm
 
   {Set the header for the returned block.}
   shr ecx, CMediumBlockAlignmentBits
-  lea ecx, [ecx * 8 + CIsSmallBlockFlag] //low 3 bits are used by flags
+  lea ecx, [ecx * 8 + CIsSmallBlockFlag] //Low 3 bits are used by flags
   mov TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(eax - CSmallBlockHeaderSize), cx
 
 @Done:
@@ -6394,7 +6410,7 @@ asm
 
   {All arenas are currently locked:  Back off and start again at the first arena}
   push eax
-  call LogThreadContentionAndYieldToOtherThread
+  call LogSmallBlockThreadContentionAndYieldToOtherThread
   pop eax
   jmp @Attempt1Loop
 {$else}
@@ -6513,7 +6529,7 @@ begin
     {--------------Back off--------------
     All arenas are currently locked:  Back off and start again at the first arena}
 
-    LogThreadContentionAndYieldToOtherThread;
+    LogSmallBlockThreadContentionAndYieldToOtherThread;
 
   end;
 {$endif}
@@ -8696,7 +8712,7 @@ begin
 
     mmosOptimizeForSpeed:
     begin
-      DefaultMediumBlockSpanSize := 4 * 1024 * 1024;
+      DefaultMediumBlockSpanSize := CMaximumMediumBlockSpanSize;
     end;
 
     mmosOptimizeForLowMemoryUsage:
@@ -8733,7 +8749,7 @@ end;
 {Builds the lookup table used for translating a small block allocation request size to a small block type.}
 procedure FastMM_BuildSmallBlockTypeLookupTable;
 var
-  LBlockSizeIndex, LManagerIndex, LStartIndex, LNextStartIndex, LAndValue: Integer;
+  LBlockSizeIndex, LSmallBlockSize, LManagerIndex, LStartIndex, LNextStartIndex, LAndValue: Integer;
 begin
   {Determine the allowed small block alignments.  Under 64-bit the minimum alignment is always 16 bytes.}
   if AlignmentRequestCounters[maa64Bytes] > 0 then
@@ -8746,14 +8762,15 @@ begin
     LAndValue := 0;
 
   LStartIndex := 0;
-  for LBlockSizeIndex := 0 to High(CSmallBlockTypeInfo) do
+  for LBlockSizeIndex := 0 to High(CSmallBlockSizes) do
   begin
+    LSmallBlockSize := CSmallBlockSizes[LBlockSizeIndex];
     {Is this a valid block type for the alignment restriction?}
-    if CSmallBlockTypeInfo[LBlockSizeIndex].BlockSize and LAndValue = 0 then
+    if LSmallBlockSize and LAndValue = 0 then
     begin
       {Store the block type index in the appropriate slots.}
       LManagerIndex := SmallBlockManagerIndexFromSizeIndex(LBlockSizeIndex);
-      LNextStartIndex := CSmallBlockTypeInfo[LBlockSizeIndex].BlockSize div CSmallBlockGranularity;
+      LNextStartIndex := LSmallBlockSize div CSmallBlockGranularity;
       while LStartIndex < LNextStartIndex do
       begin
         SmallBlockTypeLookup[LStartIndex] := LManagerIndex;
@@ -8827,7 +8844,7 @@ begin
         if ASmallBlockSize < 1024 then
         begin
 {$ifdef X86ASM}
-          if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+          if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
             Result := @MoveMultipleOf64_Small_x86_SSE2
           else
 {$endif}
@@ -8838,7 +8855,7 @@ begin
       end else if (ASmallBlockSize and 31) = 0 then
       begin
 {$ifdef X86ASM}
-        if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+        if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
           Result := @MoveMultipleOf32_x86_SSE2
         else
 {$endif}
@@ -8846,7 +8863,7 @@ begin
       end else if (ASmallBlockSize and 15) = 0 then
       begin
 {$ifdef X86ASM}
-        if System.TestSSE and 4 <> 0 then //bit 2 = 1 means the CPU supports SSE2
+        if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
           Result := @MoveMultipleOf16_x86_SSE2
         else
 {$endif}
@@ -8871,9 +8888,8 @@ end;
 
 procedure FastMM_InitializeMemoryManager;
 var
-  LBlockSizeIndex, LArenaInd, LMinimumSmallBlockSpanSize, LBinInd, LOptimalSmallBlockSpanSize, LBlocksPerSpan,
-    LManagerIndex: Integer;
-  LPSmallBlockTypeInfo: PSmallBlockTypeInfo;
+  LBlockSizeIndex, LSmallBlockSize, LArenaInd, LMinimumSmallBlockSpanSize, LBinInd, LOptimalSmallBlockSpanSize,
+    LBlocksPerSpan, LManagerIndex: Integer;
   LPSmallBlockManager: PSmallBlockManager;
   LPMediumBlockManager: PMediumBlockManager;
   LPLargeBlockManager: PLargeBlockManager;
@@ -8881,21 +8897,20 @@ var
 begin
   {---------Bug checks-------}
 
-  Assert(CSmallBlockHeaderSize = 2);
-  Assert(CMediumBlockHeaderSize = 8);
-
-  {Large blocks must be 64 byte aligned}
-  Assert(CLargeBlockHeaderSize = 64);
-
+  {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$endif}
+  {$if CMediumBlockHeaderSize <> 8} {$message error 'Medium block header size must be 8 bytes'} {$endif}
+  {$if CLargeBlockHeaderSize and 63 <> 0} {$message error 'Large block header size must be multiple of 64 bytes'} {$endif}
   {In order to ensure minimum alignment is always honoured the debug block header must be a multiple of 64.}
-  Assert(CDebugBlockHeaderSize and 63 = 0);
+  {$if CDebugBlockHeaderSize and 63 <> 0} {$message error 'Debug block header must be a multiple of 64 bytes'} {$endif}
 
   {Span headers have to be a multiple of 64 bytes in order to ensure that 64-byte alignment of user data is possible.}
-  Assert(CMediumBlockSpanHeaderSize = 64);
-  Assert(CSmallBlockSpanHeaderSize = 64);
+  {$if CSmallBlockSpanHeaderSize and 63 <> 0} {$message error 'Small block span header size must be multiple of 64 bytes'} {$endif}
+  {$if CMediumBlockSpanHeaderSize and 63 <> 0} {$message error 'Medium block span header size must be multiple of 64 bytes'} {$endif}
 
-  Assert(CSmallBlockManagerSize = 64);
-  Assert(CSmallBlockManagerSize = (1 shl CSmallBlockManagerSizeBits));
+  {$if CSmallBlockManagerSize and 63 <> 0} {$message error 'Small block manager size must be a multiple of 64 bytes'} {$endif}
+  {$if CSmallBlockManagerSize <> (1 shl CSmallBlockManagerSizeBits)} {$message error 'Small block manager size mismatch'} {$endif}
+
+  {$if CLargeBlockManagerSize and 63 <> 0} {$message error 'Large block manager size must be a multiple of 64 bytes'} {$endif}
 
   {---------General configuration-------}
 
@@ -8914,24 +8929,24 @@ begin
   {Initialize all the small block arenas}
   for LBlockSizeIndex := 0 to CSmallBlockTypeCount - 1 do
   begin
-    LPSmallBlockTypeInfo := @CSmallBlockTypeInfo[LBlockSizeIndex];
+    LSmallBlockSize := CSmallBlockSizes[LBlockSizeIndex];
 
     {The minimum useable small block span size.  The first small block's header is inside the span header, so we need
     space for one less small block heaader.}
     LMinimumSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(
-      CMinimumSmallBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
+      CMinimumSmallBlocksPerSpan * LSmallBlockSize + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
     if LMinimumSmallBlockSpanSize < CMinimumMediumBlockSize then
       LMinimumSmallBlockSpanSize := CMinimumMediumBlockSize;
 
     {The optimal small block span size is rounded so as to minimize wastage due to a partial last block.}
-    LOptimalSmallBlockSpanSize := LPSmallBlockTypeInfo.BlockSize * COptimalSmallBlocksPerSpan;
+    LOptimalSmallBlockSpanSize := LSmallBlockSize * COptimalSmallBlocksPerSpan;
     if LOptimalSmallBlockSpanSize < COptimalSmallBlockSpanSizeLowerLimit then
       LOptimalSmallBlockSpanSize := COptimalSmallBlockSpanSizeLowerLimit;
     if LOptimalSmallBlockSpanSize > COptimalSmallBlockSpanSizeUpperLimit then
       LOptimalSmallBlockSpanSize := COptimalSmallBlockSpanSizeUpperLimit;
-    LBlocksPerSpan := LOptimalSmallBlockSpanSize div LPSmallBlockTypeInfo.BlockSize;
+    LBlocksPerSpan := LOptimalSmallBlockSpanSize div LSmallBlockSize;
     {The first small block's header is inside the span header, so we need space for one less small block heaader.}
-    LOptimalSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(LBlocksPerSpan * LPSmallBlockTypeInfo.BlockSize
+    LOptimalSmallBlockSpanSize := RoundUserSizeUpToNextMediumBlockBin(LBlocksPerSpan * LSmallBlockSize
       + (CSmallBlockSpanHeaderSize - CSmallBlockHeaderSize));
 
     {Small block managers are not kept in memory in size order, because they may straddle the same cache lines (or may
@@ -8947,8 +8962,8 @@ begin
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
 
-      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0; //superfluous
-      LPSmallBlockManager.BlockSize := LPSmallBlockTypeInfo.BlockSize;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0;
+      LPSmallBlockManager.BlockSize := LSmallBlockSize;
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
 
