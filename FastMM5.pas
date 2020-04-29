@@ -112,14 +112,27 @@ uses
 {$endif}
 
 const
+
   {The current version of FastMM.  The first digit is the major version, followed by a two digit minor version number.}
-  FastMM_Version = 500;
+  CFastMM_Version = 500;
+
+  {The number of arenas for small, medium and large blocks.  Increasing the number of arenas decreases the likelihood
+  of thread contention happening (when the number of threads inside a GetMem call is greater than the number of arenas),
+  at a slightly higher fixed cost per GetMem call.  Usually two threads can be served simultaneously from the same arena
+  (a new block can be split off for one thread while a freed block can be recycled for the other), so the optimal number
+  of arenas is usually somewhere between 0.5x and 1x the number of threads.  If you suspect that thread contention may
+  be dragging down performance, inspect the FastMM_...BlockThreadContentionCount variables - if their numbers are high
+  then an increase in the number of arenas will reduce thread contention.}
+  CSmallBlockArenaCount = 4;
+  CMediumBlockArenaCount = 4;
+  CLargeBlockArenaCount = 8;
+
   {The number of entries per stack trace differs between 32-bit and 64-bit in order to ensure that the debug header is
   always a multiple of 64 bytes.}
 {$ifdef 32Bit}
-  CFastMM_StackTraceEntryCount = 11;
+  CFastMM_StackTraceEntryCount = 19; //8 stack trace entries per 64 bytes
 {$else}
-  CFastMM_StackTraceEntryCount = 12;
+  CFastMM_StackTraceEntryCount = 20; //4 stack trace entries per 64 bytes
 {$endif}
 
 type
@@ -686,13 +699,11 @@ const
 {$endif}
   CSmallBlockGranularity = 1 shl CSmallBlockGranularityBits;
   CMaximumSmallBlockSize = 2624; //Must be a multiple of 64 for the 64-byte alignment option to work
-  CSmallBlockArenaCount = 4;
   CSmallBlockFlagCount = 3;
   CDropSmallBlockFlagsMask = - (1 shl CSmallBlockFlagCount);
   CSmallBlockSpanOffsetBitShift = 6 - CSmallBlockFlagCount;
 
   {-----Medium block constants-----}
-  CMediumBlockArenaCount = 4;
   {Medium blocks are always aligned to at least 64 bytes (which is the typical cache line size).  Spans must be a
   multiple of 64K (to make optimal use of the virtual address space), and offsets divided by the granularity must fit
   inside a 16-bit word.}
@@ -730,7 +741,6 @@ const
 
   {-----Large block constants-----}
   CLargeBlockGranularity = 64 * 1024; //Address space obtained from VirtualAlloc is always aligned to a 64K boundary
-  CLargeBlockArenaCount = 8;
 
   {-----Small block span constants-----}
   {Allocating and deallocating small block spans are expensive, so it is not something that should be done frequently.}
@@ -808,6 +818,12 @@ const
   CDebugFillPattern4B = $80808080;
   CDebugFillPattern2B = $8080;
   CDebugFillPattern1B = $80;
+
+  {The first few frames of a GetMem or FreeMem stack trace are inside system.pas and this unit, so does not provide any
+  useful information.  Specify how many of the initial frames should be skipped here.  Note that these are actual
+  frames, so routines that do not have frames will also be skipped.}
+  CFastMM_StackTrace_SkipFrames_GetMem = 0;
+  CFastMM_StackTrace_SkipFrames_FreeMem = 0;
 
   {The number of bytes in a memory page.  It is assumed that pages are aligned at page size boundaries, and that memory
   protection is set at the page level.}
@@ -3592,7 +3608,7 @@ begin
 
   {Update the information in the block header.}
   LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
-  FastMM_GetStackTrace(@LPActualBlock.FreeStackTrace, CFastMM_StackTraceEntryCount, 0);
+  FastMM_GetStackTrace(@LPActualBlock.FreeStackTrace, CFastMM_StackTraceEntryCount, CFastMM_StackTrace_SkipFrames_FreeMem);
   LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
 
   {Fill the user area of the block with the debug pattern.}
@@ -7132,7 +7148,8 @@ begin
   {Populate the debug header and set the header and footer checksums.}
   PFastMM_DebugBlockHeader(Result).UserSize := ASize;
   PFastMM_DebugBlockHeader(Result).PreviouslyUsedByClass := nil;
-  FastMM_GetStackTrace(@PFastMM_DebugBlockHeader(Result).AllocationStackTrace, CFastMM_StackTraceEntryCount, 0);
+  FastMM_GetStackTrace(@PFastMM_DebugBlockHeader(Result).AllocationStackTrace, CFastMM_StackTraceEntryCount,
+    CFastMM_StackTrace_SkipFrames_GetMem);
   PFastMM_DebugBlockHeader(Result).FreeStackTrace := Default(TFastMM_StackTrace);
   PFastMM_DebugBlockHeader(Result).AllocationGroup := FastMM_CurrentAllocationGroup;
   PFastMM_DebugBlockHeader(Result).AllocationNumber := AtomicIncrement(FastMM_LastAllocationNumber);
