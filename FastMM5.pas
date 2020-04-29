@@ -123,9 +123,9 @@ const
   of arenas is usually somewhere between 0.5x and 1x the number of threads.  If you suspect that thread contention may
   be dragging down performance, inspect the FastMM_...BlockThreadContentionCount variables - if their numbers are high
   then an increase in the number of arenas will reduce thread contention.}
-  CSmallBlockArenaCount = 4;
-  CMediumBlockArenaCount = 4;
-  CLargeBlockArenaCount = 8;
+  CFastMM_SmallBlockArenaCount = 4;
+  CFastMM_MediumBlockArenaCount = 4;
+  CFastMM_LargeBlockArenaCount = 8;
 
   {The number of entries per stack trace differs between 32-bit and 64-bit in order to ensure that the debug header is
   always a multiple of 64 bytes.}
@@ -488,7 +488,7 @@ var
   to relinquish the thread's timeslice during a GetMem or ReallocMem call. (FreeMem frees can always be deferred, so
   will never cause a thread contention).  If these numbers are excessively high then it is an indication that the number
   of small, medium and/or large block arenas are insufficient for the number of application threads and should be
-  increased.  (The CSmallBlockArenaCount, CMediumBlockArenaCount and CLargeBlockArenaCount constants.)}
+  increased.  (The CFastMM_SmallBlockArenaCount, CFastMM_MediumBlockArenaCount and CFastMM_LargeBlockArenaCount constants.)}
   FastMM_SmallBlockThreadContentionCount: Cardinal;
   FastMM_MediumBlockThreadContentionCount: Cardinal;
   FastMM_LargeBlockThreadContentionCount: Cardinal;
@@ -926,7 +926,7 @@ type
   TSmallBlockArena = array[0..CSmallBlockTypeCount - 1] of TSmallBlockManager;
   PSmallBlockArena = ^TSmallBlockArena;
 
-  TSmallBlockArenas = array[0..CSmallBlockArenaCount - 1] of TSmallBlockArena;
+  TSmallBlockArenas = array[0..CFastMM_SmallBlockArenaCount - 1] of TSmallBlockArena;
 
   {This is always 64 bytes in size in order to ensure proper alignment of small blocks under all circumstances.}
   TSmallBlockSpanHeader = packed record
@@ -1055,7 +1055,7 @@ type
     FirstFreeBlockInBin: array[0..CMediumBlockBinCount - 1] of Pointer;
   end;
 
-  TMediumBlockArenas = array[0..CMediumBlockArenaCount - 1] of TMediumBlockManager;
+  TMediumBlockArenas = array[0..CFastMM_MediumBlockArenaCount - 1] of TMediumBlockManager;
 
   {-------------------------Large block structures------------------------}
 
@@ -1105,7 +1105,7 @@ type
 {$endif}
   end;
 
-  TLargeBlockArenas = array[0..CLargeBlockArenaCount - 1] of TLargeBlockManager;
+  TLargeBlockArenas = array[0..CFastMM_LargeBlockArenaCount - 1] of TLargeBlockManager;
 
   {-------------------------Expected Memory Leak Structures--------------------}
 
@@ -3813,7 +3813,7 @@ begin
   Result := 0;
 
   LPLargeBlockManager := @LargeBlockManagers[0];
-  for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
 
     if (LPLargeBlockManager.PendingFreeList <> nil)
@@ -3870,7 +3870,7 @@ begin
     begin
 
       LPLargeBlockManager := @LargeBlockManagers[0];
-      for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
+      for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
       begin
 
         if (LPLargeBlockManager.LargeBlockManagerLocked = 0)
@@ -5123,7 +5123,7 @@ asm
   mov TMediumBlockManager(esi).MediumBlockManagerLocked, 0
 
 @Attempt1NextManager:
-  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CFastMM_MediumBlockArenaCount - 1)
   jnb @Attempt1Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt1Loop
@@ -5152,7 +5152,7 @@ asm
   lea eax, [edx + CMediumBlockSpanHeaderSize]
 
 @Attempt2NextManager:
-  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CFastMM_MediumBlockArenaCount - 1)
   jnb @Attempt2Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt2Loop
@@ -5224,7 +5224,7 @@ asm
   jmp @UnlockManagerAndExit
 
 @Attempt3NextManager:
-  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CMediumBlockArenaCount - 1)
+  cmp esi, offset MediumBlockManagers + CMediumBlockManagerSize * (CFastMM_MediumBlockArenaCount - 1)
   jnb @Attempt3Failed
   add esi, CMediumBlockManagerSize
   jmp @Attempt3Loop
@@ -5313,7 +5313,7 @@ begin
       end;
 
       {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CFastMM_MediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -5337,7 +5337,7 @@ begin
       end;
 
       {Try the next arena.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CFastMM_MediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -5405,7 +5405,7 @@ begin
       end;
 
       {The arena could not be locked - try the next one.}
-      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CMediumBlockArenaCount - 1]) then
+      if NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers[CFastMM_MediumBlockArenaCount - 1]) then
         Break;
 
       Inc(LPMediumBlockManager);
@@ -6360,13 +6360,13 @@ asm
 @Attempt1NoSequentialFeedBlockAvailable:
 
   {Is this the last arena?  If not, try the next one.}
-  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1)
   jnb @Attempt1Failed
   add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
   jmp @Attempt1Loop
 
 @Attempt1Failed:
-  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1)
 
   {--------------Attempt 2--------------
   Lock the first unlocked arena and try again.  During the second attempt a new sequential feed span will be allocated
@@ -6416,13 +6416,13 @@ asm
 
 @Attempt2ManagerAlreadyLocked:
   {Is this the last arena?  If not, try the next one.}
-  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  cmp eax, offset SmallBlockManagers + CSmallBlockManagerSize * CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1)
   jnb @Attempt2Failed
   add eax, CSmallBlockManagerSize * CSmallBlockTypeCount
   jmp @Attempt2Loop
 
 @Attempt2Failed:
-  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CSmallBlockArenaCount - 1)
+  sub eax, CSmallBlockManagerSize * CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1)
 
   {All arenas are currently locked:  Back off and start again at the first arena}
   push eax
@@ -6483,14 +6483,14 @@ begin
       end;
 
       {There are no available blocks in this arena:  Move on to the next arena.}
-      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CSmallBlockArenaCount - 1]) then
+      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CFastMM_SmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
         Break;
 
     end;
     {Go back to the corresponding manager in the first arena}
-    Dec(APSmallBlockManager, CSmallBlockTypeCount * (CSmallBlockArenaCount - 1));
+    Dec(APSmallBlockManager, CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1));
 
     {--------------Attempt 2--------------
     Lock the first unlocked arena and try again.  During the second attempt a new sequential feed span will be allocated
@@ -6535,12 +6535,12 @@ begin
       end;
 
       {Try the next small block arena}
-      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CSmallBlockArenaCount - 1]) then
+      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CFastMM_SmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
         Break;
     end;
-    Dec(APSmallBlockManager, CSmallBlockTypeCount * (CSmallBlockArenaCount - 1));
+    Dec(APSmallBlockManager, CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1));
 
     {--------------Back off--------------
     All arenas are currently locked:  Back off and start again at the first arena}
@@ -7366,7 +7366,7 @@ begin
   Result := True;
 
   {-------Small blocks-------}
-  for LArenaIndex := 0 to CSmallBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_SmallBlockArenaCount - 1 do
   begin
     LPSmallBlockManager := @SmallBlockManagers[LArenaIndex][0];
 
@@ -7397,7 +7397,7 @@ begin
 
   {-------Medium blocks-------}
   LPMediumBlockManager := @MediumBlockManagers[0];
-  for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_MediumBlockArenaCount - 1 do
   begin
 
     if LPMediumBlockManager.PendingFreeList <> nil then
@@ -7423,7 +7423,7 @@ begin
 
   {-------Large blocks-------}
   LPLargeBlockManager := @LargeBlockManagers[0];
-  for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
 
     if LPLargeBlockManager.PendingFreeList <> nil then
@@ -7489,7 +7489,7 @@ begin
     LBlockInfo.SmallBlockSpanBlockSize := 0;
     LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
 
-    for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
+    for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
     begin
       LPLargeBlockManager := @LargeBlockManagers[LArenaIndex];
 
@@ -7520,7 +7520,7 @@ begin
   if AWalkBlockTypes * [btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock] <> [] then
   begin
 
-    for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
+    for LArenaIndex := 0 to CFastMM_MediumBlockArenaCount - 1 do
     begin
       LPMediumBlockManager := @MediumBlockManagers[LArenaIndex];
 
@@ -7807,14 +7807,14 @@ var
   LPMediumBlockManager: PMediumBlockManager;
   LPLargeBlockManager: PLargeBlockManager;
 begin
-  for i := 0 to CMediumBlockArenaCount - 1 do
+  for i := 0 to CFastMM_MediumBlockArenaCount - 1 do
   begin
     LPMediumBlockManager := @MediumBlockManagers[i];
     if NativeUInt(LPMediumBlockManager.FirstMediumBlockSpanHeader) <> NativeUInt(LPMediumBlockManager) then
       Exit(True);
   end;
 
-  for i := 0 to CLargeBlockArenaCount - 1 do
+  for i := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
     LPLargeBlockManager := @LargeBlockManagers[i];
     if NativeUInt(LPLargeBlockManager.FirstLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) then
@@ -8971,7 +8971,7 @@ begin
     sized small blocks).}
     LManagerIndex := SmallBlockManagerIndexFromSizeIndex(LBlockSizeIndex);
 
-    for LArenaInd := 0 to CSmallBlockArenaCount - 1 do
+    for LArenaInd := 0 to CFastMM_SmallBlockArenaCount - 1 do
     begin
       LPSmallBlockManager := @SmallBlockManagers[LArenaInd, LManagerIndex];
 
@@ -8991,7 +8991,7 @@ begin
   end;
 
   {---------Medium blocks-------}
-  for LArenaInd := 0 to CMediumBlockArenaCount - 1 do
+  for LArenaInd := 0 to CFastMM_MediumBlockArenaCount - 1 do
   begin
     LPMediumBlockManager := @MediumBlockManagers[LArenaInd];
 
@@ -9011,7 +9011,7 @@ begin
   {---------Large blocks-------}
 
   {The circular list is empty initially.}
-  for LArenaInd := 0 to CLargeBlockArenaCount - 1 do
+  for LArenaInd := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
     LPLargeBlockManager := @LargeBlockManagers[LArenaInd];
 
@@ -9050,7 +9050,7 @@ var
   LPLargeBlock, LPNextLargeBlock: PLargeBlockHeader;
 begin
   {Free all medium block spans.}
-  for LArenaIndex := 0 to CMediumBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_MediumBlockArenaCount - 1 do
   begin
     LPMediumBlockManager := @MediumBlockManagers[LArenaIndex];
     LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
@@ -9090,7 +9090,7 @@ begin
   end;
 
   {Free all large blocks.}
-  for LArenaIndex := 0 to CLargeBlockArenaCount - 1 do
+  for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
     LPLargeBlockManager := @LargeBlockManagers[LArenaIndex];
 
