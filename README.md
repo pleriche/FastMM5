@@ -1,5 +1,14 @@
 # FastMM5
-A fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
+FastMM is a fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
+
+Version 5 is a complete rewrite of FastMM. It is designed from the ground up to simultaneously keep the strengths and address the shortcomings of version 4.992:
+* Multithreaded scaling across multiple CPU cores is massively improved, without memory usage blowout. It can be configured to scale close to linearly for any number of CPU cores.
+* In the Fastcode memory manager benchmark tool FastMM 5 scores 15% higher than FastMM 4.992 on the single threaded benchmarks, and 30% higher on the multithreaded benchmarks. (I7-8700K CPU, EnableMMX and AssumeMultithreaded options enabled.)
+* It is fully configurable runtime. There is no need to change conditional defines and recompile to change options. (It is however backward compatible with many of the version 4 conditional defines.) 
+* Debug mode uses the same debug support library as version 4 (FastMM_FullDebugMode.dll) by default, but custom stack trace routines are also supported. Call FastMM_EnterDebugMode to switch to debug mode ("FullDebugMode") and call FastMM_ExitDebugMode to return to performance mode. Calls may be nested, in which case debug mode will be exited after the last FastMM_ExitDebugMode call.
+* Supports 8, 16, 32 or 64 byte alignment of all blocks. Call FastMM_EnterMinimumAddressAlignment to request a minimum block alignment, and FastMM_ExitMinimumAddressAlignment to rescind a prior request. Calls may be nested, in which case the coarsest alignment request will be in effect.
+* All event notifications (errors, memory leak messages, etc.) may be routed to the debugger (via OutputDebugString), a log file, the screen or any combination of the three. Messages are built using templates containing mail-merge tokens. Templates may be changed runtime to facilitate different layouts and/or translation into any language. Templates fully support Unicode, and the log file may be configured to be written in UTF-8 or UTF-16 format, with or without a BOM.
+* It may be configured runtime to favour speed, memory usage efficiency or a blend of the two via the FastMM_SetOptimizationStrategy call.
 
 ### Developed by
 Pierre le Riche
@@ -9,14 +18,15 @@ gs-soft AG
 
 ### Licence
 FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the [GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html) licence at no cost to you, or you may purchase a commercial licence.  The commercial licence pricing is as follows:
-Number Of Developers|Price (USD)
---------------------|-----------
-1 developer|$99
-2 developers|$189
-3 developers|$269
-4 developers|$339
-5 developers|$399
-More than 5 developers|$399 + $50 per developer from the 6th onwards
+<table>
+<tr><td>Number Of Developers</td><td>Price (USD)</td></tr>
+<tr><td>1 developer</td><td>$99</td></tr>
+<tr><td>2 developers</td><td>$189</td></tr>
+<tr><td>3 developers</td><td>$269</td></tr>
+<tr><td>4 developers</td><td>$339</td></tr>
+<tr><td>5 developers</td><td>$399</td></tr>
+<tr><td>More than 5 developers</td><td>$399 + $50 per developer from the 6th onwards</td></tr>
+</table>
 
 Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to fastmm@leriche.org for confirmation.  Support is available for users with a commercial licence via the same e-mail address.
 
@@ -33,6 +43,8 @@ Events (memory leaks, errors, etc.) may be logged to file, displayed on-screen, 
 
 The optimization strategy of the memory manager may be tuned via FastMM_SetOptimizationStrategy.  It can be set to favour performance, low memory usage, or a blend of both.  The default strategy is to blend the performance and low memory usage goals.
 
+The default configuration should scale close to linearly up to between 8 and 16 threads, so for most applications there should be no need to tweak any performance settings. Beyond 16 threads you may consider increasing the number of arenas (CFastMM_...BlockArenaCount), but inspect the thread contention counts first (FastMM_...BlockThreadContentionCount), before assuming that it is necessary.
+
 ### Supported Compilers
 Delphi XE3 and later
 
@@ -41,11 +53,4 @@ Windows, 32-bit and 64-bit
 
 ### Change Log
 ##### Version 5.00
-* Version 5 is a complete rewrite of FastMM. It is designed from the ground up to simultaneously keep the strengths and address the shortcomings of version 4.
-* Multithreaded scaling across multiple CPU cores is massively improved, without memory usage blowout. It can be configured to scale close to linearly for any number of CPU cores.
-* In the Fastcode memory manager benchmark tool FastMM 5 scores 15% higher than FastMM 4.992 on the single threaded benchmarks, and 30% higher on the multithreaded benchmarks. (I7-8700K CPU, EnableMMX and AssumeMultithreaded options enabled.)
-* It is fully configurable runtime. There is no need to change conditional defines and recompile to change options. (It is however backward compatible with many of the version 4 conditional defines.) 
-* Debug mode uses the same debug support library as version 4 (FastMM_FullDebugMode.dll) by default, but custom stack trace routines are also supported. Call FastMM_EnterDebugMode to switch to debug mode ("FullDebugMode") and call FastMM_ExitDebugMode to return to performance mode. Calls may be nested, in which case debug mode will be exited after the last FastMM_ExitDebugMode call.
-* Supports 8, 16, 32 or 64 byte alignment of all blocks. Call FastMM_EnterMinimumAddressAlignment to request a minimum block alignment, and FastMM_ExitMinimumAddressAlignment to rescind a prior request. Calls may be nested, in which case the coarsest alignment request will be in effect.
-* All event notifications (errors, memory leak messages, etc.) may be routed to the debugger (via OutputDebugString), a log file, the screen or any combination of the three. Messages are built using templates containing mail-merge tokens. Templates may be changed runtime to facilitate different layouts and/or translation into any language. Templates fully support Unicode, and the log file may be configured to be written in UTF-8 or UTF-16 format, with or without a BOM.
-* It may be configured runtime to favour speed, memory usage efficiency or a blend of the two via the FastMM_SetOptimizationStrategy call.
+* First non-beta release of FastMM 5.
