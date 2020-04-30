@@ -10,11 +10,13 @@ Version 5 is a complete rewrite of FastMM. It is designed from the ground up to 
 * All event notifications (errors, memory leak messages, etc.) may be routed to the debugger (via OutputDebugString), a log file, the screen or any combination of the three. Messages are built using templates containing mail-merge tokens. Templates may be changed runtime to facilitate different layouts and/or translation into any language. Templates fully support Unicode, and the log file may be configured to be written in UTF-8 or UTF-16 format, with or without a BOM.
 * It may be configured runtime to favour speed, memory usage efficiency or a blend of the two via the FastMM_SetOptimizationStrategy call.
 
+Homepage: https://github.com/pleriche/FastMM5
+
 ### Developed by
 Pierre le Riche
 
 ### Sponsored by
-gs-soft AG
+[gs-soft AG](https://www.gs-soft.com/)
 
 ### Licence
 FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the [GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html) licence at no cost to you, or you may purchase a commercial licence.  The commercial licence pricing is as follows:
