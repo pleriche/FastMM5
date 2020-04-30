@@ -524,6 +524,7 @@ var
     21: The total number of bytes used by the class (FastMM_LogStateToFile)
     22: The number of instances of the class (FastMM_LogStateToFile)
     23: The average number of bytes per instance for the class (FastMM_LogStateToFile)
+    24: The stack trace for a virtual method call on a freed object
 
   }
 
@@ -606,7 +607,8 @@ var
     + 'The block size is {3}.'#13#10#13#10
     + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
-    + '{7}'#13#10#13#10
+    + '{7}'#13#10#13#10'The stack trace for the virtual call that lead to this error is:'
+    + '{24}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
@@ -787,6 +789,7 @@ const
   CEventLogTokenModifyAfterFreeDetail = 15;
   CEventLogTokenEventLogFilename = 16;
   CEventLogTokenVirtualMethodName = 17;
+  CEventLogTokenVirtualMethodCallOnFreedObject = 24;
 
   CStateLogTokenAllocatedKB = 18;
   CStateLogTokenOverheadKB = 19;
@@ -1180,6 +1183,8 @@ type
   freed object.}
   TFastMM_FreedObject = class(TObject)
   protected
+    class var FVirtualMethodStackTrace: TFastMM_StackTrace;
+    procedure VirtualMethodOnFreedObject_LogEvent(APMethodName: PWideChar);
     procedure VirtualMethodOnFreedObject(APMethodName: PWideChar); overload;
     procedure VirtualMethodOnFreedObject(AIndex: Byte); overload;
   public
@@ -3170,22 +3175,10 @@ begin
 end;
 
 procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(APMethodName: PWideChar);
-var
-  LTokenValues: TEventLogTokenValues;
-  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
-  LPBufferPos, LPBufferEnd: PWideChar;
 begin
-  LTokenValues := Default(TEventLogTokenValues);
-
-  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
-  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
-  LPBufferPos := AddTokenValues_BlockTokens(LTokenValues, Pointer(Self), LPBufferPos, LPBufferEnd);
-  AddTokenValue(LTokenValues, CEventLogTokenVirtualMethodName, APMethodName, GetStringLength(APMethodName), LPBufferPos,
-    LPBufferEnd);
-
-  LogEvent(mmetVirtualMethodCallOnFreedObject, LTokenValues);
-
-  System.Error(reInvalidPtr);
+  {Get the stack trace and then log the event.}
+  FastMM_GetStackTrace(@FVirtualMethodStackTrace, CFastMM_StackTraceEntryCount, 0);
+  VirtualMethodOnFreedObject_LogEvent(APMethodName);
 end;
 
 procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(AIndex: Byte);
@@ -3197,6 +3190,27 @@ begin
   LPEnd := NativeUIntToTextBuffer(AIndex, @LTextBuffer[1], @LTextBuffer[High(LTextBuffer)]);
   LPEnd^ := #0;
   VirtualMethodOnFreedObject(@LTextBuffer);
+end;
+
+procedure TFastMM_FreedObject.VirtualMethodOnFreedObject_LogEvent(APMethodName: PWideChar);
+var
+  LTokenValues: TEventLogTokenValues;
+  LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
+  LPBufferPos, LPBufferEnd: PWideChar;
+begin
+  LTokenValues := Default(TEventLogTokenValues);
+
+  LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
+  LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
+  LPBufferPos := AddTokenValues_BlockTokens(LTokenValues, Pointer(Self), LPBufferPos, LPBufferEnd);
+  LPBufferPos := AddTokenValue(LTokenValues, CEventLogTokenVirtualMethodName, APMethodName,
+    GetStringLength(APMethodName), LPBufferPos, LPBufferEnd);
+  AddTokenValue_StackTrace(LTokenValues, CEventLogTokenVirtualMethodCallOnFreedObject,
+    TFastMM_FreedObject.FVirtualMethodStackTrace, LPBufferPos, LPBufferEnd);
+
+  LogEvent(mmetVirtualMethodCallOnFreedObject, LTokenValues);
+
+  System.Error(reInvalidPtr);
 end;
 
 procedure TFastMM_FreedObject.VirtualMethod0; begin VirtualMethodOnFreedObject(0); end;
