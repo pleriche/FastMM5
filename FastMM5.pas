@@ -392,6 +392,18 @@ memory usage or a blend of the two.}
 procedure FastMM_SetOptimizationStrategy(AStrategy: TFastMM_MemoryManagerOptimizationStrategy);
 function FastMM_GetCurrentOptimizationStrategy: TFastMM_MemoryManagerOptimizationStrategy;
 
+{Sets the NUMA mask for the arena and block size range.  If the NUMA mask for an arena is non-zero then only threads
+with a NUMA mask that has at least one set bit corresponding to a set bit in the mask for the arena will be served from
+this arena.  The NUMA mask for the last arena is always zero and cannot be changed:  This prevents the possibility of a
+thread being blocked from allocating memory from all arenas.  Specify the ABlockSizeRangeStart and ABlockSizeRangeEnd
+values in order to set the NUMA mask only for block sizes in the given range.}
+procedure FastMM_SetArenaNUMAMask(AArenaIndex: Integer; ANUMAMask: Word; ABlockSizeRangeStart: NativeInt = 0;
+  ABlockSizeRangeEnd: NativeInt = High(NativeInt));
+{Sets the NUMA mask for the current thread.  If an arena has a non-zero NUMA mask then a logical "and" will be performed
+between the NUMA mask for the arena and the NUMA mask for the thread, and only if the result is non-zero will the arena
+be used to serve blocks to the thread.}
+procedure FastMM_SetCurrentThreadNUMAMask(ANUMAMask: Word);
+
 {Call FastMM_EnterMinimumAddressAlignment to request that all subsequent allocated blocks are aligned to the specified
 minimum.  Call FastMM_ExitMinimumAddressAlignment to rescind a prior request.  Requests for coarser alignments have
 precedence over requests for lesser alignments.  These calls are thread safe.  In the current implementation the
@@ -919,10 +931,13 @@ type
     {The block size for this small block manager}
     BlockSize: Word;
 
-{$ifdef 64Bit}
-    Padding: array[0..1] of Byte;
-{$else}
-    Padding: array[0..21] of Byte;
+    {The NUMA mask for the manager.  If the NUMA mask for the manager is non-zero, then at least one set bit in the NUMA
+    mask for the manager must correspond to a set bit in the NUMA mask for the thread, otherwise the manager will not be
+    used to serve blocks for the thread.}
+    NUMAMask: Word;
+
+{$ifdef 32Bit}
+    Padding: array[1..20] of Byte;
 {$endif}
   end;
   PSmallBlockManager = ^TSmallBlockManager;
@@ -947,9 +962,9 @@ type
     {The number of blocks currently in use in this small block span.}
     BlocksInUse: Integer;
 {$ifdef 64Bit}
-    Padding: array[0..21] of Byte;
+    Padding: array[1..22] of Byte;
 {$else}
-    Padding: array[0..37] of Byte;
+    Padding: array[1..38] of Byte;
 {$endif}
     {The header for the first block}
     FirstBlockHeader: TSmallBlockHeader;
@@ -1002,9 +1017,9 @@ type
     {The size of this medium block span, in bytes.}
     SpanSize: Integer;
 {$ifdef 64Bit}
-    Padding: array[0..27] of Byte;
+    Padding: array[1..28] of Byte;
 {$else}
-    Padding: array[0..39] of Byte;
+    Padding: array[1..40] of Byte;
 {$endif}
     {The header for the first block}
     FirstBlockHeader: TMediumBlockHeader;
@@ -1049,6 +1064,12 @@ type
     {The medium block bins are divided into groups of 32 bins.  If a bit is set in this group bitmap, then at least one
     bin in the group has free blocks.}
     MediumBlockBinGroupBitmap: Cardinal;
+
+    {The NUMA mask for the manager.  If the NUMA mask for the manager is non-zero, then at least one set bit in the NUMA
+    mask for the manager must correspond to a set bit in the NUMA mask for the thread, otherwise the manager will not be
+    used to serve blocks for the thread.}
+    NUMAMask: Word;
+
     {The medium block bins:  total of 32 * 32 = 1024 bins of a certain minimum size.  The minimum size of blocks in the
     first bin will be CMinimumMediumBlockSize.}
     MediumBlockBinBitmaps: array[0..CMediumBlockBinGroupCount - 1] of Cardinal;
@@ -1084,9 +1105,9 @@ type
     BlockIsSegmented: Boolean;
     {Alignment padding}
 {$ifdef 64Bit}
-    Padding: array[0..20] of Byte;
+    Padding: array[1..21] of Byte;
 {$else}
-    Padding: array[0..40] of Byte;
+    Padding: array[1..41] of Byte;
 {$endif}
     {The block status and type}
     BlockStatusFlags: TBlockStatusFlags;
@@ -1101,11 +1122,11 @@ type
     the next thread that locks this arena to clean up this list.}
     PendingFreeList: Pointer;
     {0 = unlocked, 1 = locked, cannot be Boolean due to RSP-25672}
-    LargeBlockManagerLocked: Integer; //0 = unlocked, 1 = locked
+    LargeBlockManagerLocked: Integer;
 {$ifdef 64Bit}
-    Padding: array[0..35] of Byte;
+    Padding: array[1..36] of Byte;
 {$else}
-    Padding: array[0..47] of Byte;
+    Padding: array[1..48] of Byte;
 {$endif}
   end;
 
@@ -1351,6 +1372,11 @@ var
   EOutOfMemory exception.  This only applies to 32-bit applications.}
   EmergencyReserveAddressSpace: Pointer;
 {$endif}
+
+  {The index of the thread NUMA mask in thread local storage.}
+  NUMAMaskTLSIndex: Cardinal;
+  {True if NUMAMaskTLSIndex is valid.}
+  NUMAMaskTLSAllocated: Boolean;
 
   {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
@@ -2095,6 +2121,31 @@ end;
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
   Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+end;
+
+{Allocates thread local storage, returning the index of the new slot.  Returns True on success.}
+function OS_AllocateThreadLocalStorage(var ATLSIndex: Cardinal): Boolean;
+begin
+  ATLSIndex := Winapi.Windows.TlsAlloc;
+  Result := ATLSIndex <> TLS_OUT_OF_INDEXES;
+end;
+
+{Sets the value for thread local storage at the given index.}
+function OS_SetThreadLocalStorageValue(ATLSIndex: Cardinal; AValue: NativeUInt): Boolean;
+begin
+  Result := Winapi.Windows.TlsSetValue(ATLSIndex, Pointer(AValue));
+end;
+
+{Retrieves the value for thread local storage at the given index.}
+function OS_GetThreadLocalStorageValue(ATLSIndex: Cardinal): NativeUInt;
+begin
+  Result := NativeUInt(Winapi.Windows.TlsGetValue(ATLSIndex));
+end;
+
+{Frees the given index in thread local storage.}
+function OS_FreeThreadLocalStorage(ATLSIndex: Cardinal): Boolean;
+begin
+  Result := Winapi.Windows.TlsFree(ATLSIndex);
 end;
 
 
@@ -5092,6 +5143,16 @@ asm
 
   mov esi, offset MediumBlockManagers
 @Attempt1Loop:
+
+  {Check the NUMA mask for the manager and compare to the NUMA mask for the thread, if necessary.}
+  movzx ecx, TMediumBlockManager(esi).NUMAMask
+  test ecx, ecx
+  jz @Attempt1NUMACheckOK
+  mov edx, NUMAMaskTLSIndex
+  and ecx, dword ptr fs:[edx * 4 + $e10] //Win32 TLS starts at fs:[$e10]
+  jz @Attempt1NextManager
+@Attempt1NUMACheckOK:
+
   cmp byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, 0
   jne @Attempt1NextManager
   cmp TMediumBlockManager(esi).PendingFreeList, 0
@@ -5153,6 +5214,16 @@ asm
   mov esi, offset MediumBlockManagers
 @Attempt2Loop:
 
+  {Check the NUMA mask for the manager and compare to the NUMA mask for the thread, if necessary.}
+  movzx ecx, TMediumBlockManager(esi).NUMAMask
+  test ecx, ecx
+  jz @Attempt2NUMACheckOK
+  mov eax, NUMAMaskTLSIndex
+  and ecx, dword ptr fs:[eax * 4 + $e10] //Win32 TLS starts at fs:[$e10]
+  lea eax, [edx + CMediumBlockSpanHeaderSize]
+  jz @Attempt2NextManager
+@Attempt2NUMACheckOK:
+
   {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
   cmp eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
   ja @Attempt2NextManager
@@ -5184,6 +5255,15 @@ asm
 
   mov esi, offset MediumBlockManagers
 @Attempt3Loop:
+
+  {Check the NUMA mask for the manager and compare to the NUMA mask for the thread, if necessary.}
+  movzx ecx, TMediumBlockManager(esi).NUMAMask
+  test ecx, ecx
+  jz @Attempt3NUMACheckOK
+  mov eax, NUMAMaskTLSIndex
+  and ecx, dword ptr fs:[eax * 4 + $e10] //Win32 TLS starts at fs:[$e10]
+  jz @Attempt3NextManager
+@Attempt3NUMACheckOK:
 
   {Try to lock the manager}
   mov eax, $100
@@ -5291,39 +5371,47 @@ begin
     while True do
     begin
 
-      {In order to process the pending free lists or get a block from the free lists the block manager must be locked.
-      Locking is expensive, so first check whether locking the manager is likely to result in successful block
-      allocation.}
-      if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
-        and ((LPMediumBlockManager.PendingFreeList <> nil)
-          or ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
-          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0))
-        and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
+      {Check the NUMA mask for the medium block manager:  If it is non-zero then we need to check whether it is allowed
+      to serve blocks to the current thread.}
+      if (LPMediumBlockManager.NUMAMask = 0)
+        or (LPMediumBlockManager.NUMAMask and OS_GetThreadLocalStorageValue(NUMAMaskTLSIndex) <> 0) then
       begin
 
-        {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
-        a block that is of sufficient size if possible.}
-        if LPMediumBlockManager.PendingFreeList <> nil then
+        {In order to process the pending free lists or get a block from the free lists the block manager must be locked.
+        Locking is expensive, so first check whether locking the manager is likely to result in successful block
+        allocation.}
+        if (LPMediumBlockManager.MediumBlockManagerLocked = 0)
+          and ((LPMediumBlockManager.PendingFreeList <> nil)
+            or ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+            or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0))
+          and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
         begin
-          Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
-            AOptimalBlockSize, AMaximumBlockSize);
-          if Result <> nil then
+
+          {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
+          a block that is of sufficient size if possible.}
+          if LPMediumBlockManager.PendingFreeList <> nil then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
-            Exit;
+            Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
+              AOptimalBlockSize, AMaximumBlockSize);
+            if Result <> nil then
+            begin
+              LPMediumBlockManager.MediumBlockManagerLocked := 0;
+              Exit;
+            end;
           end;
+
+          {1.2) Try to find a suitable free block in the free lists}
+          if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+            or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
+          begin
+            Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+              LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
+          end;
+
+          {A different thread grabbed the last block, unlock the manager and try the next arena.}
+          LPMediumBlockManager.MediumBlockManagerLocked := 0;
         end;
 
-        {1.2) Try to find a suitable free block in the free lists}
-        if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
-          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
-        begin
-          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
-            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
-        end;
-
-        {A different thread grabbed the last block, unlock the manager and try the next arena.}
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
       end;
 
       {Try the next arena.}
@@ -5341,13 +5429,21 @@ begin
     while True do
     begin
 
-      {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
-      if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+      {Check the NUMA mask for the medium block manager:  If it is non-zero then we need to check whether it is allowed
+      to serve blocks to the current thread.}
+      if (LPMediumBlockManager.NUMAMask = 0)
+        or (LPMediumBlockManager.NUMAMask and OS_GetThreadLocalStorageValue(NUMAMaskTLSIndex) <> 0) then
       begin
-        Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
-          AMinimumBlockSize, AOptimalBlockSize);
-        if Result <> nil then
-          Exit;
+
+        {2.1) Try to feed a medium block sequentially from an existing sequential feed span}
+        if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
+        begin
+          Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
+            AMinimumBlockSize, AOptimalBlockSize);
+          if Result <> nil then
+            Exit;
+        end;
+
       end;
 
       {Try the next arena.}
@@ -5372,50 +5468,58 @@ begin
     while True do
     begin
 
-      {The first attempt failed to get a block from any manager, so in this second attempt we are more forceful:  Always
-      try to lock the manager, and allocate a new sequential feed span if necessary.}
-      if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
+      {Check the NUMA mask for the medium block manager:  If it is non-zero then we need to check whether it is allowed
+      to serve blocks to the current thread.}
+      if (LPMediumBlockManager.NUMAMask = 0)
+        or (LPMediumBlockManager.NUMAMask and OS_GetThreadLocalStorageValue(NUMAMaskTLSIndex) <> 0) then
       begin
 
-        {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
-        if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
-          or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
+        {The first attempt failed to get a block from any manager, so in this second attempt we are more forceful:  Always
+        try to lock the manager, and allocate a new sequential feed span if necessary.}
+        if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
         begin
-          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
-            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
-        end;
 
-        {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second
-        attempt at feeding a block sequentially should be made before allocating a new span.}
-        if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
-        begin
-          Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
-            AMinimumBlockSize, AOptimalBlockSize);
-          if Result <> nil then
+          {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
+          if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
+            or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
-            Exit;
+            Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+              LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
           end;
-        end;
 
-        {3.3) Another thread may have added blocks to the pending free list in the meantime - again try to reuse a
-        pending free block.  Allocating a new span is very expensive, so has to be avoided if at all possible.}
-        if LPMediumBlockManager.PendingFreeList <> nil then
-        begin
-          Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
-            AOptimalBlockSize, AMaximumBlockSize);
-          if Result <> nil then
+          {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second
+          attempt at feeding a block sequentially should be made before allocating a new span.}
+          if LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue >= (AMinimumBlockSize + CMediumBlockSpanHeaderSize) then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
-            Exit;
+            Result := FastMM_GetMem_GetMediumBlock_TryGetBlockFromSequentialFeedSpan(LPMediumBlockManager,
+              AMinimumBlockSize, AOptimalBlockSize);
+            if Result <> nil then
+            begin
+              LPMediumBlockManager.MediumBlockManagerLocked := 0;
+              Exit;
+            end;
           end;
+
+          {3.3) Another thread may have added blocks to the pending free list in the meantime - again try to reuse a
+          pending free block.  Allocating a new span is very expensive, so has to be avoided if at all possible.}
+          if LPMediumBlockManager.PendingFreeList <> nil then
+          begin
+            Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
+              AOptimalBlockSize, AMaximumBlockSize);
+            if Result <> nil then
+            begin
+              LPMediumBlockManager.MediumBlockManagerLocked := 0;
+              Exit;
+            end;
+          end;
+
+          {3.4) If we get here then there are no suitable free blocks, pending free blocks, and the current sequential
+          feed span has no space:  Allocate a new sequential feed span and split off a block of the optimal size.}
+          Result := FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(LPMediumBlockManager, AOptimalBlockSize);
+          LPMediumBlockManager.MediumBlockManagerLocked := 0;
+          Exit;
         end;
 
-        {3.4) If we get here then there are no suitable free blocks, pending free blocks, and the current sequential
-        feed span has no space:  Allocate a new sequential feed span and split off a block of the optimal size.}
-        Result := FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(LPMediumBlockManager, AOptimalBlockSize);
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
-        Exit;
       end;
 
       {The arena could not be locked - try the next one.}
@@ -6328,6 +6432,16 @@ asm
     3) From the sequential feed span}
 
 @Attempt1Loop:
+
+  {Check the NUMA mask for the manager and compare to the NUMA mask for the thread, if necessary.}
+  movzx ecx, TSmallBlockManager(eax).NUMAMask
+  test ecx, ecx
+  jz @Attempt1NUMACheckOK
+  mov edx, NUMAMaskTLSIndex
+  and ecx, dword ptr fs:[edx * 4 + $e10] //Win32 TLS starts at fs:[$e10]
+  jz @Attempt1NoSequentialFeedBlockAvailable
+@Attempt1NUMACheckOK:
+
   {Is this manager currently locked?}
   cmp byte ptr TSmallBlockManager(eax).SmallBlockManagerLocked, 0
   jne @Attempt1TrySequentialFeed
@@ -6393,6 +6507,15 @@ asm
     4) By allocating a new sequential feed span and splitting off a block from it}
 
 @Attempt2Loop:
+
+  {Check the NUMA mask for the manager and compare to the NUMA mask for the thread, if necessary.}
+  movzx ecx, TSmallBlockManager(eax).NUMAMask
+  test ecx, ecx
+  jz @Attempt2NUMACheckOK
+  mov edx, NUMAMaskTLSIndex
+  and ecx, dword ptr fs:[edx * 4 + $e10] //Win32 TLS starts at fs:[$e10]
+  jz @Attempt2ManagerAlreadyLocked
+@Attempt2NUMACheckOK:
 
   {Try to lock the manager}
   mov edx, eax
@@ -6461,39 +6584,46 @@ begin
     while True do
     begin
 
-      {Atomic operations are very expensive, so in this first cycle through all the arenas we only try to lock the
-      small block manager if there is a very high probability that the lock will be successful, and if it is successful
-      that it will most likely have a block available.}
-      if APSmallBlockManager.SmallBlockManagerLocked = 0 then
+      {Check the NUMA mask for the small block manager:  If it is non-zero then we need to check whether it is allowed
+      to serve blocks to the current thread.}
+      if (APSmallBlockManager.NUMAMask = 0)
+        or (APSmallBlockManager.NUMAMask and OS_GetThreadLocalStorageValue(NUMAMaskTLSIndex) <> 0) then
       begin
 
-        {Before trying to lock the manager, first check whether it currently has either a non-empty pending free list or
-        it has a partially free span.}
-        if ((APSmallBlockManager.PendingFreeList <> nil)
-            or (NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager)))
-          and (AtomicExchange(APSmallBlockManager.SmallBlockManagerLocked, 1) = 0) then
+        {Atomic operations are very expensive, so in this first cycle through all the arenas we only try to lock the
+        small block manager if there is a very high probability that the lock will be successful, and if it is successful
+        that it will most likely have a block available.}
+        if APSmallBlockManager.SmallBlockManagerLocked = 0 then
         begin
 
-          {Try to reuse a pending free block first.}
-          if APSmallBlockManager.PendingFreeList <> nil then
-            Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
+          {Before trying to lock the manager, first check whether it currently has either a non-empty pending free list or
+          it has a partially free span.}
+          if ((APSmallBlockManager.PendingFreeList <> nil)
+              or (NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager)))
+            and (AtomicExchange(APSmallBlockManager.SmallBlockManagerLocked, 1) = 0) then
+          begin
 
-          {Try to allocate a block from the first partially free span.}
-          if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
-            Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
+            {Try to reuse a pending free block first.}
+            if APSmallBlockManager.PendingFreeList <> nil then
+              Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
 
-          {Other threads must have taken all the available blocks before the manager could be locked.}
-          APSmallBlockManager.SmallBlockManagerLocked := 0;
+            {Try to allocate a block from the first partially free span.}
+            if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
+              Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
+
+            {Other threads must have taken all the available blocks before the manager could be locked.}
+            APSmallBlockManager.SmallBlockManagerLocked := 0;
+          end;
         end;
-      end;
 
-      {Try to split off a block from the sequential feed span (if there is one).  Splitting off a sequential feed block
-      does not require the manager to be locked.}
-      if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
-      begin
-        Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
-        if Result <> nil then
-          Exit;
+        {Try to split off a block from the sequential feed span (if there is one).  Splitting off a sequential feed block
+        does not require the manager to be locked.}
+        if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
+        begin
+          Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
+          if Result <> nil then
+            Exit;
+        end;
       end;
 
       {Could not obtain a block from this arena:  Move on to the next arena.}
@@ -6519,31 +6649,39 @@ begin
     while True do
     begin
 
-      if AtomicCmpExchange(APSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
+      {Check the NUMA mask for the small block manager:  If it is non-zero then we need to check whether it is allowed
+      to serve blocks to the current thread.}
+      if (APSmallBlockManager.NUMAMask = 0)
+        or (APSmallBlockManager.NUMAMask and OS_GetThreadLocalStorageValue(NUMAMaskTLSIndex) <> 0) then
       begin
 
-        {Check if there is a pending free list.  If so the first pending free block is returned and the rest are freed.}
-        if APSmallBlockManager.PendingFreeList <> nil then
-          Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
-
-        {Try to get a block from the first partially free span.}
-        if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
-          Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
-
-        {It's possible another thread could have allocated a new sequential feed span in the meantime, so we need to
-        check again before allocating a new one.}
-        if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
+        if AtomicCmpExchange(APSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
         begin
-          Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
-          if Result <> nil then
-          begin
-            APSmallBlockManager.SmallBlockManagerLocked := 0;
-            Exit;
-          end;
-        end;
 
-        {Allocate a new sequential feed span and split off a block from it}
-        Exit(FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager));
+          {Check if there is a pending free list.  If so the first pending free block is returned and the rest are freed.}
+          if APSmallBlockManager.PendingFreeList <> nil then
+            Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
+
+          {Try to get a block from the first partially free span.}
+          if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
+            Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
+
+          {It's possible another thread could have allocated a new sequential feed span in the meantime, so we need to
+          check again before allocating a new one.}
+          if APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue > CSmallBlockSpanHeaderSize then
+          begin
+            Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
+            if Result <> nil then
+            begin
+              APSmallBlockManager.SmallBlockManagerLocked := 0;
+              Exit;
+            end;
+          end;
+
+          {Allocate a new sequential feed span and split off a block from it}
+          Exit(FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager));
+
+        end;
 
       end;
 
@@ -8763,6 +8901,59 @@ begin
   Result := OptimizationStrategy;
 end;
 
+procedure EnsureNUMAMaskTLSAllocated;
+begin
+  if not NUMAMaskTLSAllocated then
+  begin
+    if not OS_AllocateThreadLocalStorage(NUMAMaskTLSIndex) then
+      System.Error(reInvalidPtr);
+    NUMAMaskTLSAllocated := True;
+  end;
+end;
+
+procedure FastMM_SetArenaNUMAMask(AArenaIndex: Integer; ANUMAMask: Word;
+  ABlockSizeRangeStart, ABlockSizeRangeEnd: NativeInt);
+var
+  LSmallBlockManagerIndex: Integer;
+  LPSmallBlockManager: PSmallBlockManager;
+begin
+  if ABlockSizeRangeStart > ABlockSizeRangeEnd then
+    Exit;
+
+  if AArenaIndex < CFastMM_SmallBlockArenaCount - 1 then
+  begin
+    for LSmallBlockManagerIndex := 0 to CSmallBlockTypeCount - 1 do
+    begin
+      LPSmallBlockManager := @SmallBlockManagers[AArenaIndex][LSmallBlockManagerIndex];
+      if (LPSmallBlockManager.BlockSize >= ABlockSizeRangeStart)
+        and (LPSmallBlockManager.BlockSize <= ABlockSizeRangeEnd) then
+      begin
+        LPSmallBlockManager.NUMAMask := ANUMAMask;
+      end;
+    end;
+  end;
+
+  if (AArenaIndex < CFastMM_MediumBlockArenaCount - 1)
+    and (ABlockSizeRangeStart <= CMaximumMediumBlockSize)
+    and (ABlockSizeRangeEnd >= CMinimumMediumBlockSize) then
+  begin
+    MediumBlockManagers[AArenaIndex].NUMAMask := ANUMAMask;
+  end;
+
+  {Large blocks are allocated directly from the OS, so the large block managers do not require a NUMA mask.}
+
+  {If any NUMA masks are set on arenas then thread local storage must be allocated in order to also be able to set a
+  NUMA mask on each thread.}
+  EnsureNUMAMaskTLSAllocated;
+end;
+
+procedure FastMM_SetCurrentThreadNUMAMask(ANUMAMask: Word);
+begin
+  EnsureNUMAMaskTLSAllocated;
+
+  OS_SetThreadLocalStorageValue(NUMAMaskTLSIndex, ANUMAMask);
+end;
+
 {Adjacent small block managers may straddle the same cache line and thus have a false dependency.  Many CPUs also
 prefetch adjacent cache lines on a cache miss (e.g. the "Adjacent Cache Line Prefetch" BIOS option), so even if the
 small block managers are perfectly aligned on cache line (64-byte) boundaries, these prefetch mechanisms may still
@@ -9137,6 +9328,13 @@ begin
   begin
     CloseHandle(SharingFileMappingObjectHandle);
     SharingFileMappingObjectHandle := 0;
+  end;
+
+  if NUMAMaskTLSAllocated then
+  begin
+    OS_FreeThreadLocalStorage(NUMAMaskTLSIndex);
+    NUMAMaskTLSIndex := 0;
+    NUMAMaskTLSAllocated := False;
   end;
 
 end;
