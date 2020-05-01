@@ -19,7 +19,7 @@ Pierre le Riche
 [gs-soft AG](https://www.gs-soft.com/)
 
 ### Licence
-FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the [GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html) licence at no cost to you, or you may purchase a commercial licence.  The commercial licence pricing is as follows:
+FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the [GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html) licence at no cost to you, or you may purchase a commercial licence. A commercial licence includes all future updates. The commercial licence pricing is as follows:
 <table>
 <tr><td>Number Of Developers</td><td>Price (USD)</td></tr>
 <tr><td>1 developer</td><td>$99</td></tr>
@@ -30,7 +30,7 @@ FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of t
 <tr><td>More than 5 developers</td><td>$399 + $50 per developer from the 6th onwards</td></tr>
 </table>
 
-Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to fastmm@leriche.org for confirmation.  Support is available for users with a commercial licence via the same e-mail address.
+Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made at https://www.paypal.me/fastmm (paypal@leriche.org). Support is available for users with a commercial licence via the same e-mail address.
 
 ### Usage Instructions
 Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup, replacing the default memory manager.

@@ -17,16 +17,17 @@ Homepage:
 
 Licence:
   FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the GPL v3 licence at no cost to you,
-  or you may purchase a commercial licence.  The commercial licence pricing is as follows:
+  or you may purchase a commercial licence.  A commercial licence includes all future updates.  The commercial licence
+  pricing is as follows:
     1 developer = $99
     2 developers = $189
     3 developers = $269
     4 developers = $339
     5 developers = $399
     >5 developers = $399 + $50 per developer from the 6th onwards
-  Once payment has been made at https://www.paypal.me/fastmm (paypal@leriche.org), please send an e-mail to
-  fastmm@leriche.org for confirmation.  Support is available for users with a commercial licence via the same e-mail
-  address.
+  Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made at
+  https://www.paypal.me/fastmm (paypal@leriche.org). Support is available for users with a commercial licence via the
+  same e-mail address.
 
 Usage Instructions:
   Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup,
@@ -3975,8 +3976,7 @@ begin
   begin
     {This pointer is being reallocated to a larger block and therefore it is logical to assume that it may be enlarged
     again.  Since reallocations are expensive, there is a minimum upsize percentage to avoid unnecessary future move
-    operations.}
-    {Add 25% for large block upsizes}
+    operations.  This is currently set to 25%.}
     LNewAllocSize := LOldAvailableSize + (LOldAvailableSize shr 2);
     if LNewAllocSize < ANewSize then
       LNewAllocSize := ANewSize;
@@ -4055,7 +4055,7 @@ end;
 {--------Medium block management-----------}
 {------------------------------------------}
 
-{Takes a user request size and convents it to a size that fits the size of a medium block bin exactly.}
+{Takes a user request size and converts it to a size that fits the size of a medium block bin exactly.}
 function RoundUserSizeUpToNextMediumBlockBin(AUserSize: Integer): Integer; inline;
 begin
   if AUserSize <= (CMediumBlockMiddleBinsStart - CMediumBlockHeaderSize) then
@@ -5995,10 +5995,10 @@ begin
   LPSmallBlockSpan.FirstFreeBlock := nil;
   {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
   APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
-  {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header,
-  as well as the difference in the medium and small block header sizes for the last block.  All the sequential
-  feed blocks are initially marked as used.  This implies that the sequential feed span can never be freed until
-  all blocks have been fed sequentially.}
+  {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header, as well
+  as the difference in the medium and small block header sizes for the last block.  All the sequential feed blocks are
+  initially marked as used.  This implies that the sequential feed span can never be freed until all blocks have been
+  fed sequentially.}
   LTotalBlocksInSpan := (LSpanSize - (CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize))
     div APSmallBlockManager.BlockSize;
   LPSmallBlockSpan.TotalBlocksInSpan := LTotalBlocksInSpan;
@@ -6467,7 +6467,7 @@ begin
       if APSmallBlockManager.SmallBlockManagerLocked = 0 then
       begin
 
-        {Before trying to lock the manager, first check whether it currently has either non-empty pending free list or
+        {Before trying to lock the manager, first check whether it currently has either a non-empty pending free list or
         it has a partially free span.}
         if ((APSmallBlockManager.PendingFreeList <> nil)
             or (NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager)))
@@ -6496,7 +6496,7 @@ begin
           Exit;
       end;
 
-      {There are no available blocks in this arena:  Move on to the next arena.}
+      {Could not obtain a block from this arena:  Move on to the next arena.}
       if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CFastMM_SmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
@@ -6522,8 +6522,7 @@ begin
       if AtomicCmpExchange(APSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
       begin
 
-        {Check if there is a pending free list.  If so the first pending free block is returned and the rest are
-        freed.}
+        {Check if there is a pending free list.  If so the first pending free block is returned and the rest are freed.}
         if APSmallBlockManager.PendingFreeList <> nil then
           Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
 
