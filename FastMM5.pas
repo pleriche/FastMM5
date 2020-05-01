@@ -403,6 +403,13 @@ procedure FastMM_SetArenaNUMAMask(AArenaIndex: Integer; ANUMAMask: Word; ABlockS
 between the NUMA mask for the arena and the NUMA mask for the thread, and only if the result is non-zero will the arena
 be used to serve blocks to the thread.}
 procedure FastMM_SetCurrentThreadNUMAMask(ANUMAMask: Word);
+{Sets the NUMA masks for all arenas in order to evenly divide the arenas between the NUMA nodes of the system. If there
+is only one NUMA node then the masks for all arenas will be cleared.  If this method is called it is also very important
+to call FastMM_ConfigureThreadForNUMA on all threads.  Falure to call this on a thread will relelgate the thread to only
+using the last arena, which will severely bottleneck GetMem performance.}
+procedure FastMM_ConfigureAllArenasForNUMA;
+{Sets the NUMA mask for the current thread to match the NUMA node for the CPU on which it is running.}
+procedure FastMM_ConfigureCurrentThreadForNUMA;
 
 {Call FastMM_EnterMinimumAddressAlignment to request that all subsequent allocated blocks are aligned to the specified
 minimum.  Call FastMM_ExitMinimumAddressAlignment to rescind a prior request.  Requests for coarser alignments have
@@ -2146,6 +2153,21 @@ end;
 function OS_FreeThreadLocalStorage(ATLSIndex: Cardinal): Boolean;
 begin
   Result := Winapi.Windows.TlsFree(ATLSIndex);
+end;
+
+{Returns the number of NUMA nodes on the system.}
+function OS_GetHighestNUMANodeIndex: Cardinal;
+begin
+  Winapi.Windows.GetNumaHighestNodeNumber(Result);
+end;
+
+{Returns the NUMA node index for the CPU on which the current thread is running.}
+function OS_GetNUMANodeIndexForCurrentThread: Byte;
+var
+  LProcessorNumber: Cardinal;
+begin
+  LProcessorNumber := GetCurrentProcessorNumber;
+  GetNumaProcessorNode(LProcessorNumber, @Result);
 end;
 
 
@@ -8952,6 +8974,40 @@ begin
   EnsureNUMAMaskTLSAllocated;
 
   OS_SetThreadLocalStorageValue(NUMAMaskTLSIndex, ANUMAMask);
+end;
+
+procedure FastMM_ConfigureAllArenasForNUMA;
+var
+  LMaxArenas, LArenaIndex, LMaxNodeIndex: Integer;
+  LNUMAMask: Word;
+begin
+  LMaxArenas := CFastMM_SmallBlockArenaCount;
+  if LMaxArenas < CFastMM_MediumBlockArenaCount then
+    LMaxArenas := CFastMM_MediumBlockArenaCount;
+  if LMaxArenas < CFastMM_LargeBlockArenaCount then
+    LMaxArenas := CFastMM_LargeBlockArenaCount;
+
+  LMaxNodeIndex := OS_GetHighestNUMANodeIndex;
+
+  for LArenaIndex := 0 to LMaxArenas - 1 do
+  begin
+    if LMaxNodeIndex > 0 then
+      LNUMAMask := 1 shl (LArenaIndex mod (LMaxNodeIndex + 1))
+    else
+      LNUMAMask := 0;
+
+    FastMM_SetArenaNUMAMask(LArenaIndex, LNUMAMask);
+  end;
+
+end;
+
+procedure FastMM_ConfigureCurrentThreadForNUMA;
+var
+  LCurrentNUMANodeNumber: Integer;
+begin
+  LCurrentNUMANodeNumber := OS_GetNUMANodeIndexForCurrentThread;
+
+  FastMM_SetCurrentThreadNUMAMask(1 shl LCurrentNUMANodeNumber);
 end;
 
 {Adjacent small block managers may straddle the same cache line and thus have a false dependency.  Many CPUs also
