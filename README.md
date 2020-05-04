@@ -28,6 +28,7 @@ FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of t
 <tr><td>4 developers</td><td>$339</td></tr>
 <tr><td>5 developers</td><td>$399</td></tr>
 <tr><td>More than 5 developers</td><td>$399 + $50 per developer from the 6th onwards</td></tr>
+<tr><td>Site licence (unlimited developers)</td><td>$999</td></tr>
 </table>
 
 Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made at https://www.paypal.me/fastmm (paypal@leriche.org). Support is available for users with a commercial licence via the same e-mail address.

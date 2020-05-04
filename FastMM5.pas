@@ -25,6 +25,7 @@ Licence:
     4 developers = $339
     5 developers = $399
     >5 developers = $399 + $50 per developer from the 6th onwards
+    site licence (unlimited developers) = $999
   Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made at
   https://www.paypal.me/fastmm (paypal@leriche.org). Support is available for users with a commercial licence via the
   same e-mail address.
