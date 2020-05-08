@@ -57,3 +57,6 @@ Windows, 32-bit and 64-bit
 ### Change Log
 ##### Version 5.00
 * First non-beta release of FastMM 5.
+
+##### Version 5.01
+* Enhancement: Log a stack trace for the virtual method call that lead to a "virtual method call on freed object" error
