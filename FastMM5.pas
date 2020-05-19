@@ -9489,6 +9489,10 @@ finalization
   {All pending frees must be released before we can do a leak check.}
   FastMM_ProcessAllPendingFrees;
 
+  {Backward compatibility: If ReportMemoryLeaksOnShutdown = True then display the the leak summary.}
+  if ReportMemoryLeaksOnShutdown then
+    Include(FastMM_MessageBoxEvents, mmetUnexpectedMemoryLeakSummary);
+
   {Do a memory leak check if required.}
   if [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary] * (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents) <> [] then
     FastMM_PerformMemoryLeakCheck;
