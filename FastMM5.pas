@@ -1212,6 +1212,21 @@ type
     procedure VirtualMethod21; virtual; procedure VirtualMethod22; virtual; procedure VirtualMethod23; virtual;
     procedure VirtualMethod24; virtual; procedure VirtualMethod25; virtual; procedure VirtualMethod26; virtual;
     procedure VirtualMethod27; virtual; procedure VirtualMethod28; virtual; procedure VirtualMethod29; virtual;
+    procedure VirtualMethod30; virtual; procedure VirtualMethod31; virtual; procedure VirtualMethod32; virtual;
+    procedure VirtualMethod33; virtual; procedure VirtualMethod34; virtual; procedure VirtualMethod35; virtual;
+    procedure VirtualMethod36; virtual; procedure VirtualMethod37; virtual; procedure VirtualMethod38; virtual;
+    procedure VirtualMethod39; virtual; procedure VirtualMethod40; virtual; procedure VirtualMethod41; virtual;
+    procedure VirtualMethod42; virtual; procedure VirtualMethod43; virtual; procedure VirtualMethod44; virtual;
+    procedure VirtualMethod45; virtual; procedure VirtualMethod46; virtual; procedure VirtualMethod47; virtual;
+    procedure VirtualMethod48; virtual; procedure VirtualMethod49; virtual; procedure VirtualMethod50; virtual;
+    procedure VirtualMethod51; virtual; procedure VirtualMethod52; virtual; procedure VirtualMethod53; virtual;
+    procedure VirtualMethod54; virtual; procedure VirtualMethod55; virtual; procedure VirtualMethod56; virtual;
+    procedure VirtualMethod57; virtual; procedure VirtualMethod58; virtual; procedure VirtualMethod59; virtual;
+    procedure VirtualMethod60; virtual; procedure VirtualMethod61; virtual; procedure VirtualMethod62; virtual;
+    procedure VirtualMethod63; virtual; procedure VirtualMethod64; virtual; procedure VirtualMethod65; virtual;
+    procedure VirtualMethod66; virtual; procedure VirtualMethod67; virtual; procedure VirtualMethod68; virtual;
+    procedure VirtualMethod69; virtual; procedure VirtualMethod70; virtual; procedure VirtualMethod71; virtual;
+    procedure VirtualMethod72; virtual; procedure VirtualMethod73; virtual; procedure VirtualMethod74; virtual;
   end;
 
   {-------Legacy debug support DLL interface--------}
@@ -3297,6 +3312,51 @@ procedure TFastMM_FreedObject.VirtualMethod26; begin VirtualMethodOnFreedObject(
 procedure TFastMM_FreedObject.VirtualMethod27; begin VirtualMethodOnFreedObject(27); end;
 procedure TFastMM_FreedObject.VirtualMethod28; begin VirtualMethodOnFreedObject(28); end;
 procedure TFastMM_FreedObject.VirtualMethod29; begin VirtualMethodOnFreedObject(29); end;
+procedure TFastMM_FreedObject.VirtualMethod30; begin VirtualMethodOnFreedObject(30); end;
+procedure TFastMM_FreedObject.VirtualMethod31; begin VirtualMethodOnFreedObject(31); end;
+procedure TFastMM_FreedObject.VirtualMethod32; begin VirtualMethodOnFreedObject(32); end;
+procedure TFastMM_FreedObject.VirtualMethod33; begin VirtualMethodOnFreedObject(33); end;
+procedure TFastMM_FreedObject.VirtualMethod34; begin VirtualMethodOnFreedObject(34); end;
+procedure TFastMM_FreedObject.VirtualMethod35; begin VirtualMethodOnFreedObject(35); end;
+procedure TFastMM_FreedObject.VirtualMethod36; begin VirtualMethodOnFreedObject(36); end;
+procedure TFastMM_FreedObject.VirtualMethod37; begin VirtualMethodOnFreedObject(37); end;
+procedure TFastMM_FreedObject.VirtualMethod38; begin VirtualMethodOnFreedObject(38); end;
+procedure TFastMM_FreedObject.VirtualMethod39; begin VirtualMethodOnFreedObject(39); end;
+procedure TFastMM_FreedObject.VirtualMethod40; begin VirtualMethodOnFreedObject(40); end;
+procedure TFastMM_FreedObject.VirtualMethod41; begin VirtualMethodOnFreedObject(41); end;
+procedure TFastMM_FreedObject.VirtualMethod42; begin VirtualMethodOnFreedObject(42); end;
+procedure TFastMM_FreedObject.VirtualMethod43; begin VirtualMethodOnFreedObject(43); end;
+procedure TFastMM_FreedObject.VirtualMethod44; begin VirtualMethodOnFreedObject(44); end;
+procedure TFastMM_FreedObject.VirtualMethod45; begin VirtualMethodOnFreedObject(45); end;
+procedure TFastMM_FreedObject.VirtualMethod46; begin VirtualMethodOnFreedObject(46); end;
+procedure TFastMM_FreedObject.VirtualMethod47; begin VirtualMethodOnFreedObject(47); end;
+procedure TFastMM_FreedObject.VirtualMethod48; begin VirtualMethodOnFreedObject(48); end;
+procedure TFastMM_FreedObject.VirtualMethod49; begin VirtualMethodOnFreedObject(49); end;
+procedure TFastMM_FreedObject.VirtualMethod50; begin VirtualMethodOnFreedObject(50); end;
+procedure TFastMM_FreedObject.VirtualMethod51; begin VirtualMethodOnFreedObject(51); end;
+procedure TFastMM_FreedObject.VirtualMethod52; begin VirtualMethodOnFreedObject(52); end;
+procedure TFastMM_FreedObject.VirtualMethod53; begin VirtualMethodOnFreedObject(53); end;
+procedure TFastMM_FreedObject.VirtualMethod54; begin VirtualMethodOnFreedObject(54); end;
+procedure TFastMM_FreedObject.VirtualMethod55; begin VirtualMethodOnFreedObject(55); end;
+procedure TFastMM_FreedObject.VirtualMethod56; begin VirtualMethodOnFreedObject(56); end;
+procedure TFastMM_FreedObject.VirtualMethod57; begin VirtualMethodOnFreedObject(57); end;
+procedure TFastMM_FreedObject.VirtualMethod58; begin VirtualMethodOnFreedObject(58); end;
+procedure TFastMM_FreedObject.VirtualMethod59; begin VirtualMethodOnFreedObject(59); end;
+procedure TFastMM_FreedObject.VirtualMethod60; begin VirtualMethodOnFreedObject(60); end;
+procedure TFastMM_FreedObject.VirtualMethod61; begin VirtualMethodOnFreedObject(61); end;
+procedure TFastMM_FreedObject.VirtualMethod62; begin VirtualMethodOnFreedObject(62); end;
+procedure TFastMM_FreedObject.VirtualMethod63; begin VirtualMethodOnFreedObject(63); end;
+procedure TFastMM_FreedObject.VirtualMethod64; begin VirtualMethodOnFreedObject(64); end;
+procedure TFastMM_FreedObject.VirtualMethod65; begin VirtualMethodOnFreedObject(65); end;
+procedure TFastMM_FreedObject.VirtualMethod66; begin VirtualMethodOnFreedObject(66); end;
+procedure TFastMM_FreedObject.VirtualMethod67; begin VirtualMethodOnFreedObject(67); end;
+procedure TFastMM_FreedObject.VirtualMethod68; begin VirtualMethodOnFreedObject(68); end;
+procedure TFastMM_FreedObject.VirtualMethod69; begin VirtualMethodOnFreedObject(69); end;
+procedure TFastMM_FreedObject.VirtualMethod70; begin VirtualMethodOnFreedObject(70); end;
+procedure TFastMM_FreedObject.VirtualMethod71; begin VirtualMethodOnFreedObject(71); end;
+procedure TFastMM_FreedObject.VirtualMethod72; begin VirtualMethodOnFreedObject(72); end;
+procedure TFastMM_FreedObject.VirtualMethod73; begin VirtualMethodOnFreedObject(73); end;
+procedure TFastMM_FreedObject.VirtualMethod74; begin VirtualMethodOnFreedObject(74); end;
 
 
 {------------------------------------------}
