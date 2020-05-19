@@ -1191,9 +1191,17 @@ type
     procedure VirtualMethodOnFreedObject(AIndex: Byte); overload;
   public
     {Virtual method calls that will redirect to VirtualMethodOnFreedObject}
-    destructor Destroy; override;
+    function Equals(Obj: TObject): Boolean; override;
+    function GetHashCode: Integer; override;
+    function ToString: string; override;
+    function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
+    procedure AfterConstruction; override;
+    procedure BeforeDestruction; override;
+    procedure Dispatch(var Message); override;
     procedure DefaultHandler(var Message); override;
-    {Cirtual method intercepts - these will redirect to VirtualMethodOnFreedObject}
+    procedure FreeInstance; override;
+    destructor Destroy; override;
+    {Virtual method intercepts - these will redirect to VirtualMethodOnFreedObject}
     procedure VirtualMethod0; virtual; procedure VirtualMethod1; virtual; procedure VirtualMethod2; virtual;
     procedure VirtualMethod3; virtual; procedure VirtualMethod4; virtual; procedure VirtualMethod5; virtual;
     procedure VirtualMethod6; virtual; procedure VirtualMethod7; virtual; procedure VirtualMethod8; virtual;
@@ -3166,6 +3174,16 @@ Destroy) will be caught.}
 
 { TFastMM_FreedObject }
 
+procedure TFastMM_FreedObject.AfterConstruction;
+begin
+  VirtualMethodOnFreedObject('AfterConstruction');
+end;
+
+procedure TFastMM_FreedObject.BeforeDestruction;
+begin
+  VirtualMethodOnFreedObject('BeforeDestruction');
+end;
+
 procedure TFastMM_FreedObject.DefaultHandler(var Message);
 begin
   VirtualMethodOnFreedObject('DefaultHandler');
@@ -3174,6 +3192,40 @@ end;
 destructor TFastMM_FreedObject.Destroy;
 begin
   VirtualMethodOnFreedObject('Destroy');
+end;
+
+procedure TFastMM_FreedObject.Dispatch(var Message);
+begin
+  VirtualMethodOnFreedObject('Dispatch');
+end;
+
+function TFastMM_FreedObject.Equals(Obj: TObject): Boolean;
+begin
+  VirtualMethodOnFreedObject('Equals');
+  Result := False; //Suppress compiler warning
+end;
+
+procedure TFastMM_FreedObject.FreeInstance;
+begin
+  VirtualMethodOnFreedObject('FreeInstance');
+end;
+
+function TFastMM_FreedObject.GetHashCode: Integer;
+begin
+  VirtualMethodOnFreedObject('GetHashCode');
+  Result := 0; //Suppress compiler warning
+end;
+
+function TFastMM_FreedObject.SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult;
+begin
+  VirtualMethodOnFreedObject('SafeCallException');
+  Result := 0; //Suppress compiler warning
+end;
+
+function TFastMM_FreedObject.ToString: string;
+begin
+  VirtualMethodOnFreedObject('ToString');
+  Result := ''; //Suppress compiler warning
 end;
 
 procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(APMethodName: PWideChar);
