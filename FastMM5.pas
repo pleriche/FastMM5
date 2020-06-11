@@ -3859,6 +3859,9 @@ begin
     {The large block is segmented - free all segments}
     LPCurrentSegment := APLargeBlockHeader;
     LRemainingSize := NativeUInt(APLargeBlockHeader.ActualBlockSize);
+{$if CompilerVersion < 31}
+    Result := nil; //Workaround for spurious warning with older compilers
+{$endif}
     while True do
     begin
       OS_GetVirtualMemoryRegionInfo(LPCurrentSegment, LMemoryRegionInfo);
@@ -8675,6 +8678,9 @@ begin
     begin
       LPSummaryEntry := @APLeakSummary.MemoryLeakEntries[i];
 
+      {$if CompilerVersion < 31}
+      LChildDirection := False; //Workaround for spurious warning with older compilers
+      {$endif}
       if ABlockUsableSize <> LPSummaryEntry.BlockUsableSize then
       begin
         LChildDirection := ABlockUsableSize > LPSummaryEntry.BlockUsableSize;
