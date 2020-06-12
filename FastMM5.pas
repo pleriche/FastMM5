@@ -348,9 +348,11 @@ function FastMM_ProcessAllPendingFrees: Boolean;
 {Walks the block types indicated by the AWalkBlockTypes set, calling ACallBack for each allocated block.  If
 AWalkBlockTypes = [] then all block types is assumed.  Note that pending free blocks are treated as used blocks for the
 purpose of the AWalkUsedBlocksOnly parameter.  Call FastMM_ProcessAllPendingFrees first in order to process all pending
-frees if this is a concern.}
-procedure FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
-  AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil);
+frees if this is a concern.  ALockTimeoutMilliseconds is the maximum number of millseconds that FastMM_WalkBlocks will
+wait to acquire a lock on an arena, skipping the arena if it is unable to do so.  Returns True if all blocks were walked
+successfully, False if one or more arenas were skipped due to a lock timeout.}
+function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
+  AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil; ALockTimeoutMilliseconds: Cardinal = 1000): Boolean;
 
 {Walks all debug mode blocks (blocks that were allocated between a FastMM_EnterDebugMode and FastMM_ExitDebugMode call),
 checking for corruption of the debug header, footer, and in the case of freed blocks whether the block content was
@@ -368,9 +370,11 @@ blocks not yet released to the operating system are included in the overhead, wh
 that exposes freed blocks in separate fields.}
 function FastMM_GetUsageSummary: TFastMM_UsageSummary;
 
-{Writes a log file containing a summary of the memory mananger state and a list of allocated blocks grouped by class.
-The file will be saved in the encoding specified by FastMM_TextFileEncoding.  Returns True on success.}
-function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = ''): Boolean;
+{Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class.
+The file will be saved in the encoding specified by FastMM_TextFileEncoding.  ALockTimeoutMilliseconds is the maximum
+amount of time to wait for a lock on a manager to be released, before it is skipped.  Returns True on success.}
+function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
+  ALockTimeoutMilliseconds: Cardinal = 1000): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -2028,7 +2032,7 @@ begin
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
-procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond: Word);
+procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond, AMilliseconds: Word);
 var
   LSystemTime: TSystemTime;
 begin
@@ -2039,6 +2043,14 @@ begin
   AHour := LSystemTime.wHour;
   AMinute := LSystemTime.wMinute;
   ASecond := LSystemTime.wSecond;
+  AMilliseconds := LSystemTime.wMilliseconds;
+end;
+
+{Returns the number of milliseconds that have elapsed since the system was started.  Note that this wraps back to 0
+after 49.7 days.}
+function OS_GetMillisecondsSinceStartup: Cardinal;
+begin
+  Result := Winapi.Windows.GetTickCount;
 end;
 
 {Fills a buffer with the full path and filename of the application.  If AReturnLibraryFilename = True and this is a
@@ -2880,11 +2892,11 @@ end;
 function AddTokenValues_CurrentDateAndTime(var ATokenValues: TEventLogTokenValues;
   APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 var
-  LYear, LMonth, LDay, LHour, LMinute, LSecond: Word;
+  LYear, LMonth, LDay, LHour, LMinute, LSecond, LMilliseconds: Word;
 begin
   Result := APTokenValueBufferPos;
 
-  OS_GetCurrentDateTime(LYear, LMonth, LDay, LHour, LMinute, LSecond);
+  OS_GetCurrentDateTime(LYear, LMonth, LDay, LHour, LMinute, LSecond, LMilliseconds);
 
   Result := AddTokenValue_Date(ATokenValues, CEventLogTokenCurrentDate, LYear, LMonth, LDay, Result, APBufferEnd);
   Result := AddTokenValue_Time(ATokenValues, CEventLogTokenCurrentTime, LHour, LMinute, LSecond, Result, APBufferEnd);
@@ -7587,11 +7599,37 @@ begin
     ABlockInfo.DebugInformation := nil;
 end;
 
+{Checks for timeout while waiting on a locked resource.  Returns False if the timeout has expired.}
+function FastMM_WalkBlocks_CheckTimeout(var ALockWaitTimeMilliseconds, APreviousTimestampMilliseconds: Cardinal;
+  ALockTimeoutMilliseconds: Cardinal): Boolean;
+var
+  LCurrentTimestampMilliseconds: Cardinal;
+begin
+  LCurrentTimestampMilliseconds := OS_GetMillisecondsSinceStartup;
+
+  {On the first pass just record the current timestamp.}
+  if ALockWaitTimeMilliseconds = 0 then
+  begin
+    ALockWaitTimeMilliseconds := 1;
+  end
+  else
+  begin
+    {Update the total number of milliseconds that have elapsed.}
+    Inc(ALockWaitTimeMilliseconds, LCurrentTimestampMilliseconds - APreviousTimestampMilliseconds);
+  end;
+
+  APreviousTimestampMilliseconds := LCurrentTimestampMilliseconds;
+
+  {If the lock timeout has expired, return False.}
+  Result := ALockWaitTimeMilliseconds <= ALockTimeoutMilliseconds;
+end;
+
 {Walks the block types indicated by the AWalkBlockTypes set, calling ACallBack for each allocated block.}
-procedure FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes;
-  AWalkUsedBlocksOnly: Boolean; AUserData: Pointer);
+function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes;
+  AWalkUsedBlocksOnly: Boolean; AUserData: Pointer; ALockTimeoutMilliseconds: Cardinal): Boolean;
 var
   LArenaIndex: Integer;
+  LLockWaitTimeMilliseconds, LTimestampMilliseconds: Cardinal;
   LBlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
   LPLargeBlockManager: PLargeBlockManager;
   LPLargeBlockHeader: PLargeBlockHeader;
@@ -7601,6 +7639,11 @@ var
   LBlockOffsetFromMediumSpanStart, LMediumBlockSize, LSmallBlockOffset, LLastBlockOffset: Integer;
   LPSmallBlockManager: PSmallBlockManager;
 begin
+  {Assume success, i.e. that all arenas will be walked.  This will be reset to False if a lock timeout occurs.}
+  Result := True;
+
+  LTimestampMilliseconds := 0;
+
   LBlockInfo.UserData := AUserData;
 
   if AWalkBlockTypes = [] then
@@ -7624,8 +7667,18 @@ begin
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
-      while AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) <> 0 do
+      LLockWaitTimeMilliseconds := 0;
+      while (AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) <> 0)
+        and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+      begin
         OS_AllowOtherThreadToRun;
+      end;
+
+      if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+      begin
+        Result := False;
+        Continue;
+      end;
 
       LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
       while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
@@ -7655,8 +7708,18 @@ begin
 
       LBlockInfo.ArenaIndex := LArenaIndex;
 
-      while AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) <> 0 do
+      LLockWaitTimeMilliseconds := 0;
+      while (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) <> 0)
+        and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+      begin
         OS_AllowOtherThreadToRun;
+      end;
+
+      if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+      begin
+        Result := False;
+        Continue;
+      end;
 
       LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
       while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
@@ -7713,29 +7776,43 @@ begin
               begin
                 LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
-                while AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) <> 0 do
-                  OS_AllowOtherThreadToRun;
-
-                {Memory fence required for ARM}
-
-                {The last block may have been released before the manager was locked, so we need to check whether it is
-                still a small block span.}
-                if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
+                LLockWaitTimeMilliseconds := 0;
+                while (AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) <> 0)
+                  and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
                 begin
-                  if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
-                  begin
-                    LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
-                    if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
-                      LSmallBlockOffset := CSmallBlockSpanHeaderSize;
-                  end
-                  else
-                    LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                  OS_AllowOtherThreadToRun;
+                end;
+
+                if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+                begin
+                  Result := False;
+                  LPSmallBlockManager := nil;
+                  LSmallBlockOffset := 0;
                 end
                 else
                 begin
-                  LSmallBlockOffset := 0;
-                  LPSmallBlockManager.SmallBlockManagerLocked := 0;
-                  LPSmallBlockManager := nil;
+
+                  {Memory fence required for ARM}
+
+                  {The last block may have been released before the manager was locked, so we need to check whether it is
+                  still a small block span.}
+                  if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
+                  begin
+                    if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
+                    begin
+                      LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
+                      if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
+                        LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                    end
+                    else
+                      LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                  end
+                  else
+                  begin
+                    LSmallBlockOffset := 0;
+                    LPSmallBlockManager.SmallBlockManagerLocked := 0;
+                    LPSmallBlockManager := nil;
+                  end;
                 end;
               end
               else
@@ -8072,7 +8149,7 @@ begin
   Inc(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
 end;
 
-{LogMemoryManagerStateToFile subroutine:  A median-of-3 quicksort routine for sorting a TMemoryLogNodes array.}
+{FastMM_LogStateToFile subroutine:  A median-of-3 quicksort routine for sorting a TMemoryLogNodes array.}
 procedure FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
 var
   M, I, J: Integer;
@@ -8144,7 +8221,7 @@ begin
   end;
 end;
 
-{LogMemoryManagerStateToFile subroutine:  An InsertionSort routine for sorting a TMemoryLogNodes array.}
+{FastMM_LogStateToFile subroutine:  An InsertionSort routine for sorting a TMemoryLogNodes array.}
 procedure FastMM_LogStateToFile_InsertionSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
 var
   I, J: Integer;
@@ -8166,7 +8243,8 @@ end;
 
 {Writes a log file containing a summary of the memory mananger state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
-function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string): Boolean;
+function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
+  ALockTimeoutMilliseconds: Cardinal): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8189,7 +8267,8 @@ begin
   begin
     try
       {Obtain the list of classes, together with the total memory usage and block count for each.}
-      FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo);
+      FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
+        ALockTimeoutMilliseconds);
 
       {Sort the classes in descending total memory usage order:  Do the initial QuickSort pass over the list to sort the
       list in groups of QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
