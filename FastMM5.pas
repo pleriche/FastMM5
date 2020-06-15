@@ -2327,7 +2327,7 @@ var
       {No more parent classes?}
       if LParentClassSelfPointer = nil then
         Exit(True);
-      {Recusively check the parent class for validity.}
+      {Recursively check the parent class for validity.}
       Result := IsValidVMTAddress(LParentClassSelfPointer)
         and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
     end
@@ -3872,7 +3872,7 @@ begin
     LPCurrentSegment := APLargeBlockHeader;
     LRemainingSize := NativeUInt(APLargeBlockHeader.ActualBlockSize);
 {$if CompilerVersion < 31}
-    Result := nil; //Workaround for spurious warning with older compilers
+    Result := 0; //Workaround for spurious warning with older compilers
 {$endif}
     while True do
     begin
