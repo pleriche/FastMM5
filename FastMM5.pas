@@ -9541,6 +9541,10 @@ procedure FastMM_ApplyLegacyConditionalDefines;
 begin
   {This procedure provides backward compatibility with the conditional defines of FastMM4.}
 
+  {$ifdef ClearLogFileOnStartup}
+  FastMM_DeleteEventLogFile;
+  {$endif}
+
   {$ifdef Align16Bytes}
   FastMM_EnterMinimumAddressAlignment(maa16Bytes);
   {$endif}
