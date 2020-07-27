@@ -60,3 +60,10 @@ Windows, 32-bit and 64-bit
 
 ##### Version 5.01
 * Enhancement: Log a stack trace for the virtual method call that lead to a "virtual method call on freed object" error
+
+##### Version 5.02
+* Backward compatibility improvement: If ReportMemoryLeaksOnShutdown = True then mmetUnexpectedMemoryLeakSummary will automatically be included in FastMM_MessageBoxEvents, and the the leak summary will thus be displayed on shutdown.
+* FastMM in debug mode will now catch all TObject virtual method calls on a freed object. Previously it only caught some commonly used ones.
+* Increase the number of virtual methods supported by TFastMM_FreedObject to 75. (There are some classes in the RTL that have more than 30 virtual methods, e.g. TStringList).
+* Add a lock timeout for FastMM_LogStateToFile and FastMM_WalkBlocks. Some severe memory corruption crashes may leave an arena locked, in which case it was previously not possible to walk blocks or dump the memory manager state to file in the crash handler.
+* Add backward compatibility support for the ClearLogFileOnStartup v4 define.
