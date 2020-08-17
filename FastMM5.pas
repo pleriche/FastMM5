@@ -17,18 +17,26 @@ Homepage:
 
 Licence:
   FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of the GPL v3 licence at no cost to you,
-  or you may purchase a commercial licence.  A commercial licence includes all future updates.  The commercial licence
-  pricing is as follows:
+  or you may purchase a commercial licence.  A commercial licence grants you the right to use FastMM5 in your own
+  applications, royalty free, and without any requirement to disclose your source code nor any modifications to FastMM
+  to any other party.  A commercial licence lasts into perpetuity, and entitles you to all future updates, free of
+  charge.  A commercial licence is sold per developer developing applications that use FastMM, as follows:
     1 developer = $99
     2 developers = $189
     3 developers = $269
     4 developers = $339
     5 developers = $399
     >5 developers = $399 + $50 per developer from the 6th onwards
-    site licence (unlimited developers) = $999
-  Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made at
-  https://www.paypal.me/fastmm (paypal@leriche.org). Support is available for users with a commercial licence via the
-  same e-mail address.
+    site licence = $999 (unlimited number of developers affiliated with the owner of the licence, i.e. employees,
+    co-workers and contractors)
+
+  Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made.  Payment may be
+  made via PayPal at https://www.paypal.me/fastmm (paypal@leriche.org), or via bank transfer.  Bank details will be
+  provided on the invoice.
+
+  Support (via e-mail) is available for users with a commercial licence.  Enhancement requests submitted by users with a
+  commercial licence will be prioritized.
+
 
 Usage Instructions:
   Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup,
