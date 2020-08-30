@@ -37,7 +37,6 @@ Licence:
   Support (via e-mail) is available for users with a commercial licence.  Enhancement requests submitted by users with a
   commercial licence will be prioritized.
 
-
 Usage Instructions:
   Add FastMM5.pas as the first unit in your project's DPR file.  It will install itself automatically during startup,
   replacing the default memory manager.
@@ -137,14 +136,6 @@ const
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
 
-  {The number of entries per stack trace differs between 32-bit and 64-bit in order to ensure that the debug header is
-  always a multiple of 64 bytes.}
-{$ifdef 32Bit}
-  CFastMM_StackTraceEntryCount = 19; //8 stack trace entries per 64 bytes
-{$else}
-  CFastMM_StackTraceEntryCount = 20; //4 stack trace entries per 64 bytes
-{$endif}
-
 type
 
   {The optimization strategy for the memory manager.}
@@ -183,8 +174,6 @@ type
     {This memory manager has been installed.}
     mmisInstalled);
 
-  TFastMM_StackTrace = array[0..CFastMM_StackTraceEntryCount - 1] of NativeUInt;
-
   {The debug block header.  Must be a multiple of 64 in order to guarantee that minimum block alignment restrictions
   are honoured.}
 {$PointerMath On}
@@ -196,35 +185,49 @@ type
     pointer for the free block linked list.  This space is thus reserved.}
     Reserved1: Pointer;
     Reserved2: Pointer;
+    {Reserved space for future use.}
+{$ifdef 32Bit}
+    ReservedSpace1: array[0..23] of Byte;
+{$else}
+    ReservedSpace1: array[0..7] of Byte;
+{$endif}
+    {The xor of all subsequent dwords in this structure.}
+    HeaderCheckSum: Cardinal;
+    {The allocation number:  All debug mode allocations are numbered sequentially.  This number may be useful in memory
+    leak analysis.  If it reaches 4G it wraps back to 0.}
+    AllocationNumber: Cardinal;
     {The user requested size for the block.}
     UserSize: NativeInt;
     {The object class this block was used for the previous time it was allocated.  When a block is freed, the pointer
     that would normally be in the space of the class pointer is copied here, so if it is detected that the block was
     used after being freed we have an idea what class it is.}
     PreviouslyUsedByClass: Pointer;
-    {The call stack when the block was allocated}
-    AllocationStackTrace: TFastMM_StackTrace;
-    {The call stack when the block was freed}
-    FreeStackTrace: TFastMM_StackTrace;
     {The value of the FastMM_CurrentAllocationGroup when the block was allocated.  Can be used in the debugging process
     to group related memory leaks together.}
     AllocationGroup: Cardinal;
-    {The allocation number:  All debug mode allocations are numbered sequentially.  This number may be useful in memory
-    leak analysis.  If it reaches 4G it wraps back to 0.}
-    AllocationNumber: Cardinal;
     {The ID of the thread that allocated the block}
     AllocatedByThread: Cardinal;
     {The ID of the thread that freed the block}
     FreedByThread: Cardinal;
-    {The sum of the dwords(32-bit)/qwords(64-bit) in this structure starting after the initial two reserved fields up
-    to just before this field.}
-    HeaderCheckSum: NativeUInt;
-{$ifdef 64Bit}
-    Padding1: Cardinal;
-{$endif}
-    Padding2: SmallInt;
+    {Reserved space for future use.}
+    ReservedSpace2: Byte;
+    {The number of entries in the allocation and free call stacks in the debug footer.}
+    StackTraceEntryCount: Byte;
     {The debug block signature.  This will always be CIsDebugBlockFlag.}
     DebugBlockFlags: SmallInt;
+    {Returns a pointer to the start of the debug footer.  The debug footer consists of the footer checksum (dword),
+    followed by the allocation stack trace and then the free stack trace.}
+    function DebugFooterPtr: PCardinal; inline;
+    {Returns a pointer to the first entry in the allocation stack trace in the debug footer.}
+    function DebugFooter_AllocationStackTracePtr: PNativeUInt; inline;
+    {Returns a pointer to the first entry in the free stack trace in the debug footer.}
+    function DebugFooter_FreeStackTracePtr: PNativeUInt; inline;
+    {Calculate the header checksum}
+    function CalculateHeaderCheckSum: Cardinal;
+    {Calculate the checksum for the stack traces that follow after the user data.}
+    function CalculateFooterCheckSum: Cardinal;
+    {Calculates and sets both the header and footer checksums.}
+    procedure CalculateAndSetHeaderAndFooterCheckSums;
   end;
 
   TFastMM_WalkAllocatedBlocksBlockType = (
@@ -441,6 +444,11 @@ function FastMM_ExitDebugMode: Boolean;
 {Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
 FastMM_ExitDebugMode.}
 function FastMM_DebugModeActive: Boolean;
+
+{Gets/sets the depth of allocation and free stack traces in debug mode.  The minimum stack trace depth is 0, and the
+maximum is CFastMM_MaximumStackTraceEntryCount.}
+function FastMM_GetDebugModeStackTraceEntryCount: Byte;
+procedure FastMM_SetDebugModeStackTraceEntryCount(AStackTraceEntryCount: Byte);
 
 {No-op call stack routines.}
 procedure FastMM_NoOpGetStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
@@ -842,6 +850,11 @@ const
   CFastMM_StackTrace_SkipFrames_GetMem = 0;
   CFastMM_StackTrace_SkipFrames_FreeMem = 0;
 
+  {The maximum number of entries per stack trace.}
+  CFastMM_StackTrace_MaximumEntryCount = 64;
+  {The default number of entries per stack trace.}
+  CFastMM_StackTrace_DefaultEntryCount = 20;
+
   {The number of bytes in a memory page.  It is assumed that pages are aligned at page size boundaries, and that memory
   protection is set at the page level.}
   CVirtualMemoryPageSize = 4096;
@@ -849,6 +862,8 @@ const
   CCopyrightMessage: PAnsiChar = 'FastMM (c) 2004 - 2020 Pierre le Riche';
 
 type
+
+  TFastMM_MaximumLengthStackTrace = array[0..CFastMM_StackTrace_MaximumEntryCount - 1] of NativeUInt;
 
   {Event log token values are pointers #0 terminated text strings.  The payload for the tokens is in TokenData.}
   TEventLogTokenValues = array[0..CEventLogMaxTokenID] of PWideChar;
@@ -1197,7 +1212,7 @@ type
   freed object.}
   TFastMM_FreedObject = class(TObject)
   protected
-    class var FVirtualMethodStackTrace: TFastMM_StackTrace;
+    class var FVirtualMethodStackTrace: TFastMM_MaximumLengthStackTrace;
     procedure VirtualMethodOnFreedObject_LogEvent(APMethodName: PWideChar);
     procedure VirtualMethodOnFreedObject(APMethodName: PWideChar); overload;
     procedure VirtualMethodOnFreedObject(AIndex: Byte); overload;
@@ -1254,7 +1269,7 @@ const
   CMediumFreeBlockFooterSize = SizeOf(TMediumFreeBlockFooter);
   CLargeBlockHeaderSize = SizeOf(TLargeBlockHeader);
   CDebugBlockHeaderSize = SizeOf(TFastMM_DebugBlockHeader);
-  CDebugBlockFooterSize = SizeOf(NativeUInt);
+  CDebugBlockFooterCheckSumSize = SizeOf(Cardinal);
 
   CSmallBlockSpanHeaderSize = SizeOf(TSmallBlockSpanHeader);
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
@@ -1394,6 +1409,9 @@ var
   {The difference between the number of times EnterDebugMode has been called vs ExitDebugMode.}
   DebugModeCounter: Integer;
 
+  {The number of entries in stack traces in debug mode.}
+  DebugMode_StackTrace_EntryCount: Byte;
+
   {A lock that allows switching between debug and normal mode to be thread safe.}
   SettingMemoryManager: Integer; //0 = False, 1 = True;
 
@@ -1427,6 +1445,69 @@ var
   SharingFileMappingObjectHandle: NativeUInt;
 {$endif}
 
+{--------------------------------------------------------}
+{--------------Debug header record methods---------------}
+{--------------------------------------------------------}
+
+{ TFastMM_DebugBlockHeader }
+
+function TFastMM_DebugBlockHeader.DebugFooterPtr: PCardinal;
+begin
+  {The block footer follows immediately after the user data, the first dword of which is the footer checksum.}
+  Result := @PByte(@Self)[UserSize + CDebugBlockHeaderSize];
+end;
+
+function TFastMM_DebugBlockHeader.DebugFooter_AllocationStackTracePtr: PNativeUInt;
+begin
+  {The allocation stack trace follows immediately after the footer checksum.}
+  Result := @PByte(@Self)[UserSize + (CDebugBlockHeaderSize + CDebugBlockFooterCheckSumSize)];
+end;
+
+function TFastMM_DebugBlockHeader.DebugFooter_FreeStackTracePtr: PNativeUInt;
+begin
+  {The free stack trace follows immediately after the allocation stack trace.}
+  Result := @PByte(@Self)[UserSize + (StackTraceEntryCount * SizeOf(Pointer))
+    + (CDebugBlockHeaderSize + CDebugBlockFooterCheckSumSize)];
+end;
+
+procedure TFastMM_DebugBlockHeader.CalculateAndSetHeaderAndFooterCheckSums;
+begin
+  HeaderCheckSum := CalculateHeaderCheckSum;
+  DebugFooterPtr^ := CalculateFooterCheckSum;
+end;
+
+function TFastMM_DebugBlockHeader.CalculateFooterCheckSum: Cardinal;
+var
+  LPCurPos, LPEnd: PCardinal;
+begin
+  LPCurPos := PCardinal(DebugFooter_AllocationStackTracePtr);
+  LPEnd := @PByte(LPCurPos)[StackTraceEntryCount * (2 * SizeOf(Pointer))];
+
+  Result := Cardinal(-1);
+  while LPCurPos <> LPEnd do
+  begin
+    Result := Result xor LPCurPos^;
+    Inc(LPCurPos);
+  end;
+end;
+
+function TFastMM_DebugBlockHeader.CalculateHeaderCheckSum: Cardinal;
+var
+  LPCurPos, LPEnd: PCardinal;
+begin
+  LPCurPos := @HeaderCheckSum;
+  LPEnd := @PByte(@Self)[CDebugBlockHeaderSize];
+
+  Result := Cardinal(-1);
+  while True do
+  begin
+    Inc(LPCurPos);
+    if LPCurPos = LPEnd then
+      Break;
+
+    Result := Result xor LPCurPos^;
+  end;
+end;
 
 {------------------------------------------}
 {--------------Move routines---------------}
@@ -2827,16 +2908,20 @@ begin
   Result := AddTokenValue(ATokenValues, ATokenID, @LTempBuffer, CharCount(LPTarget, @LTempBuffer), Result, APBufferEnd);
 end;
 
-function AddTokenValue_StackTrace(var ATokenValues: TEventLogTokenValues; ATokenID: Integer;
-  const AStackTrace: TFastMM_StackTrace; APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
+function AddTokenValue_StackTrace(var ATokenValues: TEventLogTokenValues; ATokenID: Integer; APStackTrace: PNativeUInt;
+  AStackTraceEntryCount: Cardinal; APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 var
-  LStackTraceBuffer: array[0..CFastMM_StackTraceEntryCount * 160] of WideChar;
+  LStackTraceBuffer: array[0..CFastMM_StackTrace_MaximumEntryCount * 160] of WideChar;
   LPBuffer: PWideChar;
 begin
   Result := APTokenValueBufferPos;
 
-  LPBuffer := FastMM_ConvertStackTraceToText(@AStackTrace, CFastMM_StackTraceEntryCount, @LStackTraceBuffer,
-    @LStackTraceBuffer[High(LStackTraceBuffer)]);
+  LPBuffer := @LStackTraceBuffer;
+  if AStackTraceEntryCount > 0 then
+  begin
+    LPBuffer := FastMM_ConvertStackTraceToText(APStackTrace, AStackTraceEntryCount, LPBuffer,
+      @LStackTraceBuffer[High(LStackTraceBuffer)]);
+  end;
 
   Result := AddTokenValue(ATokenValues, ATokenID, LStackTraceBuffer, CharCount(LPBuffer, @LStackTraceBuffer), Result,
     APBufferEnd);
@@ -2981,16 +3066,16 @@ begin
     Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationNumber, LPDebugBlockHeader.AllocationNumber,
       Result, APBufferEnd);
 
-    Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenAllocationStackTrace, LPDebugBlockHeader.AllocationStackTrace,
-      Result, APBufferEnd);
+    Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenAllocationStackTrace,
+      LPDebugBlockHeader.DebugFooter_AllocationStackTracePtr, LPDebugBlockHeader.StackTraceEntryCount, Result, APBufferEnd);
 
     if LBlockHeader and CBlockIsFreeFlag = CBlockIsFreeFlag then
     begin
       Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenFreedByThread, LPDebugBlockHeader.FreedByThread,
         Result, APBufferEnd);
 
-      Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenFreeStackTrace, LPDebugBlockHeader.FreeStackTrace,
-        Result, APBufferEnd);
+      Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenFreeStackTrace, LPDebugBlockHeader.DebugFooter_FreeStackTracePtr,
+        LPDebugBlockHeader.StackTraceEntryCount, Result, APBufferEnd);
 
       {If it is a freed debug block then get the prior class from the debug header.}
       LBlockContentType := NativeUInt(DetectClassInstance(@LPDebugBlockHeader.PreviouslyUsedByClass));
@@ -3266,7 +3351,7 @@ end;
 procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(APMethodName: PWideChar);
 begin
   {Get the stack trace and then log the event.}
-  FastMM_GetStackTrace(@FVirtualMethodStackTrace, CFastMM_StackTraceEntryCount, 0);
+  FastMM_GetStackTrace(@FVirtualMethodStackTrace, Length(FVirtualMethodStackTrace), 0);
   VirtualMethodOnFreedObject_LogEvent(APMethodName);
 end;
 
@@ -3295,7 +3380,7 @@ begin
   LPBufferPos := AddTokenValue(LTokenValues, CEventLogTokenVirtualMethodName, APMethodName,
     GetStringLength(APMethodName), LPBufferPos, LPBufferEnd);
   AddTokenValue_StackTrace(LTokenValues, CEventLogTokenVirtualMethodCallOnFreedObject,
-    TFastMM_FreedObject.FVirtualMethodStackTrace, LPBufferPos, LPBufferEnd);
+    @TFastMM_FreedObject.FVirtualMethodStackTrace, Length(FVirtualMethodStackTrace), LPBufferPos, LPBufferEnd);
 
   LogEvent(mmetVirtualMethodCallOnFreedObject, LTokenValues);
 
@@ -3425,32 +3510,11 @@ begin
     PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and (not CHasDebugInfoFlag);
 end;
 
-function CalculateDebugBlockHeaderChecksum(APDebugBlockHeader: PFastMM_DebugBlockHeader): NativeUInt;
-var
-  LPCurPos: PNativeUInt;
+{Calculates the size of a debug block footer, given the number of stack trace entries.}
+function CalculateDebugBlockFooterSize(AStackTraceDepth: Byte): NativeInt; inline;
 begin
-  Result := 0;
-  LPCurPos := @APDebugBlockHeader.UserSize;
-  while True do
-  begin
-    Result := Result xor LPCurPos^;
-    Inc(LPCurPos);
-
-    if LPCurPos = @APDebugBlockHeader.HeaderCheckSum then
-      Break;
-  end;
-
-end;
-
-procedure SetDebugBlockHeaderAndFooterChecksums(APDebugBlockHeader: PFastMM_DebugBlockHeader);
-var
-  LHeaderChecksum: NativeUInt;
-  LPFooter: PNativeUInt;
-begin
-  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(APDebugBlockHeader);
-  APDebugBlockHeader.HeaderCheckSum := LHeaderChecksum;
-  LPFooter := PNativeUInt(PByte(APDebugBlockHeader) + APDebugBlockHeader.UserSize + SizeOf(TFastMM_DebugBlockHeader));
-  LPFooter^ := not LHeaderChecksum;
+  {The debug footer consists of a dword checksum, followed by the allocation and free stack traces.}
+  Result := CDebugBlockFooterCheckSumSize + AStackTraceDepth * (2 * SizeOf(Pointer));
 end;
 
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
@@ -3487,18 +3551,13 @@ end;
 {Checks the consistency of a block with embedded debug info.  Returns True if the block is intact, otherwise
 (optionally) logs and/or displays the error and returns False.}
 function CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
-var
-  LHeaderChecksum: NativeUInt;
-  LPFooter: PNativeUInt;
 begin
-  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(APDebugBlockHeader);
-  if APDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
+  if APDebugBlockHeader.CalculateHeaderCheckSum <> APDebugBlockHeader.HeaderCheckSum then
   begin
     LogDebugBlockHeaderInvalid(APDebugBlockHeader);
     Exit(False);
   end;
-  LPFooter := PNativeUInt(PByte(APDebugBlockHeader) + APDebugBlockHeader.UserSize + SizeOf(TFastMM_DebugBlockHeader));
-  if LPFooter^ <> (not LHeaderChecksum) then
+  if APDebugBlockHeader.CalculateFooterCheckSum <> APDebugBlockHeader.DebugFooterPtr^ then
   begin
     LogDebugBlockFooterInvalid(APDebugBlockHeader);
     Exit(False);
@@ -3740,6 +3799,7 @@ begin
   OS_AllowOtherThreadToRun;
 end;
 
+
 {-----------------------------------------}
 {--------Debug block management-----------}
 {-----------------------------------------}
@@ -3756,7 +3816,8 @@ begin
 
   {Update the information in the block header.}
   LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
-  FastMM_GetStackTrace(@LPActualBlock.FreeStackTrace, CFastMM_StackTraceEntryCount, CFastMM_StackTrace_SkipFrames_FreeMem);
+  if LPActualBlock.StackTraceEntryCount > 0 then
+    FastMM_GetStackTrace(LPActualBlock.DebugFooter_FreeStackTracePtr, LPActualBlock.StackTraceEntryCount, CFastMM_StackTrace_SkipFrames_FreeMem);
   LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
 
   {Fill the user area of the block with the debug pattern.}
@@ -3766,7 +3827,7 @@ begin
   LPActualBlock.DebugBlockFlags := CIsDebugBlockFlag or CBlockIsFreeFlag;
 
   {Update the header and footer checksums}
-  SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
+  LPActualBlock.CalculateAndSetHeaderAndFooterCheckSums;
 
   {Return the actual block to the memory pool.}
   Result := FastMM_FreeMem(LPActualBlock);
@@ -3776,7 +3837,8 @@ end;
 function FastMM_ReallocMem_ReallocDebugBlock(APointer: Pointer; ANewSize: NativeInt): Pointer;
 var
   LPActualBlock: PFastMM_DebugBlockHeader;
-  LAvailableSpace: NativeInt;
+  LAvailableSpace, LDebugFooterSize: NativeInt;
+  LPOldFooter, LPNewFooter: Pointer;
 begin
   LPActualBlock := @PFastMM_DebugBlockHeader(APointer)[-1];
 
@@ -3786,28 +3848,42 @@ begin
 
   {Can the block be resized in-place?}
   LAvailableSpace := FastMM_BlockMaximumUserBytes(LPActualBlock);
-  if LAvailableSpace >= ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize) then
+  LDebugFooterSize := CalculateDebugBlockFooterSize(LPActualBlock.StackTraceEntryCount);
+  if LAvailableSpace >= (ANewSize + CDebugBlockHeaderSize + LDebugFooterSize) then
   begin
-    {Update the user block size and set the new header and footer checksums.}
+    LPOldFooter := LPActualBlock.DebugFooterPtr;
+
+    {Update the user block size and set the new header checksum.  The footer checksum should be unchanged.}
     LPActualBlock.UserSize := ANewSize;
-    SetDebugBlockHeaderAndFooterChecksums(LPActualBlock);
+    LPActualBlock.HeaderCheckSum := LPActualBlock.CalculateHeaderCheckSum;
+
+    {Move the debug footer just beyond the new user size.}
+    LPNewFooter := LPActualBlock.DebugFooterPtr;
+    System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
 
     Result := APointer;
   end
   else
   begin
     {The new size cannot fit in the existing block:  We need to allocate a new block.}
-    Result := FastMM_GetMem(ANewSize + (CDebugBlockHeaderSize + CDebugBlockFooterSize));
+    Result := FastMM_GetMem(ANewSize + CDebugBlockHeaderSize + LDebugFooterSize);
 
     if Result <> nil then
     begin
-      {Move the old data across and free the old block.}
+      {Move the old header and data across}
       System.Move(LPActualBlock^, Result^, LPActualBlock.UserSize + CDebugBlockHeaderSize);
-      FastMM_FreeMem_FreeDebugBlock(APointer);
 
-      {Update the user block size and set the new header and footer checksums.}
+      {Set the user size in the header for the new block and calculate the new header checksum.}
       PFastMM_DebugBlockHeader(Result).UserSize := ANewSize;
-      SetDebugBlockHeaderAndFooterChecksums(PFastMM_DebugBlockHeader(Result));
+      PFastMM_DebugBlockHeader(Result).HeaderCheckSum := PFastMM_DebugBlockHeader(Result).CalculateHeaderCheckSum;
+
+      {Move the debug footer over to the end of the user data.}
+      LPOldFooter := LPActualBlock.DebugFooterPtr;
+      LPNewFooter := PFastMM_DebugBlockHeader(Result).DebugFooterPtr;
+      System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+
+      {Free the old block.}
+      FastMM_FreeMem_FreeDebugBlock(APointer);
 
       {Set the flag in the actual block header to indicate that the block contains debug information.}
       SetBlockHasDebugInfo(Result, True);
@@ -3841,7 +3917,7 @@ begin
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
-  LHeaderChecksum := CalculateDebugBlockHeaderChecksum(LPDebugBlockHeader);
+  LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
     Exit(-1);
 
@@ -7289,23 +7365,32 @@ end;
 {--------------------------------------------------------}
 
 function FastMM_DebugGetMem_GetDebugBlock(ASize: NativeInt; AFillBlockWithDebugPattern: Boolean): Pointer;
+var
+  LStackTraceDepth: Byte;
 begin
-  Result := FastMM_GetMem(ASize + (CDebugBlockHeaderSize + CDebugBlockFooterSize));
+  LStackTraceDepth := DebugMode_StackTrace_EntryCount;
+
+  {Add the size of the debug header, footer checksum and two stack traces to the allocation size.}
+  Result := FastMM_GetMem(ASize + CDebugBlockHeaderSize + CalculateDebugBlockFooterSize(LStackTraceDepth));
   if Result = nil then
     Exit;
 
   {Populate the debug header and set the header and footer checksums.}
   PFastMM_DebugBlockHeader(Result).UserSize := ASize;
+  PFastMM_DebugBlockHeader(Result).StackTraceEntryCount := LStackTraceDepth;
   PFastMM_DebugBlockHeader(Result).PreviouslyUsedByClass := nil;
-  FastMM_GetStackTrace(@PFastMM_DebugBlockHeader(Result).AllocationStackTrace, CFastMM_StackTraceEntryCount,
-    CFastMM_StackTrace_SkipFrames_GetMem);
-  PFastMM_DebugBlockHeader(Result).FreeStackTrace := Default(TFastMM_StackTrace);
+  if LStackTraceDepth > 0 then
+  begin
+    FastMM_GetStackTrace(PFastMM_DebugBlockHeader(Result).DebugFooter_AllocationStackTracePtr, LStackTraceDepth,
+      CFastMM_StackTrace_SkipFrames_GetMem);
+    FillChar(PFastMM_DebugBlockHeader(Result).DebugFooter_FreeStackTracePtr^, LStackTraceDepth * SizeOf(Pointer), 0);
+  end;
   PFastMM_DebugBlockHeader(Result).AllocationGroup := FastMM_CurrentAllocationGroup;
   PFastMM_DebugBlockHeader(Result).AllocationNumber := AtomicIncrement(FastMM_LastAllocationNumber);
   PFastMM_DebugBlockHeader(Result).AllocatedByThread := OS_GetCurrentThreadID;
   PFastMM_DebugBlockHeader(Result).FreedByThread := 0;
   PFastMM_DebugBlockHeader(Result).DebugBlockFlags := CIsDebugBlockFlag;
-  SetDebugBlockHeaderAndFooterChecksums(Result);
+  PFastMM_DebugBlockHeader(Result).CalculateAndSetHeaderAndFooterCheckSums;
 
   {Fill the block with the debug pattern}
   if AFillBlockWithDebugPattern then
@@ -7371,8 +7456,11 @@ function FastMM_DebugAllocMem(ASize: NativeInt): Pointer;
 begin
   Result := FastMM_DebugGetMem_GetDebugBlock(ASize, False);
   {Large blocks are already zero filled}
-  if (Result <> nil) and (ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize - CDebugBlockFooterSize)) then
+  if (Result <> nil)
+    and (ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize - CalculateDebugBlockFooterSize(PFastMM_DebugBlockHeader(Result).StackTraceEntryCount))) then
+  begin
     FillChar(Result^, ASize, 0);
+  end;
 end;
 
 procedure FastMM_NoOpGetStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
@@ -7396,7 +7484,7 @@ end;
 function FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
   APBufferPosition, APBufferEnd: PWideChar): PWideChar;
 var
-  LAnsiBuffer: array[0..CFastMM_StackTraceEntryCount * 256] of AnsiChar;
+  LAnsiBuffer: array[0..CFastMM_StackTrace_MaximumEntryCount * 256] of AnsiChar;
   LPEnd, LPCurPos: PAnsiChar;
 begin
   Result := APBufferPosition;
@@ -9151,6 +9239,7 @@ begin
   {---------General configuration-------}
 
   FastMM_SetOptimizationStrategy(mmosBalanced);
+  FastMM_SetDebugModeStackTraceEntryCount(CFastMM_StackTrace_DefaultEntryCount);
 
   GetMemoryManager(PreviousMemoryManager);
   InstalledMemoryManager := PreviousMemoryManager;
@@ -9543,6 +9632,19 @@ end;
 function FastMM_DebugModeActive: Boolean;
 begin
   Result := DebugModeCounter > 0;
+end;
+
+function FastMM_GetDebugModeStackTraceEntryCount: Byte;
+begin
+  Result := DebugMode_StackTrace_EntryCount;
+end;
+
+procedure FastMM_SetDebugModeStackTraceEntryCount(AStackTraceEntryCount: Byte);
+begin
+  if AStackTraceEntryCount > CFastMM_StackTrace_MaximumEntryCount then
+    AStackTraceEntryCount := CFastMM_StackTrace_MaximumEntryCount;
+
+  DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
 end;
 
 procedure FastMM_ApplyLegacyConditionalDefines;
