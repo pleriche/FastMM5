@@ -8560,8 +8560,7 @@ begin
   end
   else
   begin
-    {Either another memory manager has been set or this memory manager is
-     already being shared}
+    {Either another memory manager has been set or this memory manager is already being shared}
     Result := False;
   end;
 end;
