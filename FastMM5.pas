@@ -326,6 +326,12 @@ function FastMM_FreeMem(APointer: Pointer): Integer;
 function FastMM_ReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
 function FastMM_AllocMem(ASize: NativeInt): Pointer;
 
+{------------------------Debug mode core memory manager interface------------------------}
+function FastMM_DebugGetMem(ASize: NativeInt): Pointer;
+function FastMM_DebugFreeMem(APointer: Pointer): Integer;
+function FastMM_DebugReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
+function FastMM_DebugAllocMem(ASize: NativeInt): Pointer;
+
 {------------------------Expected memory leak management------------------------}
 
 {Registers expected memory leaks.  Returns True on success.  The list of leaked blocks is limited, so failure is
