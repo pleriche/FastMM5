@@ -490,7 +490,10 @@ var
   load this library, unless handlers for both FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have already been
   set.}
   FastMM_DebugSupportLibraryName: PWideChar = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
-
+  {If True then FastMM will not be finalized and uninstalled when this unit is finalized.  Use this option when for some
+  reason there are live pointers that will still be in use after this unit is finalized.  Under normal operation this
+  should not be necessary.}
+  FastMM_NeverUninstall: Boolean = False;
   {The events that are passed to OutputDebugString.}
   FastMM_OutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
     mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
@@ -553,7 +556,6 @@ var
     22: The number of instances of the class (FastMM_LogStateToFile)
     23: The average number of bytes per instance for the class (FastMM_LogStateToFile)
     24: The stack trace for a virtual method call on a freed object
-
   }
 
   {This entry precedes every entry in the event log.}
@@ -9708,6 +9710,10 @@ begin
   {$ifdef AttemptToUseSharedMM}
   FastMM_AttemptToUseSharedMemoryManager;
   {$endif}
+
+  {$ifdef NeverUninstall}
+  FastMM_NeverUninstall := True;
+  {$endif}
 end;
 
 procedure FastMM_SetDefaultEventLogFilename;
@@ -9786,7 +9792,8 @@ begin
   Result := OS_DeleteFile(@EventLogFilename);
 end;
 
-initialization
+procedure FastMM_UnitInitialization;
+begin
   FastMM_InitializeMemoryManager;
   FastMM_InstallMemoryManager;
 
@@ -9794,9 +9801,10 @@ initialization
   accordingly.}
   if CurrentInstallationState = mmisInstalled then
     FastMM_ApplyLegacyConditionalDefines;
+end;
 
-finalization
-
+procedure FastMM_UnitFinalization;
+begin
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
   FastMM has been uninstalled:  https://quality.embarcadero.com/browse/RSP-16796}
   if CurrentInstallationState = mmisInstalled then
@@ -9813,11 +9821,21 @@ finalization
   if [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary] * (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents) <> [] then
     FastMM_PerformMemoryLeakCheck;
 
-  FastMM_FinalizeMemoryManager;
-  FastMM_UninstallMemoryManager;
+  if not FastMM_NeverUninstall then
+  begin
+    FastMM_FinalizeMemoryManager;
+    FastMM_UninstallMemoryManager;
 
-  {Free all memory.  If this is a .DLL that owns its own memory manager, then it is necessary to prevent the main
-  application from running out of address space.}
-  FastMM_FreeAllMemory;
+    {Free all memory.  If this is a .DLL that owns its own memory manager, then it is necessary to prevent the main
+    application from running out of address space.}
+    FastMM_FreeAllMemory;
+  end;
+end;
+
+initialization
+  FastMM_UnitInitialization;
+
+finalization
+  FastMM_UnitFinalization;
 
 end.
