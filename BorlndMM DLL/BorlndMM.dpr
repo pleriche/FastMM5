@@ -17,7 +17,9 @@ Usage:
 library BorlndMM;
 
 uses
-  FastMM5;
+  FastMM5,
+  {System.SysUtils is needed for exception handling.}
+  System.SysUtils;
 
 {$R *.RES}
 
@@ -46,6 +48,36 @@ function HeapAddRef: Integer;
 begin
   {Do nothing}
   Result := 2;
+end;
+
+function FastMM_GetOutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet;
+begin
+  Result := FastMM_OutputDebugStringEvents;
+end;
+
+procedure FastMM_SetOutputDebugStringEvents(AEventTypes: TFastMM_MemoryManagerEventTypeSet);
+begin
+  FastMM_OutputDebugStringEvents := AEventTypes;
+end;
+
+function FastMM_GetLogToFileEvents: TFastMM_MemoryManagerEventTypeSet;
+begin
+  Result := FastMM_LogToFileEvents;
+end;
+
+procedure FastMM_SetLogToFileEvents(AEventTypes: TFastMM_MemoryManagerEventTypeSet);
+begin
+  FastMM_LogToFileEvents := AEventTypes;
+end;
+
+function FastMM_GetMessageBoxEvents: TFastMM_MemoryManagerEventTypeSet;
+begin
+  Result := FastMM_MessageBoxEvents;
+end;
+
+procedure FastMM_SetMessageBoxEvents(AEventTypes: TFastMM_MemoryManagerEventTypeSet);
+begin
+  FastMM_MessageBoxEvents := AEventTypes;
 end;
 
 {$ifdef DEBUG}
@@ -78,7 +110,25 @@ exports
   FastMM_RegisterExpectedMemoryLeak(ALeakedPointer: Pointer) name '@Borlndmm@SysRegisterExpectedMemoryLeak$qqrpi',
   FastMM_UnregisterExpectedMemoryLeak(ALeakedPointer: Pointer) name '@Borlndmm@SysUnregisterExpectedMemoryLeak$qqrpi',
   HeapRelease name '@Borlndmm@HeapRelease$qqrv',
-  HeapAddRef name '@Borlndmm@HeapAddRef$qqrv';
+  HeapAddRef name '@Borlndmm@HeapAddRef$qqrv',
+  {Export additional calls in order to make FastMM specific functionality available to the application and/or library.}
+  FastMM_WalkBlocks,
+  FastMM_ScanDebugBlocksForCorruption,
+  FastMM_GetUsageSummary,
+  FastMM_LogStateToFile,
+  FastMM_EnterMinimumAddressAlignment,
+  FastMM_ExitMinimumAddressAlignment,
+  FastMM_GetCurrentMinimumAddressAlignment,
+  FastMM_SetDefaultEventLogFilename,
+  FastMM_SetEventLogFilename,
+  FastMM_GetEventLogFilename,
+  FastMM_DeleteEventLogFile,
+  FastMM_GetOutputDebugStringEvents,
+  FastMM_SetOutputDebugStringEvents,
+  FastMM_GetLogToFileEvents,
+  FastMM_SetLogToFileEvents,
+  FastMM_GetMessageBoxEvents,
+  FastMM_SetMessageBoxEvents;
 
 begin
 {$ifdef DEBUG}
