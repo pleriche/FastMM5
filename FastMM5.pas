@@ -374,8 +374,10 @@ function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockType
 {Walks all debug mode blocks (blocks that were allocated between a FastMM_EnterDebugMode and FastMM_ExitDebugMode call),
 checking for corruption of the debug header, footer, and in the case of freed blocks whether the block content was
 modified after the block was freed.  If a corruption is encountered an error message will be logged and/or displayed
-(as per the error logging configuration) and an invalid pointer exception will be raised.}
-procedure FastMM_ScanDebugBlocksForCorruption;
+(as per the error logging configuration) and an invalid pointer exception will be raised.  This is a function that
+always returns True (unless an exception is raised), so may be used in a debug watch to scan blocks every time the
+debugger stops on a breakpoint, etc.}
+function FastMM_ScanDebugBlocksForCorruption: Boolean;
 
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
@@ -8031,9 +8033,11 @@ begin
     System.Error(reInvalidPtr);
 end;
 
-procedure FastMM_ScanDebugBlocksForCorruption;
+function FastMM_ScanDebugBlocksForCorruption: Boolean;
 begin
   FastMM_WalkBlocks(FastMM_ScanDebugBlocksForCorruption_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], False);
+
+  Result := True;
 end;
 
 procedure FastMM_GetHeapStatus_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
