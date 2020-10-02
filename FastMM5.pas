@@ -485,6 +485,11 @@ var
   FastMM_GetStackTrace: TFastMM_GetStackTrace;
   FastMM_ConvertStackTraceToText: TFastMM_ConvertStackTraceToText;
 
+  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
+  loaded.}
+  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
+  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
+
   {---------Debug options---------}
 
   {The name of the library that contains the functionality used to obtain the current call stack, and also to convert a
@@ -1433,10 +1438,8 @@ var
   {The handle to the debug mode support DLL.}
   DebugSupportLibraryHandle: NativeUInt;
   DebugSupportConfigured: Boolean;
-  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
-  loaded.}
-  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
-  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
+  {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
+  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
   DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
 
   {The full path and filename for the event log.}
@@ -9593,6 +9596,10 @@ begin
 
   FreeLibrary(DebugSupportLibraryHandle);
   DebugSupportLibraryHandle := 0;
+
+  DebugLibrary_GetRawStackTrace := nil;
+  DebugLibrary_GetFrameBasedStackTrace := nil;
+  DebugLibrary_LogStackTrace_Legacy := nil;
 
   Result := True;
 end;
