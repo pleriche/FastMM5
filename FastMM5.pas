@@ -8863,13 +8863,13 @@ begin
   i := 0;
   if APLeakSummary.LeakCount > 0 then
   begin
+    {$if CompilerVersion < 31}
+    LChildDirection := False; //Workaround for spurious warning with older compilers
+    {$endif}
     while True do
     begin
       LPSummaryEntry := @APLeakSummary.MemoryLeakEntries[i];
 
-      {$if CompilerVersion < 31}
-      LChildDirection := False; //Workaround for spurious warning with older compilers
-      {$endif}
       if ABlockUsableSize <> LPSummaryEntry.BlockUsableSize then
       begin
         LChildDirection := ABlockUsableSize > LPSummaryEntry.BlockUsableSize;
