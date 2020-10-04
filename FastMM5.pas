@@ -408,6 +408,17 @@ function FastMM_ShareMemoryManager: Boolean;
 
 {------------------------Configuration------------------------}
 
+{Executes the initialization and finalization code for the memory manager.  FastMM_Initialize will run during unit
+initialization and FastMM_Finalize during unit finalization, unless "FastMM_DisableAutomaticInstall" is defined.  If
+"FastMM_DisableAutomaticInstall" is defined then FastMM_Initialize must be called from application code in order to
+initialize and install the memory manager, and FastMM_Finalize must be called to uninstall it and perform leak checks,
+etc.  Note that FastMM cannot be installed if another third party memory manager has already been installed, or if
+memory has already been allocated through the default memory manager.  FastMM_Initialize will return True on successful
+installation, False otherwise.  FastMM_Finalize will return True if FastMM_Initialize was previously called, False
+otherwise.}
+function FastMM_Initialize: Boolean;
+function FastMM_Finalize: Boolean;
+
 {Returns the current installation state of the memory manager.}
 function FastMM_GetInstallationState: TFastMM_MemoryManagerInstallationState;
 
@@ -1418,6 +1429,8 @@ var
   EmergencyReserveAddressSpace: Pointer;
 {$endif}
 
+  {True between the FastMM_Initialize call and the FastMM_Finalize call.}
+  UnitCurrentlyInitialized: Boolean;
   {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
 
@@ -9803,28 +9816,42 @@ begin
   Result := OS_DeleteFile(@EventLogFilename);
 end;
 
-procedure FastMM_UnitInitialization;
+function FastMM_Initialize: Boolean;
 begin
+  {Ignore attemts to initialize twice.}
+  if UnitCurrentlyInitialized then
+    Exit(False);
+  UnitCurrentlyInitialized := True;
+
   FastMM_InitializeMemoryManager;
   FastMM_InstallMemoryManager;
 
   {If installation was successful, check for any legacy FastMM4 conditional defines and adjust the configuration
   accordingly.}
   if CurrentInstallationState = mmisInstalled then
+  begin
     FastMM_ApplyLegacyConditionalDefines;
+    Result := True;
+  end
+  else
+    Result := False;
 end;
 
-procedure FastMM_UnitFinalization;
+function FastMM_Finalize: Boolean;
 begin
+  if not UnitCurrentlyInitialized then
+    Exit(False);
+  UnitCurrentlyInitialized := False;
+
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
   FastMM has been uninstalled:  https://quality.embarcadero.com/browse/RSP-16796}
   if CurrentInstallationState = mmisInstalled then
     SetLocaleOverride('');
 
-  {All pending frees must be released before we can do a leak check.}
+  {All pending frees must be released before a leak check can be performed.}
   FastMM_ProcessAllPendingFrees;
 
-  {Backward compatibility: If ReportMemoryLeaksOnShutdown = True then display the the leak summary.}
+  {Backward compatibility: If ReportMemoryLeaksOnShutdown = True then display the leak summary.}
   if ReportMemoryLeaksOnShutdown then
     Include(FastMM_MessageBoxEvents, mmetUnexpectedMemoryLeakSummary);
 
@@ -9841,12 +9868,16 @@ begin
     application from running out of address space.}
     FastMM_FreeAllMemory;
   end;
+
+  Result := True;
 end;
 
+{$ifndef FastMM_DisableAutomaticInstall}
 initialization
-  FastMM_UnitInitialization;
+  FastMM_Initialize;
 
 finalization
-  FastMM_UnitFinalization;
+  FastMM_Finalize;
+{$endif}
 
 end.
