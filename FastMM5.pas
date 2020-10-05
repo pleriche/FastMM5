@@ -512,6 +512,10 @@ var
   reason there are live pointers that will still be in use after this unit is finalized.  Under normal operation this
   should not be necessary.}
   FastMM_NeverUninstall: Boolean = False;
+  {When this variable is True and debug mode is enabled, all debug blocks will be checked for corruption on entry to any
+  memory manager operation (i.e. GetMem, FreeMem, AllocMem and ReallocMem).  Note that this comes with an extreme
+  performance penalty.}
+  FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation: Boolean = False;
   {The events that are passed to OutputDebugString.}
   FastMM_OutputDebugStringEvents: TFastMM_MemoryManagerEventTypeSet = [mmetDebugBlockDoubleFree,
     mmetDebugBlockReallocOfFreedBlock, mmetDebugBlockHeaderCorruption, mmetDebugBlockFooterCorruption,
@@ -7431,11 +7435,17 @@ end;
 
 function FastMM_DebugGetMem(ASize: NativeInt): Pointer;
 begin
+  if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
+    FastMM_ScanDebugBlocksForCorruption;
+
   Result := FastMM_DebugGetMem_GetDebugBlock(ASize, True);
 end;
 
 function FastMM_DebugFreeMem(APointer: Pointer): Integer;
 begin
+  if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
+    FastMM_ScanDebugBlocksForCorruption;
+
   Result := FastMM_FreeMem(APointer);
 end;
 
@@ -7444,6 +7454,9 @@ var
   LBlockHeader: Integer;
   LMoveCount: NativeInt;
 begin
+  if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
+    FastMM_ScanDebugBlocksForCorruption;
+
   {Read the flags from the block header.}
   LBlockHeader := PBlockStatusFlags(APointer)[-1];
 
@@ -7480,6 +7493,9 @@ end;
 
 function FastMM_DebugAllocMem(ASize: NativeInt): Pointer;
 begin
+  if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
+    FastMM_ScanDebugBlocksForCorruption;
+
   Result := FastMM_DebugGetMem_GetDebugBlock(ASize, False);
   {Large blocks are already zero filled}
   if (Result <> nil)
