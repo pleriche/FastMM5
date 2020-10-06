@@ -129,12 +129,64 @@ const
   of thread contention happening (when the number of threads inside a GetMem call is greater than the number of arenas),
   at a slightly higher fixed cost per GetMem call.  Usually two threads can be served simultaneously from the same arena
   (a new block can be split off for one thread while a freed block can be recycled for the other), so the optimal number
-  of arenas is usually somewhere between 0.5x and 1x the number of threads.  If you suspect that thread contention may
-  be dragging down performance, inspect the FastMM_...BlockThreadContentionCount variables - if their numbers are high
-  then an increase in the number of arenas will reduce thread contention.}
+  of arenas is usually somewhere between 0.5x and 1x the number of threads.  Large block arenas are cheaper in both
+  performance and memory usage than small and medium block arenas, so typically more large block arenas are used.  If
+  you suspect that thread contention may be dragging down performance, inspect the FastMM_...BlockThreadContentionCount
+  variables - if their numbers are high then an increase in the number of arenas will reduce thread contention.}
+{$if defined(FastMM_16Arenas)}
+  CFastMM_SmallBlockArenaCount = 16;
+  CFastMM_MediumBlockArenaCount = 16;
+  CFastMM_LargeBlockArenaCount = 16;
+{$elseif defined(FastMM_15Arenas)}
+  CFastMM_SmallBlockArenaCount = 15;
+  CFastMM_MediumBlockArenaCount = 15;
+  CFastMM_LargeBlockArenaCount = 15;
+{$elseif defined(FastMM_14Arenas)}
+  CFastMM_SmallBlockArenaCount = 14;
+  CFastMM_MediumBlockArenaCount = 14;
+  CFastMM_LargeBlockArenaCount = 14;
+{$elseif defined(FastMM_13Arenas)}
+  CFastMM_SmallBlockArenaCount = 13;
+  CFastMM_MediumBlockArenaCount = 13;
+  CFastMM_LargeBlockArenaCount = 13;
+{$elseif defined(FastMM_12Arenas)}
+  CFastMM_SmallBlockArenaCount = 12;
+  CFastMM_MediumBlockArenaCount = 12;
+  CFastMM_LargeBlockArenaCount = 12;
+{$elseif defined(FastMM_11Arenas)}
+  CFastMM_SmallBlockArenaCount = 11;
+  CFastMM_MediumBlockArenaCount = 11;
+  CFastMM_LargeBlockArenaCount = 11;
+{$elseif defined(FastMM_10Arenas)}
+  CFastMM_SmallBlockArenaCount = 10;
+  CFastMM_MediumBlockArenaCount = 10;
+  CFastMM_LargeBlockArenaCount = 10;
+{$elseif defined(FastMM_9Arenas)}
+  CFastMM_SmallBlockArenaCount = 9;
+  CFastMM_MediumBlockArenaCount = 9;
+  CFastMM_LargeBlockArenaCount = 9;
+{$elseif defined(FastMM_8Arenas)}
+  CFastMM_SmallBlockArenaCount = 8;
+  CFastMM_MediumBlockArenaCount = 8;
+  CFastMM_LargeBlockArenaCount = 8;
+{$elseif defined(FastMM_7Arenas)}
+  CFastMM_SmallBlockArenaCount = 7;
+  CFastMM_MediumBlockArenaCount = 7;
+  CFastMM_LargeBlockArenaCount = 8;
+{$elseif defined(FastMM_6Arenas)}
+  CFastMM_SmallBlockArenaCount = 6;
+  CFastMM_MediumBlockArenaCount = 6;
+  CFastMM_LargeBlockArenaCount = 8;
+{$elseif defined(FastMM_5Arenas)}
+  CFastMM_SmallBlockArenaCount = 5;
+  CFastMM_MediumBlockArenaCount = 5;
+  CFastMM_LargeBlockArenaCount = 8;
+{$else}
+  {Default values - typically performs fine up to 8 simultaneous threads.}
   CFastMM_SmallBlockArenaCount = 4;
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
+{$endif}
 
 type
 
