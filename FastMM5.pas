@@ -7,7 +7,7 @@ Description:
   cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
 Developed by:
-  Pierre le Riche
+  Pierre le Riche, copyright 2004 - 2020, all rights reserved
 
 Sponsored by:
   gs-soft AG
@@ -28,7 +28,7 @@ Licence:
     5 developers = $399
     >5 developers = $399 + $50 per developer from the 6th onwards
     site licence = $999 (unlimited number of developers affiliated with the owner of the licence, i.e. employees,
-    co-workers and contractors)
+    co-workers, interns and contractors)
 
   Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made.  Payment may be
   made via PayPal at https://www.paypal.me/fastmm (paypal@leriche.org), or via bank transfer.  Bank details will be

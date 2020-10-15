@@ -13,7 +13,7 @@ Version 5 is a complete rewrite of FastMM. It is designed from the ground up to 
 Homepage: https://github.com/pleriche/FastMM5
 
 ### Developed by
-Pierre le Riche
+Pierre le Riche, copyright 2004 - 2020, all rights reserved
 
 ### Sponsored by
 [gs-soft AG](https://www.gs-soft.com/)
@@ -28,7 +28,7 @@ FastMM 5 is dual-licensed.  You may choose to use it under the restrictions of t
 <tr><td>4 developers</td><td>$339</td></tr>
 <tr><td>5 developers</td><td>$399</td></tr>
 <tr><td>More than 5 developers</td><td>$399 + $50 per developer from the 6th onwards</td></tr>
-<tr><td>Site licence (unlimited number of developers affiliated with the owner of the licence, i.e. employees, co-workers and contractors)</td><td>$999</td></tr>
+<tr><td>Site licence (unlimited number of developers affiliated with the owner of the licence, i.e. employees, co-workers, interns and contractors)</td><td>$999</td></tr>
 </table>
 
 Please send an e-mail to fastmm@leriche.org to request an invoice before or after payment is made.  Payment may be made via PayPal at https://www.paypal.me/fastmm (paypal@leriche.org), or via bank transfer.  Bank details will be provided on the invoice.
