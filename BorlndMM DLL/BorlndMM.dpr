@@ -14,6 +14,7 @@ Usage:
 
 {$IMAGEBASE $00D20000}
 
+// JCL_DEBUG_EXPERT_INSERTJDBG ON
 library BorlndMM;
 
 uses
