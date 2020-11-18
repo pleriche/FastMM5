@@ -325,6 +325,10 @@ type
 
   TFastMM_WalkBlocksCallback = procedure(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
 
+  {The enumeration returned by the FastMM_DetectStringData, which is used to determine whether a memory block
+  potentially contains string data.}
+  TFastMM_StringDataType = (sdtNotAString, sdtAnsiString, sdtUnicodeString);
+
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
 
@@ -422,6 +426,15 @@ wait to acquire a lock on an arena, skipping the arena if it is unable to do so.
 successfully, False if one or more arenas were skipped due to a lock timeout.}
 function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
   AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil; ALockTimeoutMilliseconds: Cardinal = 1000): Boolean;
+
+{Attempts to determine whether APMemoryBlock points to string data.  Used by the leak classification code when a block
+cannot be identified as a class instance.  May also be used inside the FastMM_WalkBlocks callback in order to determine
+the content of walked blocks.}
+function FastMM_DetectStringData(APMemoryBlock: Pointer; AAvailableSpaceInBlock: NativeInt): TFastMM_StringDataType;
+{Attempts to determine whether APointer points to a valid class instance.  Returns the class if it does, otherwise nil.
+APointer is assumed to point to to at least 4 (32-bit) or 8 (64-bit) readable bytes of memory.  This may be used inside
+the FastMM_WalkBlocks callback in order to determine the content of walked blocks.}
+function FastMM_DetectClassInstance(APointer: Pointer): TClass;
 
 {Walks all debug mode blocks (blocks that were allocated between a FastMM_EnterDebugMode and FastMM_ExitDebugMode call),
 checking for corruption of the debug header, footer, and in the case of freed blocks whether the block content was
@@ -1265,9 +1278,6 @@ type
     RegionIsFree: Boolean;
     AccessRights: TMemoryAccessRights;
   end;
-
-  {Used by the DetectStringData routine to detect whether a leaked block contains string data.}
-  TStringDataType = (stNotAString, stAnsiString, stUnicodeString);
 
   {An entry in the binary search tree of memory leaks.  Leaks are grouped by block size and class.}
   TMemoryLeakSummaryEntry = record
@@ -2451,8 +2461,9 @@ begin
   end;
 end;
 
-{Returns the class for a memory block.  Returns nil if it is not a valid class.  Used by the leak detection code.}
-function DetectClassInstance(APointer: Pointer): TClass;
+{Attempts to determine whether APointer points to a valid class instance.  Returns the class if it does, otherwise nil.
+APointer is assumed to point to to at least 4 (32-bit) or 8 (64-bit) readable bytes of memory.}
+function FastMM_DetectClassInstance(APointer: Pointer): TClass;
 var
   LMemoryRegionInfo: TMemoryRegionInfo;
 
@@ -2516,9 +2527,9 @@ begin
     Result := nil;
 end;
 
-{Detects the probable string data type for a memory block.  Used by the leak classification code when a block cannot be
-identified as a known class instance.}
-function DetectStringData(APMemoryBlock: Pointer; AAvailableSpaceInBlock: NativeInt): TStringDataType;
+{Attempts to determine whether APMemoryBlock points to string data.  Used by the leak classification code when a block
+cannot be identified as a class instance.}
+function FastMM_DetectStringData(APMemoryBlock: Pointer; AAvailableSpaceInBlock: NativeInt): TFastMM_StringDataType;
 type
   {The layout of a string header.}
   PStrRec = ^StrRec;
@@ -2545,19 +2556,19 @@ var
 begin
   {Check that the reference count is within a reasonable range}
   if PStrRec(APMemoryBlock).refCnt > CMaxRefCount then
-    Exit(stNotAString);
+    Exit(sdtNotAString);
 
   {Element size must be either 1 (Ansi) or 2 (Unicode)}
   LElementSize := PStrRec(APMemoryBlock).elemSize;
   if (LElementSize <> 1) and (LElementSize <> 2) then
-    Exit(stNotAString);
+    Exit(sdtNotAString);
 
   {Get the string length and check whether it fits inside the block}
   LStringLength := PStrRec(APMemoryBlock).length;
   if (LStringLength <= 0)
     or (LStringLength >= (AAvailableSpaceInBlock - SizeOf(StrRec)) div LElementSize) then
   begin
-    Exit(stNotAString);
+    Exit(sdtNotAString);
   end;
 
   {Check for no characters outside the expected range.  If there are, then it is probably not a string.}
@@ -2567,16 +2578,16 @@ begin
 
     {There must be a trailing #0}
     if LPAnsiString[LStringLength] <> #0 then
-      Exit(stNotAString);
+      Exit(sdtNotAString);
 
     {Check that all characters are in the range considered valid.}
     for LCharInd := 0 to LStringLength - 1 do
     begin
       if LPAnsiString[LCharInd] < CMinCharCode then
-        Exit(stNotAString);
+        Exit(sdtNotAString);
     end;
 
-    Result := stAnsiString;
+    Result := sdtAnsiString;
   end
   else
   begin
@@ -2584,16 +2595,16 @@ begin
 
     {There must be a trailing #0}
     if LPUnicodeString[LStringLength] <> #0 then
-      Exit(stNotAString);
+      Exit(sdtNotAString);
 
     {Check that all characters are in the range considered valid.}
     for LCharInd := 0 to LStringLength - 1 do
     begin
       if LPUnicodeString[LCharInd] < CMinCharCode then
-        Exit(stNotAString);
+        Exit(sdtNotAString);
     end;
 
-    Result := stUnicodeString;
+    Result := sdtUnicodeString;
   end;
 end;
 
@@ -2605,14 +2616,14 @@ end;
 function DetectBlockContentType(APMemoryBlock: Pointer; AAvailableSpaceInBlock: NativeInt): NativeUInt;
 var
   LLeakedClass: TClass;
-  LStringType: TStringDataType;
+  LStringType: TFastMM_StringDataType;
 begin
   {Attempt to determine the class type for the block.}
-  LLeakedClass := DetectClassInstance(APMemoryBlock);
+  LLeakedClass := FastMM_DetectClassInstance(APMemoryBlock);
   if LLeakedClass <> nil then
     Exit(NativeUInt(LLeakedClass));
 
-  LStringType := DetectStringData(APMemoryBlock, AAvailableSpaceInBlock);
+  LStringType := FastMM_DetectStringData(APMemoryBlock, AAvailableSpaceInBlock);
   Result := Ord(LStringType);
 end;
 
@@ -3160,7 +3171,7 @@ begin
         LPDebugBlockHeader.StackTraceEntryCount, Result, APBufferEnd);
 
       {If it is a freed debug block then get the prior class from the debug header.}
-      LBlockContentType := NativeUInt(DetectClassInstance(@LPDebugBlockHeader.PreviouslyUsedByClass));
+      LBlockContentType := NativeUInt(FastMM_DetectClassInstance(@LPDebugBlockHeader.PreviouslyUsedByClass));
       Result := AddTokenValue_BlockContentType(ATokenValues, CEventLogTokenObjectClass, LBlockContentType, Result,
         APBufferEnd);
 
