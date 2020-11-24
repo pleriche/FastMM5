@@ -18,7 +18,7 @@ Usage:
 library BorlndMM;
 
 uses
-  FastMM5,
+  FastMM5 in '..\FastMM5.pas',
   {System.SysUtils is needed for exception handling.}
   System.SysUtils;
 
