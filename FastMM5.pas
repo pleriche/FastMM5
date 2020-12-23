@@ -94,6 +94,11 @@ uses
 {$LongStrings On}
 {$Align 8}
 
+{If the legacy "FullDebugMode" is defined then a static dependency on the debug support library is implied.}
+{$ifdef FullDebugMode}
+{$define FastMM_DebugLibraryStaticDependency}
+{$endif}
+
 {Calling the deprecated GetHeapStatus is unavoidable, so suppress the warning.}
 {$warn Symbol_Deprecated Off}
 {$warn Symbol_Platform Off}
@@ -187,6 +192,9 @@ const
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
 {$endif}
+
+  {The default name of debug support library.}
+  CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
 
 type
 
@@ -561,18 +569,13 @@ var
   FastMM_GetStackTrace: TFastMM_GetStackTrace;
   FastMM_ConvertStackTraceToText: TFastMM_ConvertStackTraceToText;
 
-  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
-  loaded.}
-  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
-  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
-
   {---------Debug options---------}
 
   {The name of the library that contains the functionality used to obtain the current call stack, and also to convert a
   call stack to unit and line number information.  The first time EnterDebugMode is called an attempt will be made to
   load this library, unless handlers for both FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have already been
   set.}
-  FastMM_DebugSupportLibraryName: PWideChar = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
+  FastMM_DebugSupportLibraryName: PWideChar = CFastMM_DefaultDebugSupportLibraryName;
   {If True then FastMM will not be finalized and uninstalled when this unit is finalized.  Use this option when for some
   reason there are live pointers that will still be in use after this unit is finalized.  Under normal operation this
   should not be necessary.}
@@ -739,9 +742,6 @@ var
     + '{20}% Efficiency'#13#10#13#10
     + 'Usage Detail:'#13#10;
   FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{21} bytes: {8} x {22} ({23} bytes avg.)'#13#10;
-  {Initialization error messages.}
-  FastMM_DebugSupportLibraryNotAvailableError: PWideChar = 'The FastMM debug support library could not be loaded.';
-  FastMM_DebugSupportLibraryNotAvailableError_Caption: PWideChar = 'Fatal Error';
 
 implementation
 
@@ -1515,11 +1515,10 @@ var
   manager which would prevent the switching between debug and normal mode.}
   InstalledMemoryManager: TMemoryManagerEx;
   {The handle to the debug mode support DLL.}
+{$ifndef FastMM_DebugLibraryStaticDependency}
   DebugSupportLibraryHandle: NativeUInt;
+{$endif}
   DebugSupportConfigured: Boolean;
-  {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
-  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
-  DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
 
   {The full path and filename for the event log.}
   EventLogFilename: array[0..CFilenameMaxLength] of WideChar;
@@ -1535,6 +1534,23 @@ var
     '_', 'P', 'I', 'D', '_', '?', '?', '?', '?', '?', '?', '?', '?', #0);
   {The handle of the memory mapped file.}
   SharingFileMappingObjectHandle: NativeUInt;
+{$endif}
+
+{$ifndef FastMM_DebugLibraryStaticDependency}
+  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
+  loaded.}
+  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
+  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
+  {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
+  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
+  DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
+{$else}
+procedure DebugLibrary_GetRawStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+  external CFastMM_DefaultDebugSupportLibraryName name 'GetRawStackTrace';
+procedure DebugLibrary_GetFrameBasedStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+  external CFastMM_DefaultDebugSupportLibraryName name 'GetFrameBasedStackTrace';
+function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
 {$endif}
 
 {--------------------------------------------------------}
@@ -9640,6 +9656,7 @@ end;
 
 function FastMM_LoadDebugSupportLibrary: Boolean;
 begin
+{$ifndef FastMM_DebugLibraryStaticDependency}
   {Already loaded?  If so, return success.}
   if DebugSupportLibraryHandle <> 0 then
     Exit(True);
@@ -9668,12 +9685,24 @@ begin
   end
   else
     Result := False;
+{$else}
+  {Use the stack trace routines from the debug support library.}
+  if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace) then
+    FastMM_GetStackTrace := @DebugLibrary_GetRawStackTrace;
+
+  if (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText) then
+    FastMM_ConvertStackTraceToText := @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
+
+  Result := True;
+{$endif}
 end;
 
 function FastMM_FreeDebugSupportLibrary: Boolean;
 begin
+{$ifndef FastMM_DebugLibraryStaticDependency}
   if DebugSupportLibraryHandle = 0 then
     Exit(False);
+{$endif}
 
   if (@FastMM_GetStackTrace = @DebugLibrary_GetRawStackTrace)
     or (@FastMM_GetStackTrace = @DebugLibrary_GetFrameBasedStackTrace) then
@@ -9686,12 +9715,14 @@ begin
     FastMM_ConvertStackTraceToText := @FastMM_NoOpConvertStackTraceToText;
   end;
 
+{$ifndef FastMM_DebugLibraryStaticDependency}
   FreeLibrary(DebugSupportLibraryHandle);
   DebugSupportLibraryHandle := 0;
 
   DebugLibrary_GetRawStackTrace := nil;
   DebugLibrary_GetFrameBasedStackTrace := nil;
   DebugLibrary_LogStackTrace_Legacy := nil;
+{$endif}
 
   Result := True;
 end;
@@ -9784,23 +9815,16 @@ begin
   {$endif}
 
   {$ifdef FullDebugModeWhenDLLAvailable}
-  {$define FullDebugMode}
+  {$define StartInDebugMode}
   {$endif}
 
   {$ifdef FullDebugMode}
+  {$define StartInDebugMode}
+  {$endif}
+
+  {$ifdef StartInDebugMode}
   if FastMM_LoadDebugSupportLibrary then
-  begin
     FastMM_EnterDebugMode;
-  end
-  else
-  begin
-    {$ifndef FullDebugModeWhenDLLAvailable}
-    {Exception handling is not yet in place, so show an error message and terminate the application.}
-    OS_ShowMessageBox(FastMM_DebugSupportLibraryNotAvailableError, FastMM_DebugSupportLibraryNotAvailableError_Caption);
-    {Return error code 217 - the same error code that would be returned for an exception in an initialization section.}
-    Halt(217);
-    {$endif}
-  end;
   {$endif}
 
   {$ifdef ShareMM}
