@@ -182,7 +182,7 @@ const
   CFastMM_MediumBlockArenaCount = 5;
   CFastMM_LargeBlockArenaCount = 8;
 {$else}
-  {Default values - typically performs fine up to 8 simultaneous threads.}
+  {Default values - typically performs fine with up to 8 simultaneous threads.}
   CFastMM_SmallBlockArenaCount = 4;
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
@@ -1353,6 +1353,32 @@ type
   TFastMM_LegacyConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
     APBuffer: PAnsiChar): PAnsiChar;
 
+  {-------Memory manager sharing information structure--------}
+
+  TFastMM_GetHeapStatus = function: THeapStatus;
+
+  {Extended memory manager sharing information.  This may be expanded by appending new fields at the end.  In order to
+  maintain backward compatibility fields may never be removed or reordered.}
+  TMemoryManagerSharingExtendedInformation = record
+    GetHeapStatus: TFastMM_GetHeapStatus;
+  end;
+  PMemoryManagerSharingExtendedInformation = ^TMemoryManagerSharingExtendedInformation;
+
+  TMemoryManagerSharingInformation = record
+    {Pointer to the shared memory manager standard functions.  This part of the structure is compatible with the RTL
+    memory manager as well as older versions of FastMM.}
+    MemoryManagerExPtr: PMemoryManagerEx;
+    {A signature used to indicate that extended memory manager sharing information follows.}
+    ExtendedInformationSignature: Cardinal;
+    {The version number of the ExtendedInformation structure.  The ExtendedInformation structure may be extended by
+    adding new fields to its end, but existing fields may never be removed or reordered.  This will ensure backward
+    compatibility.}
+    ExtendedInformationVersionNumber: Cardinal;
+    {Extended information about the share dmemory manager.  This will contain additional procedure pointers, etc.}
+    ExtendedInformation: TMemoryManagerSharingExtendedInformation;
+  end;
+  PMemoryManagerSharingInformation = ^TMemoryManagerSharingInformation;
+
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -1463,6 +1489,13 @@ const
     CMaximumSmallBlockSize // = 2624
   );
 
+  {A signature used to indicate that extended memory manager sharing information follows the RTL/v4 pointer to a
+  TMemoryManagerEx structure in the memory manager sharing information block.}
+  CSharingExtendedInformationSignature = Ord('M') + Ord('S') * $100 + Ord('X') * $10000 + Ord('I') * $1000000;
+  {The current version number of the extended memory manager sharing information in the memory manager sharing
+  information block.}
+  CSharingExtendedInformationVersionNumber = 1;
+
 var
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
   SmallBlockTypeLookup: array[0.. CMaximumSmallBlockSize div CSmallBlockGranularity - 1] of Byte;
@@ -1514,6 +1547,10 @@ var
   {The memory manager that is currently set.  This is used to detect the installation of another 3rd party memory
   manager which would prevent the switching between debug and normal mode.}
   InstalledMemoryManager: TMemoryManagerEx;
+  {If a shared memory manager is in use (CurrentInstallationState = mmisUsingSharedMemoryManager), this will be the
+  extended information for the shared memory manager (if it was available).  Fields not exported by the shared memory
+  manager will be nil/0/False.}
+  SharedMemoryManagerExtendedInformation: TMemoryManagerSharingExtendedInformation;
   {The handle to the debug mode support DLL.}
   DebugSupportLibraryHandle: NativeUInt;
   DebugSupportConfigured: Boolean;
@@ -8181,8 +8218,7 @@ begin
   end;
 end;
 
-{Returns a THeapStatus structure with information about the current memory usage.}
-function FastMM_GetHeapStatus: THeapStatus;
+function FastMM_GetHeapStatus_LocalMM: THeapStatus;
 begin
   Result := Default(THeapStatus);
 
@@ -8192,6 +8228,19 @@ begin
   Result.TotalFree := Result.FreeSmall + Result.FreeBig + Result.Unused;
   Result.TotalAddrSpace := Result.TotalCommitted;
   Result.Overhead := Result.TotalAddrSpace - Result.TotalAllocated - Result.TotalFree;
+end;
+
+{Returns a THeapStatus structure with information about the current memory usage.}
+function FastMM_GetHeapStatus: THeapStatus;
+begin
+  {If using a shared memory manager, redirect the call to it (if possible).}
+  if (CurrentInstallationState = mmisUsingSharedMemoryManager)
+    and Assigned(SharedMemoryManagerExtendedInformation.GetHeapStatus) then
+  begin
+    Result := SharedMemoryManagerExtendedInformation.GetHeapStatus;
+  end
+  else
+    Result := FastMM_GetHeapStatus_LocalMM;
 end;
 
 function FastMM_GetUsageSummary: TFastMM_UsageSummary;
@@ -8550,14 +8599,19 @@ begin
   end;
 end;
 
-{Searches the current process for a shared memory manager}
-function FastMM_FindSharedMemoryManager: PMemoryManagerEx;
+{Searches the current process for a shared memory manager.  If APExtendedInformation <> nil it will also return the
+extended memory manager sharing information.}
+function FastMM_FindSharedMemoryManager(APExtendedInformation: PMemoryManagerSharingExtendedInformation = nil): PMemoryManagerEx;
 var
-  LPMapAddress: Pointer;
+  LPSharingInformation: PMemoryManagerSharingInformation;
   LLocalMappingObjectHandle: NativeUInt;
 begin
+  {Initialize the extended sharing information.}
+  if APExtendedInformation <> nil then
+    APExtendedInformation^ := Default(TMemoryManagerSharingExtendedInformation);
+
   {Try to open the shared memory manager file mapping}
-  LLocalMappingObjectHandle := OpenFileMappingA(FILE_MAP_READ, False, SharingFileMappingObjectName);
+  LLocalMappingObjectHandle := Winapi.Windows.OpenFileMappingA(FILE_MAP_READ, False, SharingFileMappingObjectName);
   {Is a memory manager in this process sharing its memory manager?}
   if LLocalMappingObjectHandle = 0 then
   begin
@@ -8566,11 +8620,22 @@ begin
   end
   else
   begin
-    {Map a view of the shared memory and get the address of the shared memory manager}
-    LPMapAddress := MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
-    Result := PPointer(LPMapAddress)^;
-    UnmapViewOfFile(LPMapAddress);
-    CloseHandle(LLocalMappingObjectHandle);
+    {Map a view of the shared memory and get the address of the memory manager sharing information block.}
+    LPSharingInformation := Winapi.Windows.MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
+
+    {Return the pointer to the core memory manager functionality.}
+    Result := LPSharingInformation.MemoryManagerExPtr;
+
+    {Copy the extended sharing information, if requested and available.}
+    if (APExtendedInformation <> nil)
+      and (LPSharingInformation.ExtendedInformationSignature = CSharingExtendedInformationSignature)
+      and ((LPSharingInformation.ExtendedInformationVersionNumber - 1) < 1000) then //Sanity check
+    begin
+      APExtendedInformation.GetHeapStatus := LPSharingInformation.ExtendedInformation.GetHeapStatus;
+    end;
+
+    Winapi.Windows.UnmapViewOfFile(LPSharingInformation);
+    Winapi.Windows.CloseHandle(LLocalMappingObjectHandle);
   end;
 end;
 
@@ -8591,7 +8656,7 @@ begin
       {May not switch memory manager after memory has been allocated}
       if not FastMM_HasLivePointers then
       begin
-        LPMemoryManagerEx := FastMM_FindSharedMemoryManager;
+        LPMemoryManagerEx := FastMM_FindSharedMemoryManager(@SharedMemoryManagerExtendedInformation);
         if LPMemoryManagerEx <> nil then
         begin
 
@@ -8634,11 +8699,29 @@ begin
   end;
 end;
 
+procedure FastMM_ShareMemoryManager_PopulateSharingInformation(APSharingInformation: PMemoryManagerSharingInformation);
+begin
+  {Zero-initialize the structure.}
+  APSharingInformation^ := Default(TMemoryManagerSharingInformation);
+
+  {The MemoryManagerExPtr is backward compatible with the RTL memory manager and older versions of FastMM.}
+  APSharingInformation.MemoryManagerExPtr := @InstalledMemoryManager;
+
+  {Set the signature in order to indicate that extended sharing information is provided.}
+  APSharingInformation.ExtendedInformationSignature := CSharingExtendedInformationSignature;
+
+  {A version number is also provided in order to provide backward and forward compatibility.}
+  APSharingInformation.ExtendedInformationVersionNumber := CSharingExtendedInformationVersionNumber;
+
+  {Populate the extended sharing information.}
+  APSharingInformation.ExtendedInformation.GetHeapStatus := @FastMM_GetHeapStatus;
+end;
+
 {Starts sharing this memory manager with other modules in the current process.  Only one memory manager may be shared
 per process, so this function may fail.}
 function FastMM_ShareMemoryManager: Boolean;
 var
-  LPMapAddress: Pointer;
+  LPSharingInformation: PMemoryManagerSharingInformation;
 begin
   if (CurrentInstallationState = mmisInstalled)
     and (not FastMM_InstalledMemoryManagerChangedExternally)
@@ -8647,16 +8730,19 @@ begin
     {Is any other module already sharing its MM?}
     if FastMM_FindSharedMemoryManager = nil then
     begin
-      {Create the memory mapped file}
-      SharingFileMappingObjectHandle := CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
-        SizeOf(Pointer), SharingFileMappingObjectName);
-      {Map a view of the memory}
-      LPMapAddress := MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0);
-      {Set a pointer to the new memory manager}
-      PPointer(LPMapAddress)^ := @InstalledMemoryManager;
+
+      {Create a memory mapped file containing a TMemoryManagerSharingInformation structure.}
+      SharingFileMappingObjectHandle := Winapi.Windows.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
+        SizeOf(TMemoryManagerSharingInformation), SharingFileMappingObjectName);
+
+      {Map a view of the memory and populate it with the sharing information structure.}
+      LPSharingInformation := Winapi.Windows.MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0);
+      FastMM_ShareMemoryManager_PopulateSharingInformation(LPSharingInformation);
+
       {Unmap the file}
-      UnmapViewOfFile(LPMapAddress);
-      {Sharing this MM}
+      Winapi.Windows.UnmapViewOfFile(LPSharingInformation);
+
+      {This memory manager is now shared.}
       Result := True;
     end
     else
