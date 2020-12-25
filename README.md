@@ -50,6 +50,22 @@ The optimization strategy of the memory manager may be tuned via FastMM_SetOptim
 
 The default configuration should scale close to linearly up to between 8 and 16 threads, so for most applications there should be no need to tweak any performance settings. Beyond 16 threads you may consider increasing the number of arenas (CFastMM_...BlockArenaCount), but inspect the thread contention counts first (FastMM_...BlockThreadContentionCount), before assuming that it is necessary.
 
+
+### The following conditional defines are supported
+* FastMM_FullDebugMode (or FullDebugMode) - If defined then FastMM_EnterDebugMode will be called on startup so that the memory manager starts up in debug mode.  If FullDebugMode is defined then the FastMM_DebugLibraryStaticDependency define is also implied.
+* FastMM_FullDebugModeWhenDLLAvailable (or FullDebugModeWhenDLLAvailable) - If defined an attempt will be made to load the debug support library during startup.  If successful then FastMM_EnterDebugMode will be called so that the memory manager starts up in debug mode.
+* FastMM_DebugLibraryStaticDependency - If defined there will be a static dependency on the debug support library, FastMM_FullDebugMode.dll (32-bit) or FastMM_FullDebugMode64.dll (64-bit).  If FastMM_EnterDebugMode will be called in the startup code while and the memory manager will also be shared between an application and libraries, then it may be necessary to enable this define in order to avoid DLL unload order issues during application shutdown (typically manifesting as an access violation when attempting to report on memory leaks during shutdown).  It is a longstanding issue with Windows that it is not always able to unload DLLs in the correct order on application shutdown when DLLs are loaded dynamically during startup.  Note that while enabling this define will introduce a static dependency on the debug support library, it does not actually enter debug mode by default - FastMM_EnterDebugMode must still be called to enter debug mode, and FastMM_ExitDebugMode can be called to exit debug mode at any time.
+* FastMM_ClearLogFileOnStartup (or ClearLogFileOnStartup) - When defined FastMM_DeleteEventLogFile will be called during startup, deleting the event log file (if it exists).
+* FastMM_Align16Bytes (or Align16Bytes) - When defined FastMM_EnterMinimumAddressAlignment(maa16Bytes) will be called during startup, forcing a minimum of 16 byte alignment for memory blocks.  Note that this has no effect under 64 bit, since 16 bytes is already the minimum alignment.
+* FastMM_EnableMemoryLeakReporting (or EnableMemoryLeakReporting) - If defined then the memory leak summary and detail will be added to the set of events logged to file (FastMM_LogToFileEvents) and the leak summary will be added to the set of events displayed on-screen (FastMM_MessageBoxEvents).
+* FastMM_RequireDebuggerPresenceForLeakReporting (or RequireDebuggerPresenceForLeakReporting) - Used in conjunction with EnableMemoryLeakReporting - if the application is not running under the debugger then the EnableMemoryLeakReporting define is ignored.
+* FastMM_NoMessageBoxes (or NoMessageBoxes) - Clears the set of events that will cause a message box to be displayed (FastMM_MessageBoxEvents) on startup.
+* FastMM_ShareMM (or ShareMM) - If defined then FastMM_ShareMemoryManager will be called during startup, sharing the memory manager of the module if the memory manager of another module is not already being shared.
+* FastMM_ShareMMIfLibrary (or ShareMMIfLibrary) - If defined and the module is not a library then the ShareMM define is disabled.
+* FastMM_AttemptToUseSharedMM (or AttemptToUseSharedMM) - If defined FastMM_AttemptToUseSharedMemoryManager will be called during startup, switching to using the memory manager shared by another module (if there is a shared memory manager).
+* FastMM_NeverUninstall (or NeverUninstall) - Sets the FastMM_NeverUninstall global variable to True.  Use this if any leaked pointers should remain valid after this unit is finalized.
+* PurePascal - The assembly language code paths are disabled, and only the Pascal code paths are used.  This is normally used for debugging purposes only.
+
 ### Supported Compilers
 Delphi XE3 and later
 
