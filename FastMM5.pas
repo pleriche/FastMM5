@@ -70,6 +70,60 @@ Usage Instructions:
   favour performance, low memory usage, or a blend of both.  The default strategy is to blend the performance and low
   memory usage goals.
 
+  The following conditional defines are supported:
+    FastMM_FullDebugMode (or FullDebugMode) - If defined then FastMM_EnterDebugMode will be called on startup so that
+    the memory manager starts up in debug mode.  If FullDebugMode is defined then the
+    FastMM_DebugLibraryStaticDependency define is also implied.
+
+    FastMM_FullDebugModeWhenDLLAvailable (or FullDebugModeWhenDLLAvailable) - If defined an attempt will be made to load
+    the debug support library during startup.  If successful then FastMM_EnterDebugMode will be called so that the
+    memory manager starts up in debug mode.
+
+    FastMM_DebugLibraryStaticDependency - If defined there will be a static dependency on the debug support library,
+    FastMM_FullDebugMode.dll (32-bit) or FastMM_FullDebugMode64.dll (64-bit).  If FastMM_EnterDebugMode will be called
+    in the startup code while and the memory manager will also be shared between an application and libraries, then it
+    may be necessary to enable this define in order to avoid DLL unload order issues during application shutdown
+    (typically manifesting as an access violation when attempting to report on memory leaks during shutdown).
+    It is a longstanding issue with Windows that it is not always able to unload DLLs in the correct order on
+    application shutdown when DLLs are loaded dynamically during startup.  Note that while enabling this define will
+    introduce a static dependency on the debug support library, it does not actually enter debug mode by default -
+    FastMM_EnterDebugMode must still be called to enter debug mode, and FastMM_ExitDebugMode can be called to exit debug
+    mode at any time.
+
+    FastMM_ClearLogFileOnStartup (or ClearLogFileOnStartup) - When defined FastMM_DeleteEventLogFile will be called
+    during startup, deleting the event log file (if it exists).
+
+    FastMM_Align16Bytes (or Align16Bytes) - When defined FastMM_EnterMinimumAddressAlignment(maa16Bytes) will be called
+    during startup, forcing a minimum of 16 byte alignment for memory blocks.  Note that this has no effect under 64
+    bit, since 16 bytes is already the minimum alignment.
+
+    FastMM_EnableMemoryLeakReporting (or EnableMemoryLeakReporting) - If defined then the memory leak summary and detail
+    will be added to the set of events logged to file (FastMM_LogToFileEvents) and the leak summary will be added to the
+    set of events displayed on-screen (FastMM_MessageBoxEvents).
+
+    FastMM_RequireDebuggerPresenceForLeakReporting (or RequireDebuggerPresenceForLeakReporting) - Used in conjunction
+    with EnableMemoryLeakReporting - if the application is not running under the debugger then the
+    EnableMemoryLeakReporting define is ignored.
+
+    FastMM_NoMessageBoxes (or NoMessageBoxes) - Clears the set of events that will cause a message box to be displayed
+    (FastMM_MessageBoxEvents) on startup.
+
+    FastMM_ShareMM (or ShareMM) - If defined then FastMM_ShareMemoryManager will be called during startup, sharing the
+    memory manager of the module if the memory manager of another module is not already being shared.
+
+    FastMM_ShareMMIfLibrary (or ShareMMIfLibrary) - If defined and the module is not a library then the ShareMM define
+    is disabled.
+
+    FastMM_AttemptToUseSharedMM (or AttemptToUseSharedMM) - If defined FastMM_AttemptToUseSharedMemoryManager will be
+    called during startup, switching to using the memory manager shared by another module (if there is a shared memory
+    manager).
+
+    FastMM_NeverUninstall (or NeverUninstall) - Sets the FastMM_NeverUninstall global variable to True.  Use this if any
+    leaked pointers should remain valid after this unit is finalized.
+
+    PurePascal - The assembly language code paths are disabled, and only the Pascal code paths are used.  This is
+    normally used for debugging purposes only.
+
 Supported Compilers:
   Delphi XE3 and later
 
@@ -94,8 +148,21 @@ uses
 {$LongStrings On}
 {$Align 8}
 
-{If the legacy "FullDebugMode" is defined then a static dependency on the debug support library is implied.}
-{$ifdef FullDebugMode}
+{Translate legacy v4 defines to their current names.}
+{$ifdef FullDebugMode} {$define FastMM_FullDebugMode} {$endif}
+{$ifdef FullDebugModeWhenDLLAvailable} {$define FastMM_FullDebugModeWhenDLLAvailable} {$endif}
+{$ifdef ClearLogFileOnStartup} {$define FastMM_ClearLogFileOnStartup} {$endif}
+{$ifdef Align16Bytes} {$define FastMM_Align16Bytes} {$endif}
+{$ifdef EnableMemoryLeakReporting} {$define FastMM_EnableMemoryLeakReporting} {$endif}
+{$ifdef RequireDebuggerPresenceForLeakReporting} {$define FastMM_RequireDebuggerPresenceForLeakReporting} {$endif}
+{$ifdef NoMessageBoxes} {$define FastMM_NoMessageBoxes} {$endif}
+{$ifdef ShareMM} {$define FastMM_ShareMM} {$endif}
+{$ifdef ShareMM} {$define FastMM_ShareMMIfLibrary} {$endif}
+{$ifdef ShareMM} {$define FastMM_AttemptToUseSharedMM} {$endif}
+{$ifdef ShareMM} {$define FastMM_NeverUninstall} {$endif}
+
+{If the "FastMM_FullDebugMode" is defined then a static dependency on the debug support library is implied.}
+{$ifdef FastMM_FullDebugMode}
 {$define FastMM_DebugLibraryStaticDependency}
 {$endif}
 
@@ -9788,20 +9855,20 @@ begin
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
 end;
 
-procedure FastMM_ApplyLegacyConditionalDefines;
+procedure FastMM_ApplyConditionalDefines;
 begin
   {This procedure provides backward compatibility with the conditional defines of FastMM4.}
 
-  {$ifdef ClearLogFileOnStartup}
+  {$ifdef FastMM_ClearLogFileOnStartup}
   FastMM_DeleteEventLogFile;
   {$endif}
 
-  {$ifdef Align16Bytes}
+  {$ifdef FastMM_Align16Bytes}
   FastMM_EnterMinimumAddressAlignment(maa16Bytes);
   {$endif}
 
-  {$ifdef EnableMemoryLeakReporting}
-  {$ifdef RequireDebuggerPresenceForLeakReporting}
+  {$ifdef FastMM_EnableMemoryLeakReporting}
+  {$ifdef FastMM_RequireDebuggerPresenceForLeakReporting}
   if DebugHook <> 0 then
   {$endif}
   begin
@@ -9810,15 +9877,15 @@ begin
   end;
   {$endif}
 
-  {$ifdef NoMessageBoxes}
+  {$ifdef FastMM_NoMessageBoxes}
   FastMM_MessageBoxEvents := [];
   {$endif}
 
-  {$ifdef FullDebugModeWhenDLLAvailable}
+  {$ifdef FastMM_FullDebugModeWhenDLLAvailable}
   {$define StartInDebugMode}
   {$endif}
 
-  {$ifdef FullDebugMode}
+  {$ifdef FastMM_FullDebugMode}
   {$define StartInDebugMode}
   {$endif}
 
@@ -9827,18 +9894,18 @@ begin
     FastMM_EnterDebugMode;
   {$endif}
 
-  {$ifdef ShareMM}
-  {$ifndef ShareMMIfLibrary}
+  {$ifdef FastMM_ShareMM}
+  {$ifndef FastMM_ShareMMIfLibrary}
   if not IsLibrary then
   {$endif}
     FastMM_ShareMemoryManager;
   {$endif}
 
-  {$ifdef AttemptToUseSharedMM}
+  {$ifdef FastMM_AttemptToUseSharedMM}
   FastMM_AttemptToUseSharedMemoryManager;
   {$endif}
 
-  {$ifdef NeverUninstall}
+  {$ifdef FastMM_NeverUninstall}
   FastMM_NeverUninstall := True;
   {$endif}
 end;
@@ -9933,7 +10000,7 @@ begin
   accordingly.}
   if CurrentInstallationState = mmisInstalled then
   begin
-    FastMM_ApplyLegacyConditionalDefines;
+    FastMM_ApplyConditionalDefines;
     Result := True;
   end
   else
