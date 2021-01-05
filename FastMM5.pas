@@ -97,6 +97,13 @@ Usage Instructions:
     during startup, forcing a minimum of 16 byte alignment for memory blocks.  Note that this has no effect under 64
     bit, since 16 bytes is already the minimum alignment.
 
+    FastMM_5Arenas, FastMM_6Arenas .. FastMM_16Arenas - Increases the number of arenas from the default values.  See the
+    notes for the CFastMM_SmallBlockArenaCount constant for guidance on the appropriate number of arenas.
+
+    FastMM_DisableAutomaticInstall - Disables automatic installation of FastMM as the memory manager.  If defined then
+    FastMM_Initialize should be called from application code in order to install FastMM, and FastMM_Finalize to
+    uninstall and perform the leak check (if enabled), etc.
+
     FastMM_EnableMemoryLeakReporting (or EnableMemoryLeakReporting) - If defined then the memory leak summary and detail
     will be added to the set of events logged to file (FastMM_LogToFileEvents) and the leak summary will be added to the
     set of events displayed on-screen (FastMM_MessageBoxEvents).
