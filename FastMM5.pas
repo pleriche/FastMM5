@@ -1,6 +1,6 @@
 {
 
-FastMM 5.02
+FastMM 5.03
 
 Description:
   A fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU
@@ -81,10 +81,10 @@ Usage Instructions:
 
     FastMM_DebugLibraryStaticDependency - If defined there will be a static dependency on the debug support library,
     FastMM_FullDebugMode.dll (32-bit) or FastMM_FullDebugMode64.dll (64-bit).  If FastMM_EnterDebugMode will be called
-    in the startup code while and the memory manager will also be shared between an application and libraries, then it
+    in the startup code and the memory manager will also be shared between an application and libraries, then it
     may be necessary to enable this define in order to avoid DLL unload order issues during application shutdown
     (typically manifesting as an access violation when attempting to report on memory leaks during shutdown).
-    It is a longstanding issue with Windows that it is not always able to unload DLLs in the correct order on
+    It is a longstanding issue with Windows that it is not always able to unload DLLs in the correct order during
     application shutdown when DLLs are loaded dynamically during startup.  Note that while enabling this define will
     introduce a static dependency on the debug support library, it does not actually enter debug mode by default -
     FastMM_EnterDebugMode must still be called to enter debug mode, and FastMM_ExitDebugMode can be called to exit debug
@@ -202,7 +202,7 @@ uses
 const
 
   {The current version of FastMM.  The first digit is the major version, followed by a two digit minor version number.}
-  CFastMM_Version = 502;
+  CFastMM_Version = 503;
 
   {The number of arenas for small, medium and large blocks.  Increasing the number of arenas decreases the likelihood
   of thread contention happening (when the number of threads inside a GetMem call is greater than the number of arenas),
@@ -526,6 +526,11 @@ always returns True (unless an exception is raised), so may be used in a debug w
 debugger stops on a breakpoint, etc.}
 function FastMM_ScanDebugBlocksForCorruption: Boolean;
 
+{Returns the number of bytes of address space that is currently either committed or reserved by FastMM.  This includes
+the total used by the heap, as well as all internal management structures.  This may be restricted via the
+FastMM_SetMemoryUsageLimit call.}
+function FastMM_GetCurrentMemoryUsage: NativeUInt;
+
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
 
@@ -587,6 +592,14 @@ procedure FastMM_EnterMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_
 procedure FastMM_ExitMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
 {Returns the current minimum address alignment in effect.}
 function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignment;
+
+{Allows the application to specify a maximum amount of memory that may be allocated through FastMM.  An attempt to
+allocate more than this amount will fail and lead to an "Out of Memory" exception.  Note that after the first failure
+the maximum amount of memory that may be allocated is slightly increased in order to allow the application to allocate
+some additional memory in subsequent attempts.  This is to allow for a graceful shutdown.  Specify 0 for no limit (the
+default).}
+procedure FastMM_SetMemoryUsageLimit(AMaximumAllowedMemoryUsage: NativeUInt);
+function FastMM_GetMemoryUsageLimit: NativeUInt;
 
 {Attempts to load the debug support library specified by FastMM_DebugSupportLibraryName.  On success it will set the
 FastMM_GetStackTrace and FastMM_ConvertStackTraceToText handlers to point to the routines in the debug library, provided
@@ -957,8 +970,9 @@ const
   {The number of bytes of address space that is reserved and only released once the first OS allocation request fails.
   This allows some subsequent memory allocation requests to succeed in order to allow the application to allocate some
   memory for error handling, etc. in response to the first EOutOfMemory exception.  This only applies to 32-bit
-  applications.}
-  CEmergencyReserveAddressSpace = CMaximumMediumBlockSpanSize;
+  applications.  The default reserve is enough address space for a medium block span as well as a similarly sized
+  large block.}
+  CEmergencyReserveAddressSpace = 2 * CMaximumMediumBlockSpanSize;
 {$endif}
 
   {Event and state log tokens}
@@ -1568,6 +1582,13 @@ var
   EOutOfMemory exception.  This only applies to 32-bit applications.}
   EmergencyReserveAddressSpace: Pointer;
 {$endif}
+
+  {The amount of address space that is currently allocated.}
+  MemoryUsageCurrent: NativeUInt;
+
+  {The current memory usage limit.  0 = no limit.}
+  MemoryUsageLimit: NativeUInt;
+  MemoryUsageLimitGraceAmount: NativeUInt;
 
   {True between the FastMM_Initialize call and the FastMM_Finalize call.}
   UnitCurrentlyInitialized: Boolean;
@@ -2221,8 +2242,20 @@ end;
 procedure ReleaseEmergencyReserveAddressSpace; forward;
 function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 
-{Allocates a block of memory from the operating system.  The block is assumed to be aligned to at least a 64 byte
-boundary, and is assumed to be zero initialized.  Returns nil on error.}
+{Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
+function OS_FreeVirtualMemory(APointer: Pointer; ABlockSize: NativeInt): Integer;
+begin
+  if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
+  begin
+    AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+    Result := 0;
+  end
+  else
+    Result := -1;
+end;
+
+{Allocates a block of memory from the operating system.  The block will be aligned to at least a 64 byte boundary, and
+will be zero initialized.  Returns nil on error.}
 function OS_AllocateVirtualMemory(ABlockSize: NativeInt; AAllocateTopDown: Boolean;
   AReserveOnlyNoReadWriteAccess: Boolean): Pointer;
 begin
@@ -2239,6 +2272,22 @@ begin
     if Result = nil then
       ReleaseEmergencyReserveAddressSpace;
   end;
+
+  if Result <> nil then
+  begin
+    AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+
+    if (MemoryUsageLimit > 0)
+      and (MemoryUsageCurrent > MemoryUsageLimit) then
+    begin
+      Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
+      MemoryUsageLimitGraceAmount := 0;
+
+      OS_FreeVirtualMemory(Result, ABlockSize);
+      Result := nil;
+    end;
+  end;
+
 end;
 
 function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: NativeInt;
@@ -2253,15 +2302,21 @@ begin
     Result := (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_READWRITE) <> nil)
       and (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_COMMIT, PAGE_READWRITE) <> nil);
   end;
-end;
 
-{Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
-function OS_FreeVirtualMemory(APointer: Pointer): Integer;
-begin
-  if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
-    Result := 0
-  else
-    Result := -1;
+  if Result then
+  begin
+    AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+
+    if (MemoryUsageLimit > 0)
+      and (MemoryUsageCurrent > MemoryUsageLimit) then
+    begin
+      Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
+      MemoryUsageLimitGraceAmount := 0;
+
+      OS_FreeVirtualMemory(APAddress, ABlockSize);
+      Result := False;
+    end;
+  end;
 end;
 
 {Determines the size and state of the virtual memory region starting at APRegionStart.}
@@ -2547,7 +2602,7 @@ begin
     Result := OS_CreateOrAppendFile(APFileName, LPBufferStart, NativeInt(LPBufferPos) - NativeInt(LPBufferStart));
 
   finally
-    OS_FreeVirtualMemory(LPBufferStart);
+    OS_FreeVirtualMemory(LPBufferStart, LBufferSize);
   end;
 end;
 
@@ -3957,7 +4012,7 @@ begin
 {$ifdef 32Bit}
   if EmergencyReserveAddressSpace <> nil then
   begin
-    OS_FreeVirtualMemory(EmergencyReserveAddressSpace);
+    OS_FreeVirtualMemory(EmergencyReserveAddressSpace, CEmergencyReserveAddressSpace);
     EmergencyReserveAddressSpace := nil;
   end;
 {$endif}
@@ -4131,7 +4186,7 @@ var
 begin
   if not APLargeBlockHeader.BlockIsSegmented then
   begin
-    Result := OS_FreeVirtualMemory(APLargeBlockHeader);
+    Result := OS_FreeVirtualMemory(APLargeBlockHeader, APLargeBlockHeader.ActualBlockSize);
   end
   else
   begin
@@ -4145,7 +4200,7 @@ begin
     begin
       OS_GetVirtualMemoryRegionInfo(LPCurrentSegment, LMemoryRegionInfo);
 
-      Result := OS_FreeVirtualMemory(LPCurrentSegment);
+      Result := OS_FreeVirtualMemory(LPCurrentSegment, LMemoryRegionInfo.RegionSize);
       if Result <> 0 then
         Break;
 
@@ -4769,7 +4824,7 @@ begin
       APMediumBlockManager.MediumBlockManagerLocked := 0;
 
     {Free the entire span.}
-    Result := OS_FreeVirtualMemory(APMediumBlockSpan);
+    Result := OS_FreeVirtualMemory(APMediumBlockSpan, APMediumBlockSpan.SpanSize);
   end;
 end;
 
@@ -8271,6 +8326,12 @@ begin
   end;
 end;
 
+{Returns the number of bytes of address space that is currently either committed or reserved by FastMM.}
+function FastMM_GetCurrentMemoryUsage: NativeUInt;
+begin
+  Result := MemoryUsageCurrent;
+end;
+
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus: THeapStatus;
 begin
@@ -8616,7 +8677,7 @@ begin
       Result := AppendTextFile(PWideChar(AFilename), LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
 
     finally
-      OS_FreeVirtualMemory(LPLogInfo);
+      OS_FreeVirtualMemory(LPLogInfo, LBufferSize);
     end;
   end
   else
@@ -9339,6 +9400,24 @@ begin
     Result := maa8Bytes;
 end;
 
+{Allows the application to specify a maximum amount of memory that may be allocated through FastMM.  An attempt to
+allocate more than this amount will fail and lead to an "Out of Memory" exception.  Note that after the first failure
+the maximum amount of memory that may be allocated is slightly increased in order to allow the application to allocate
+some additional memory in subsequent attempts.  This is to allow for a graceful shutdown.  Specify 0 for no limit (the
+default).}
+procedure FastMM_SetMemoryUsageLimit(AMaximumAllowedMemoryUsage: NativeUInt);
+const
+  CMemoryUsageLimitGraceAmount = 32 * 1024 * 1024; //Hopefully enough to allow shutdown code to run
+begin
+  MemoryUsageLimit := AMaximumAllowedMemoryUsage;
+  MemoryUsageLimitGraceAmount := CMemoryUsageLimitGraceAmount;
+end;
+
+function FastMM_GetMemoryUsageLimit: NativeUInt;
+begin
+  Result := MemoryUsageLimit;
+end;
+
 {Gets the optimal move procedure for the given small block size.}
 function FastMM_InitializeMemoryManager_GetOptimalMoveProc(ASmallBlockSize: Integer): TMoveProc;
 begin
@@ -9561,7 +9640,7 @@ begin
     while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
     begin
       LPNextMediumBlockSpan := LPMediumBlockSpan.NextMediumBlockSpanHeader;
-      OS_FreeVirtualMemory(LPMediumBlockSpan);
+      OS_FreeVirtualMemory(LPMediumBlockSpan, LPMediumBlockSpan.SpanSize);
       LPMediumBlockSpan := LPNextMediumBlockSpan;
     end;
 
@@ -9618,7 +9697,7 @@ begin
 
   if ExpectedMemoryLeaks <> nil then
   begin
-    OS_FreeVirtualMemory(ExpectedMemoryLeaks);
+    OS_FreeVirtualMemory(ExpectedMemoryLeaks, CExpectedMemoryLeaksListSize);
     ExpectedMemoryLeaks := nil;
   end;
 
