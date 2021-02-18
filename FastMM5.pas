@@ -4052,6 +4052,11 @@ begin
   if not CheckDebugBlockHeaderAndFooterCheckSumsValid(LPActualBlock) then
     System.Error(reInvalidPtr);
 
+  {Avoid a potential race condition here:  While the debug header and footer is being updated the block must be flagged
+  as not containing any debug information, otherwise a concurrent call to FastMM_ScanDebugBlocksForCorruption may flag
+  this block as corrupted.}
+  SetBlockHasDebugInfo(LPActualBlock, False);
+
   {Update the information in the block header.}
   LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
   if LPActualBlock.StackTraceEntryCount > 0 then
@@ -4066,6 +4071,9 @@ begin
 
   {Update the header and footer checksums}
   LPActualBlock.CalculateAndSetHeaderAndFooterCheckSums;
+
+  {Restore the debug information flag.}
+  SetBlockHasDebugInfo(LPActualBlock, True);
 
   {Return the actual block to the memory pool.}
   Result := FastMM_FreeMem(LPActualBlock);
@@ -4089,6 +4097,12 @@ begin
   LDebugFooterSize := CalculateDebugBlockFooterSize(LPActualBlock.StackTraceEntryCount);
   if LAvailableSpace >= (ANewSize + CDebugBlockHeaderSize + LDebugFooterSize) then
   begin
+
+    {Avoid a potential race condition here:  While the debug header and footer is being updated the block must be flagged
+    as not containing any debug information, otherwise a concurrent call to FastMM_ScanDebugBlocksForCorruption may flag
+    this block as corrupted.}
+    SetBlockHasDebugInfo(LPActualBlock, False);
+
     LPOldFooter := LPActualBlock.DebugFooterPtr;
 
     {Update the user block size and set the new header checksum.  The footer checksum should be unchanged.}
@@ -4098,6 +4112,9 @@ begin
     {Move the debug footer just beyond the new user size.}
     LPNewFooter := LPActualBlock.DebugFooterPtr;
     System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+
+    {Restore the debug information flag.}
+    SetBlockHasDebugInfo(LPActualBlock, True);
 
     Result := APointer;
   end
@@ -8076,6 +8093,29 @@ begin
           LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
           if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
             LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
+
+          {It is possible that a new medium block is in the process of being split off from the sequential feed span by
+          another thread, in which case the block size may not yet be set properly.  In this case we need to wait for
+          the other thread to complete allocation of the block.}
+          LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
+          LLockWaitTimeMilliseconds := 0;
+          while (GetMediumBlockSize(LPMediumBlock) = 0)
+            and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+          begin
+            OS_AllowOtherThreadToRun;
+          end;
+
+          {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
+          if GetMediumBlockSize(LPMediumBlock) = 0 then
+          begin
+            {If there was a reasonable wait time then raise an error, otherwise skip the entire span since it is not
+            possible to walk the blocks in the span without knowing the size of the first block.}
+            if ALockTimeoutMilliseconds >= 1000 then
+              System.Error(reInvalidPtr)
+            else
+              LBlockOffsetFromMediumSpanStart := LPMediumBlockSpan.SpanSize;
+          end;
+
         end
         else
           LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
