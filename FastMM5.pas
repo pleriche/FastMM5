@@ -1617,6 +1617,8 @@ var
 
   {The full path and filename for the event log.}
   EventLogFilename: array[0..CFilenameMaxLength] of WideChar;
+  {The file handle for the event log while it is open.}
+  EventLogFileHandle: THandle;
 
   {The expected memory leaks list}
   ExpectedMemoryLeaks: PExpectedMemoryLeaks;
@@ -2411,7 +2413,7 @@ begin
     Inc(Result, LNumChars);
 end;
 
-{Returns True if the given file exists.  APFileName must be a #0 terminated.}
+{Returns True if the given file exists.  APFileName must be a #0 terminated string.}
 function OS_FileExists(APFileName: PWideChar): Boolean;
 begin
   {This will return True for folders and False for files that are locked by another process, but is "good enough" for
@@ -2425,27 +2427,35 @@ begin
   Result := Winapi.Windows.DeleteFileW(APFileName);
 end;
 
-{Creates the given file if it does not exist yet, and then appends the given data to it.}
-function OS_CreateOrAppendFile(APFileName: PWideChar; APData: Pointer; ADataSizeInBytes: Integer): Boolean;
-var
-  LFileHandle: THandle;
-  LBytesWritten: Cardinal;
+{Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
+pointer will be set to the current end of the file.}
+function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
 begin
-  if ADataSizeInBytes <= 0 then
-    Exit(True);
-
-  {Try to open/create the log file in read/write mode.}
-  LFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, 0, nil, OPEN_ALWAYS,
+  {Try to open/create the file in read/write mode.}
+  AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, 0, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
-  if LFileHandle = INVALID_HANDLE_VALUE then
+  if AFileHandle = INVALID_HANDLE_VALUE then
     Exit(False);
 
-  {Add the data to the end of the file}
-  SetFilePointer(LFileHandle, 0, nil, FILE_END);
-  Winapi.Windows.WriteFile(LFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
-  Result := LBytesWritten = Cardinal(ADataSizeInBytes);
+  {Move the file pointer to the end of the file}
+  SetFilePointer(AFileHandle, 0, nil, FILE_END);
 
-  CloseHandle(LFileHandle);
+  Result := True;
+end;
+
+{Writes data to the given file handle, returning True on success}
+function OS_WriteFile(AFileHandle: THandle; APData: Pointer; ADataSizeInBytes: Integer): Boolean;
+var
+  LBytesWritten: Cardinal;
+begin
+  Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
+  Result := LBytesWritten = Cardinal(ADataSizeInBytes);
+end;
+
+{Closes the given file handle}
+procedure OS_CloseFile(AFileHandle: THandle);
+begin
+  CloseHandle(AFileHandle);
 end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
@@ -2543,7 +2553,46 @@ begin
     Dec(Result);
 end;
 
-function AppendTextFile(APFileName, APText: PWideChar; AWideCharCount: Integer): Boolean;
+function OpenOrCreateTextFile(APFileName: PWideChar; AAddLineBreakToExistingFile: Boolean;
+  var AFileHandle: THandle): Boolean;
+const
+  CUTF8_BOM: Cardinal = $BFBBEF;
+  CUTF16LE_BOM: Word = $FEFF;
+  CLineBreakUTF8: Word = $0A0D;
+  CLineBreakUTF16: Cardinal = $000A000D;
+var
+  LFileExisted: Boolean;
+begin
+  LFileExisted := OS_FileExists(APFileName);
+
+  if OS_OpenOrCreateFile(APFileName, AFileHandle) then
+  begin
+    if LFileExisted then
+    begin
+      if AAddLineBreakToExistingFile then
+      begin
+        if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
+          OS_WriteFile(AFileHandle, @CLineBreakUTF8, SizeOf(CLineBreakUTF8))
+        else
+          OS_WriteFile(AFileHandle, @CLineBreakUTF16, SizeOf(CLineBreakUTF16));
+      end;
+    end
+    else
+    begin
+      {It's a new file, so add the BOM if required.}
+      if FastMM_TextFileEncoding = teUTF8_BOM then
+        OS_WriteFile(AFileHandle, @CUTF8_BOM, 3)
+      else if FastMM_TextFileEncoding = teUTF16LE_BOM then
+        OS_WriteFile(AFileHandle, @CUTF16LE_BOM, SizeOf(CUTF16LE_BOM));
+    end;
+
+    Result := True;
+  end
+  else
+    Result := False;
+end;
+
+function AppendTextFile(AFileHandle: THandle; APText: PWideChar; AWideCharCount: Integer): Boolean;
 var
   LBufferSize: Integer;
   LPBufferStart, LPBufferPos: PByte;
@@ -2560,34 +2609,6 @@ begin
   try
     LPBufferPos := LPBufferStart;
 
-    if OS_FileExists(APFileName) then
-    begin
-      {The log file exists:  Add a line break after the previous event.}
-      if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
-      begin
-        PWord(LPBufferPos)^ := $0A0D;
-        Inc(LPBufferPos, 2);
-      end
-      else
-      begin
-        PCardinal(LPBufferPos)^ := $000A000D;
-        Inc(LPBufferPos, 4);
-      end;
-    end
-    else
-    begin
-      {The file does not exist, so add the BOM if required.}
-      if FastMM_TextFileEncoding = teUTF8_BOM then
-      begin
-        PCardinal(LPBufferPos)^ := $BFBBEF;
-        Inc(LPBufferPos, 3);
-      end else if FastMM_TextFileEncoding = teUTF16LE_BOM then
-      begin
-        PWord(LPBufferPos)^ := $FEFF;
-        Inc(LPBufferPos, 2);
-      end;
-    end;
-
     {Copy the text across to the buffer, converting it as appropriate.}
     if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
     begin
@@ -2599,7 +2620,7 @@ begin
       Inc(LPBufferPos, AWideCharCount * 2);
     end;
 
-    Result := OS_CreateOrAppendFile(APFileName, LPBufferStart, NativeInt(LPBufferPos) - NativeInt(LPBufferStart));
+    Result := OS_WriteFile(AFileHandle, LPBufferStart, NativeInt(LPBufferPos) - NativeInt(LPBufferStart));
 
   finally
     OS_FreeVirtualMemory(LPBufferStart, LBufferSize);
@@ -3395,6 +3416,25 @@ begin
   end;
 end;
 
+function EventLogFileIsOpen: Boolean;
+begin
+  Result := EventLogFileHandle <> INVALID_HANDLE_VALUE;
+end;
+
+function OpenEventLogFile: Boolean;
+begin
+  Result := EventLogFileIsOpen or OpenOrCreateTextFile(@EventLogFilename, True, EventLogFileHandle);
+end;
+
+procedure CloseEventLogFile;
+begin
+  if EventLogFileIsOpen then
+  begin
+    OS_CloseFile(EventLogFileHandle);
+    EventLogFileHandle := INVALID_HANDLE_VALUE;
+  end;
+end;
+
 {Logs an event to OutputDebugString, file or the display (or any combination thereof) depending on configuration.}
 procedure LogEvent(AEventType: TFastMM_MemoryManagerEventType; const ATokenValues: TEventLogTokenValues);
 var
@@ -3402,6 +3442,7 @@ var
   LTextBuffer: array[0..CEventMessageMaxWideChars] of WideChar;
   LPLogHeaderStart, LPBodyStart: PWideChar;
   LPBuffer, LPBufferEnd: PWideChar;
+  LEventLogFileWasOpen: Boolean;
 begin
   LPLogHeaderStart := @LTextBuffer;
   LPBufferEnd := @LTextBuffer[CEventMessageMaxWideChars - 1];
@@ -3506,7 +3547,13 @@ begin
   {Log the message to file, if needed.}
   if AEventType in FastMM_LogToFileEvents then
   begin
-    AppendTextFile(@EventLogFilename, LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
+    LEventLogFileWasOpen := EventLogFileIsOpen;
+
+    if LEventLogFileWasOpen or OpenEventLogFile then
+      AppendTextFile(EventLogFileHandle, LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
+
+    if not LEventLogFileWasOpen then
+      CloseEventLogFile;
   end;
 
   if AEventType in FastMM_OutputDebugStringEvents then
@@ -8650,6 +8697,7 @@ var
   LTokenValues: TEventLogTokenValues;
   LInd: Integer;
   LPNode: PMemoryLogNode;
+  LFileHandle: THandle;
 begin
   {Get the current memory manager usage summary.}
   LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
@@ -8714,7 +8762,13 @@ begin
 
       {Delete the old file and write the new one.}
       OS_DeleteFile(PWideChar(AFilename));
-      Result := AppendTextFile(PWideChar(AFilename), LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
+      if OpenOrCreateTextFile(PWideChar(AFilename), True, LFileHandle) then
+      begin
+        Result := AppendTextFile(LFileHandle, LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
+        OS_CloseFile(LFileHandle);
+      end
+      else
+        Result := False;
 
     finally
       OS_FreeVirtualMemory(LPLogInfo, LBufferSize);
@@ -9212,6 +9266,10 @@ begin
     LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
     AddTokenValues_BlockTokens(LTokenValues, ABlockInfo.BlockAddress, LPBufferPos, LPBufferEnd);
 
+    {If leak detail is logged to file, then open the log file once and close it after all leaks have been logged.}
+    if mmetUnexpectedMemoryLeakDetail in FastMM_LogToFileEvents then
+      OpenEventLogFile;
+
     LogEvent(mmetUnexpectedMemoryLeakDetail, LTokenValues);
   end;
 
@@ -9318,6 +9376,9 @@ begin
   begin
     FastMM_PerformMemoryLeakCheck_LogLeakSummary(LLeakSummary);
   end;
+
+  {The event log file would have been opened when the first leak was detected.}
+  CloseEventLogFile;
 end;
 
 
@@ -9655,6 +9716,7 @@ begin
   {The first time EnterDebugMode is called an attempt will be made to load the debug support DLL.}
   DebugSupportConfigured := False;
 
+  EventLogFileHandle := INVALID_HANDLE_VALUE;
   FastMM_SetDefaultEventLogFilename;
 
   {---------Sharing setup-------}
@@ -10044,6 +10106,8 @@ var
   LModuleFilename: array[0..CFilenameMaxLength] of WideChar;
   LPModuleFilenamePos, LPModuleFilenameStart, LPModuleFilenameEnd, LPBufferPos, LPBufferEnd: PWideChar;
 begin
+  CloseEventLogFile;
+
   {Get the module filename into a buffer.}
   LPModuleFilenameEnd := OS_GetApplicationFilename(@LModuleFilename, @LModuleFilename[High(LModuleFilename)], False);
 
@@ -10092,6 +10156,8 @@ procedure FastMM_SetEventLogFilename(APEventLogFilename: PWideChar);
 var
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
+  CloseEventLogFile;
+
   if APEventLogFilename <> nil then
   begin
     LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
@@ -10109,6 +10175,8 @@ end;
 
 function FastMM_DeleteEventLogFile: Boolean;
 begin
+  CloseEventLogFile;
+
   Result := OS_DeleteFile(@EventLogFilename);
 end;
 
