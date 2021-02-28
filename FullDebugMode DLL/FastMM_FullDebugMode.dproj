@@ -6,9 +6,9 @@
         <DCC_DCCCompiler>DCC32</DCC_DCCCompiler>
         <DCC_DependencyCheckOutputName>FastMM_FullDebugMode.dll</DCC_DependencyCheckOutputName>
         <FrameworkType>None</FrameworkType>
-        <ProjectVersion>18.8</ProjectVersion>
+        <ProjectVersion>19.2</ProjectVersion>
         <Base>True</Base>
-        <Config Condition="'$(Config)'==''">Release</Config>
+        <Config Condition="'$(Config)'==''">Debug</Config>
         <Platform Condition="'$(Platform)'==''">Win32</Platform>
         <TargetedPlatforms>3</TargetedPlatforms>
         <AppType>Library</AppType>
@@ -63,12 +63,12 @@
     <PropertyGroup Condition="'$(Base)'!=''">
         <Manifest_File>None</Manifest_File>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
-        <VerInfo_MinorVer>63</VerInfo_MinorVer>
+        <VerInfo_MinorVer>64</VerInfo_MinorVer>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Winapi;$(DCC_Namespace)</DCC_Namespace>
-        <VerInfo_Build>6</VerInfo_Build>
+        <VerInfo_Build>7</VerInfo_Build>
         <GenDll>true</GenDll>
         <VerInfo_Locale>7177</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.63.0.6;InternalName=;LegalCopyright=(c) 2004-2020 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.63;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.64.0.7;InternalName=;LegalCopyright=(c) 2004-2020 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.64;Comments=</VerInfo_Keys>
         <SanitizedProjectName>FastMM_FullDebugMode</SanitizedProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
