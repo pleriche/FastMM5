@@ -3563,6 +3563,10 @@ begin
 
   if AEventType in FastMM_MessageBoxEvents then
   begin
+    {Ensure that the event log file is closed before showing any dialogs, so the user can access it while the dialog is
+    displayed.}
+    CloseEventLogFile;
+
     OS_ShowMessageBox(LPBodyStart, LPMessageBoxCaption);
   end;
 
