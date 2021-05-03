@@ -1096,8 +1096,8 @@ type
 
   PSmallBlockSpanHeader = ^TSmallBlockSpanHeader;
 
-  {Always 64 bytes in size in order to fit inside a cache line, under both 32-bit and 64-bit.  It should preferably be
-  aligned to 64 bytes.}
+  {Always 64 bytes in size in order to fit inside a cache line, under both 32-bit and 64-bit.  It must be aligned to 64
+  bytes in order to ensure proper alignment of the small blocks following it.}
   TSmallBlockManager = record
     {The first/last partially free span in the arena.  This field must be at the same offsets as
     TSmallBlockSpanHeader.NextPartiallyFreeSpan and TSmallBlockSpanHeader.PreviousPartiallyFreeSpan.}
@@ -1461,7 +1461,9 @@ const
 
   CLargeBlockManagerSize = SizeOf(TLargeBlockManager);
 
-  {Small block sizes (including the header).  The 8 byte aligned sizes are not available under 64-bit.}
+  {Small block sizes (including the header).  The 8 byte aligned sizes are not available under 64-bit.  The first block
+  in a small block span is always 64 byte aligned, so if a block size is a multiple of 8 it will be 8 byte aligned, a
+  multiple of 16 will be 16 byte aligned, a multiple of 32 will be 32 byte aligned, etc.}
   CSmallBlockSizes: array[0..CSmallBlockTypeCount - 1] of Word = (
     {8 byte jumps}
 {$ifdef 32Bit}
@@ -1718,6 +1720,8 @@ end;
 {--------------Move routines---------------}
 {------------------------------------------}
 
+{Moves 16 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
+aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move16(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -1738,6 +1742,8 @@ begin
 {$endif}
 end;
 
+{Moves 32 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
+aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move32(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -1766,6 +1772,8 @@ begin
 {$endif}
 end;
 
+{Moves 48 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
+aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move48(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -1802,6 +1810,8 @@ begin
 {$endif}
 end;
 
+{Moves 64 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
+aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move64(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -1846,8 +1856,9 @@ begin
 {$endif}
 end;
 
-{64-bit is always 16 byte aligned, so the 8 byte aligned moves are not needed under 64-bit.}
+{Blocks under 64-bit are always a multiple of 16 bytes, so the 8 byte multiple moves are not needed under 64-bit.}
 {$ifdef 32Bit}
+{Moves 8 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned and the buffers may not overlap.}
 procedure Move8(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1859,6 +1870,7 @@ begin
 {$endif}
 end;
 
+{Moves 24 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned and the buffers may not overlap.}
 procedure Move24(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1876,6 +1888,7 @@ begin
 {$endif}
 end;
 
+{Moves 40 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned and the buffers may not overlap.}
 procedure Move40(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1899,6 +1912,7 @@ begin
 {$endif}
 end;
 
+{Moves 56 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned and the buffers may not overlap.}
 procedure Move56(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1929,7 +1943,7 @@ begin
 end;
 
 {Moves 8x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a 8
-byte boundary.  The source and destination buffers may not overlap.}
+byte boundary.  The source and destination buffers may not overlap.  ACount will be rounded up to a multiple of 8.}
 procedure MoveMultipleOf8(const ASource; var ADest; ACount: NativeInt);
 {$ifdef X86ASM}
 asm
@@ -1961,14 +1975,53 @@ begin
 end;
 
 {$ifdef X86ASM}
+
+{Multiple of 16 moves for x86 SSE2.  Both ASource and ADest must be aligned on a 8 byte boundary.}
+
+procedure Move16_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  movdqu xmm0, [eax]
+  movdqu [edx], xmm0
+end;
+
+procedure Move32_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  movdqu xmm0, [eax]
+  movdqu xmm1, [eax + 16]
+  movdqu [edx], xmm0
+  movdqu [edx + 16], xmm1
+end;
+
+procedure Move48_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  movdqu xmm0, [eax]
+  movdqu xmm1, [eax + 16]
+  movdqu xmm2, [eax + 32]
+  movdqu [edx], xmm0
+  movdqu [edx + 16], xmm1
+  movdqu [edx + 32], xmm2
+end;
+
+procedure Move64_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
+asm
+  movdqu xmm0, [eax]
+  movdqu xmm1, [eax + 16]
+  movdqu xmm2, [eax + 32]
+  movdqu xmm3, [eax + 48]
+  movdqu [edx], xmm0
+  movdqu [edx + 16], xmm1
+  movdqu [edx + 32], xmm2
+  movdqu [edx + 48], xmm3
+end;
+
 procedure MoveMultipleOf16_x86_SSE2(const ASource; var ADest; ACount: NativeInt);
 asm
   add eax, ecx
   add edx, ecx
   neg ecx
 @MoveLoop:
-  movdqa xmm0, [eax + ecx]
-  movdqa [edx + ecx], xmm0
+  movdqu xmm0, [eax + ecx]
+  movdqu [edx + ecx], xmm0
   add ecx, 16
   js @MoveLoop
 end;
@@ -1979,10 +2032,10 @@ asm
   add edx, ecx
   neg ecx
 @MoveLoop:
-  movdqa xmm0, [eax + ecx]
-  movdqa xmm1, [eax + ecx + 16]
-  movdqa [edx + ecx], xmm0
-  movdqa [edx + ecx + 16], xmm1
+  movdqu xmm0, [eax + ecx]
+  movdqu xmm1, [eax + ecx + 16]
+  movdqu [edx + ecx], xmm0
+  movdqu [edx + ecx + 16], xmm1
   add ecx, 32
   js @MoveLoop
 end;
@@ -1993,14 +2046,14 @@ asm
   add edx, ecx
   neg ecx
 @MoveLoop:
-  movdqa xmm0, [eax + ecx]
-  movdqa xmm1, [eax + ecx + 16]
-  movdqa xmm2, [eax + ecx + 32]
-  movdqa xmm3, [eax + ecx + 48]
-  movdqa [edx + ecx], xmm0
-  movdqa [edx + ecx + 16], xmm1
-  movdqa [edx + ecx + 32], xmm2
-  movdqa [edx + ecx + 48], xmm3
+  movdqu xmm0, [eax + ecx]
+  movdqu xmm1, [eax + ecx + 16]
+  movdqu xmm2, [eax + ecx + 32]
+  movdqu xmm3, [eax + ecx + 48]
+  movdqu [edx + ecx], xmm0
+  movdqu [edx + ecx + 16], xmm1
+  movdqu [edx + ecx + 32], xmm2
+  movdqu [edx + ecx + 48], xmm3
   add ecx, 64
   js @MoveLoop
 end;
@@ -2008,8 +2061,9 @@ end;
 
 {$endif}
 
-{Moves 16x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-16 byte boundary.  The source and destination buffers may not overlap.}
+{Moves 16x bytes from ASource to ADest, where x is an integer >= 1.  Both ASource and ADest must be 8 byte aligned for
+32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
+multiple of 16.}
 procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -2055,8 +2109,9 @@ begin
 {$endif}
 end;
 
-{Moves 32x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-32 byte boundary.  The source and destination buffers may not overlap.}
+{Moves 32x bytes from ASource to ADest, where x is an integer >= 1.  Both ASource and ADest must be 8 byte aligned for
+32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
+multiple of 32.}
 procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -2110,8 +2165,9 @@ begin
 {$endif}
 end;
 
-{Moves 64x bytes from ASource to ADest, where x is an integer >= 1.  ASource and ADest are assumed to be aligned on a
-64 byte boundary.  The source and destination buffers may not overlap.}
+{Moves 64x bytes from ASource to ADest, where x is an integer >= 1.  Both ASource and ADest must be 8 byte aligned for
+32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
+multiple of 64.}
 procedure MoveMultipleOf64_Small(const ASource; var ADest; ACount: NativeInt);
 {$ifndef PurePascal}
 asm
@@ -9525,7 +9581,15 @@ end;
 
 {Gets the optimal move procedure for the given small block size.}
 function FastMM_InitializeMemoryManager_GetOptimalMoveProc(ASmallBlockSize: Integer): TMoveProc;
+{$ifdef X86ASM}
+var
+  LSSE2Available: Boolean;
+{$endif}
 begin
+{$ifdef X86ASM}
+  LSSE2Available := System.TestSSE and 2 <> 0; //Bit 1 = 1 means the CPU supports SSE2
+{$endif}
+
   case ASmallBlockSize of
 
     {64-bit is always 16 byte aligned, so the 8 byte aligned moves are not needed under 64-bit.}
@@ -9536,10 +9600,42 @@ begin
     56: Result := @Move56;
 {$endif}
 
-    16: Result := @Move16;
-    32: Result := @Move32;
-    48: Result := @Move48;
-    64: Result := @Move64;
+    16:
+    begin
+{$ifdef X86ASM}
+      if LSSE2Available then
+        Result := @Move16_x86_SSE2
+      else
+{$endif}
+        Result := @Move16;
+    end;
+    32:
+    begin
+{$ifdef X86ASM}
+      if LSSE2Available then
+        Result := @Move32_x86_SSE2
+      else
+{$endif}
+        Result := @Move32;
+    end;
+    48:
+    begin
+{$ifdef X86ASM}
+      if LSSE2Available then
+        Result := @Move48_x86_SSE2
+      else
+{$endif}
+        Result := @Move48;
+    end;
+    64:
+    begin
+{$ifdef X86ASM}
+      if LSSE2Available then
+        Result := @Move64_x86_SSE2
+      else
+{$endif}
+        Result := @Move64;
+    end
 
   else
     begin
@@ -9548,7 +9644,7 @@ begin
         if ASmallBlockSize < 1024 then
         begin
 {$ifdef X86ASM}
-          if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
+          if LSSE2Available then
             Result := @MoveMultipleOf64_Small_x86_SSE2
           else
 {$endif}
@@ -9559,7 +9655,7 @@ begin
       end else if (ASmallBlockSize and 31) = 0 then
       begin
 {$ifdef X86ASM}
-        if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
+        if LSSE2Available then
           Result := @MoveMultipleOf32_x86_SSE2
         else
 {$endif}
@@ -9567,7 +9663,7 @@ begin
       end else if (ASmallBlockSize and 15) = 0 then
       begin
 {$ifdef X86ASM}
-        if System.TestSSE and 4 <> 0 then //Bit 2 = 1 means the CPU supports SSE2
+        if LSSE2Available then
           Result := @MoveMultipleOf16_x86_SSE2
         else
 {$endif}

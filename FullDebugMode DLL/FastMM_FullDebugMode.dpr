@@ -408,8 +408,7 @@ var
   LOld8087CW: Word;
   LOldMXCSR: Cardinal;
 begin
-  {We assume (for now) that all code will execute within the first 4GB of
-   address space.}
+  {We assume (for now) that all code will execute within the first 4GB of address space.}
   if (AReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (AReturnAddress <= $ffffffff){$endif} then
   begin
     {The call address is up to 8 bytes before the return address}
