@@ -2385,20 +2385,25 @@ begin
   {VirtualQuery might fail if the address is not aligned on a 4K boundary, e.g. it fails when called on Pointer(-1).}
   APRegionStart := Pointer(NativeUInt(APRegionStart) and (not (CVirtualMemoryPageSize - 1)));
 
-  Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo));
-
-  AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
-  AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
-  AMemoryRegionInfo.RegionIsFree := LMemInfo.State = MEM_FREE;
-  AMemoryRegionInfo.AccessRights := [];
-  if (LMemInfo.State = MEM_COMMIT) and (LMemInfo.Protect and PAGE_GUARD = 0) then
+  if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
   begin
-    if (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
-      Include(AMemoryRegionInfo.AccessRights, marRead);
-    if (LMemInfo.Protect and (PAGE_READWRITE or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
-      Include(AMemoryRegionInfo.AccessRights, marWrite);
-    if (LMemInfo.Protect and (PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
-      Include(AMemoryRegionInfo.AccessRights, marExecute);
+    AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
+    AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
+    AMemoryRegionInfo.RegionIsFree := LMemInfo.State = MEM_FREE;
+    AMemoryRegionInfo.AccessRights := [];
+    if (LMemInfo.State = MEM_COMMIT) and (LMemInfo.Protect and PAGE_GUARD = 0) then
+    begin
+      if (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+        Include(AMemoryRegionInfo.AccessRights, marRead);
+      if (LMemInfo.Protect and (PAGE_READWRITE or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+        Include(AMemoryRegionInfo.AccessRights, marWrite);
+      if (LMemInfo.Protect and (PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+        Include(AMemoryRegionInfo.AccessRights, marExecute);
+    end;
+  end
+  else
+  begin
+    AMemoryRegionInfo := Default(TMemoryRegionInfo);
   end;
 end;
 
