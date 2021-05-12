@@ -2382,9 +2382,6 @@ procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegio
 var
   LMemInfo: TMemoryBasicInformation;
 begin
-  {VirtualQuery might fail if the address is not aligned on a 4K boundary, e.g. it fails when called on Pointer(-1).}
-  APRegionStart := Pointer(NativeUInt(APRegionStart) and (not (CVirtualMemoryPageSize - 1)));
-
   if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
   begin
     AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
@@ -2403,6 +2400,8 @@ begin
   end
   else
   begin
+    {VirtualQuery fails for addresses above the highest memory address accessible to the process. (Experimentally
+    determined as addresses >= $ffff0000 under 32-bit, and addresses >= $7fffffff0000 under 64-bit.)}
     AMemoryRegionInfo := Default(TMemoryRegionInfo);
   end;
 end;
