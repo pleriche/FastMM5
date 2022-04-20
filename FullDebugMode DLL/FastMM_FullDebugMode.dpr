@@ -59,7 +59,8 @@ Change log:
 time.}
 {$define JCLDebug}
 {.$define madExcept}
-{.$define EurekaLog}
+{.$define EurekaLog_Legacy}
+{.$define EurekaLog_V7}
 
 {--------------------End of options block-------------------------}
 {$ENDIF}
@@ -70,7 +71,8 @@ library FastMM_FullDebugMode;
 uses
   {$ifdef JCLDebug}JCLDebug,{$endif}
   {$ifdef madExcept}madStackTrace,{$endif}
-  {$ifdef EurekaLog}ExceptionLog,{$endif}
+  {$ifdef EurekaLog_Legacy}ExceptionLog,{$endif}
+  {$ifdef EurekaLog_V7}EFastMM4Support,{$endif}
   System.SysUtils, {$IFDEF MACOS}Posix.Base, SBMapFiles {$ELSE} Winapi.Windows {$ENDIF};
 
 {$R *.res}
@@ -797,11 +799,11 @@ begin
 end;
 {$endif}
 
-{$ifdef EurekaLog}
+{$ifdef EurekaLog_Legacy}
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
   ABuffer: PAnsiChar): PAnsiChar;
 begin
-  {Needs EurekaLog 5.0.5 or a newer build}
+  {Needs EurekaLog 5 or 6}
   Result := ExceptionLog.FastMM_LogStackTrace(
     AReturnAddresses, AMaxDepth, ABuffer,
     {EurekaLog stack trace fine tuning}
@@ -822,6 +824,15 @@ begin
 //      EurekaLog try to fill these with the BPLs functions calls;
 // 3)...if remains some empty call-stack items from the previous process (2),
 //      EurekaLog try to fill these with the DLLs functions calls;
+end;
+{$endif}
+
+{$ifdef EurekaLog_V7}
+function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
+begin
+  {Needs EurekaLog 7 or later}
+  Result := EFastMM4Support.FastMM_LogStackTrace(PPointer(AReturnAddresses), AMaxDepth, ABuffer, 10 * 256,
+    [ddUnit, ddProcedure, ddSourceCode], True, False, False, True, False, True);
 end;
 {$endif}
 

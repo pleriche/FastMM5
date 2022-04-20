@@ -436,8 +436,7 @@ type
 
   {A routine used to convert a stack trace to a textual representation (typically unit and line information).
   APReturnAddresses points to a buffer with up to AMaxDepth return addresses (zero return addresses are ignored).  The
-  textual representation is stored to APBufferPosition.  The routine will update both APBufferPosition and
-  ARemainingBufferSpaceInWideChars.}
+  textual representation is stored to APBuffer.  The routine will return the new end of the buffer.}
   TFastMM_ConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
     APBuffer, APBufferEnd: PWideChar): PWideChar;
 
