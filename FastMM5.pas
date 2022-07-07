@@ -440,6 +440,10 @@ type
   TFastMM_ConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
     APBuffer, APBufferEnd: PWideChar): PWideChar;
 
+  {The interface for the legacy (version 4) stack trace conversion routine in the FastMM_FullDebugMode library.}
+  TFastMM_LegacyConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+    APBuffer: PAnsiChar): PAnsiChar;
+
   {List of registered leaks}
   TFastMM_RegisteredMemoryLeak = record
     LeakAddress: Pointer;
@@ -836,6 +840,23 @@ var
     + '{20}% Efficiency'#13#10#13#10
     + 'Usage Detail:'#13#10;
   FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{21} bytes: {8} x {22} ({23} bytes avg.)'#13#10;
+
+{$ifndef FastMM_DebugLibraryStaticDependency}
+  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
+  loaded.}
+  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
+  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
+  {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
+  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
+  DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
+{$else}
+procedure DebugLibrary_GetRawStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+  external CFastMM_DefaultDebugSupportLibraryName name 'GetRawStackTrace';
+procedure DebugLibrary_GetFrameBasedStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+  external CFastMM_DefaultDebugSupportLibraryName name 'GetFrameBasedStackTrace';
+function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
+{$endif}
 
 implementation
 
@@ -1443,11 +1464,6 @@ type
     procedure VirtualMethod72; virtual; procedure VirtualMethod73; virtual; procedure VirtualMethod74; virtual;
   end;
 
-  {-------Legacy debug support DLL interface--------}
-  {The interface for the legacy (version 4) stack trace conversion routine in the FastMM_FullDebugMode library.}
-  TFastMM_LegacyConvertStackTraceToText = function(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
-    APBuffer: PAnsiChar): PAnsiChar;
-
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -1640,23 +1656,6 @@ var
     '_', 'P', 'I', 'D', '_', '?', '?', '?', '?', '?', '?', '?', '?', #0);
   {The handle of the memory mapped file.}
   SharingFileMappingObjectHandle: NativeUInt;
-{$endif}
-
-{$ifndef FastMM_DebugLibraryStaticDependency}
-  {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
-  loaded.}
-  DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
-  DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
-  {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
-  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
-  DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
-{$else}
-procedure DebugLibrary_GetRawStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
-  external CFastMM_DefaultDebugSupportLibraryName name 'GetRawStackTrace';
-procedure DebugLibrary_GetFrameBasedStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
-  external CFastMM_DefaultDebugSupportLibraryName name 'GetFrameBasedStackTrace';
-function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
-  APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
 {$endif}
 
 {--------------------------------------------------------}
