@@ -631,6 +631,17 @@ function FastMM_ExitDebugMode: Boolean;
 FastMM_ExitDebugMode.}
 function FastMM_DebugModeActive: Boolean;
 
+{Enables/disables the erasure of the content of freed blocks.  Calls may be nested, in which case erasure is only
+disabled when the number of FastMM_EndEraseFreedBlockContent calls equal the number of
+FastMM_BeginEraseFreedBlockContent calls.  When enabled the content of all freed blocks is filled with the debug pattern
+$80808080 before being returned to the memory pool.  This is useful for security purposes, and may also help catch "use
+after free" programming errors (like debug mode, but at reduced CPU cost).}
+function FastMM_BeginEraseFreedBlockContent: Boolean;
+function FastMM_EndEraseFreedBlockContent: Boolean;
+{Returns True if free blocks are currently erased on free, i.e. FastMM_BeginEraseFreedBlockContent has been called more
+times than FastMM_EndEraseFreedBlockContent.}
+function FastMM_EraseFreedBlockContentActive: Boolean;
+
 {Gets/sets the depth of allocation and free stack traces in debug mode.  The minimum stack trace depth is 0, and the
 maximum is CFastMM_MaximumStackTraceEntryCount.}
 function FastMM_GetDebugModeStackTraceEntryCount: Byte;
@@ -1620,8 +1631,11 @@ var
   {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
 
-  {The difference between the number of times EnterDebugMode has been called vs ExitDebugMode.}
+  {The difference between the number of times FastMM_EnterDebugMode has been called vs FastMM_ExitDebugMode.}
   DebugModeCounter: Integer;
+
+  {The difference between the number of times FastMM_BeginEraseFreedBlockContent has been called vs FastMM_EndEraseFreedBlockContent.}
+  EraseFreedBlockContentCounter: Integer;
 
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
@@ -7632,6 +7646,14 @@ begin
 {$endif}
 end;
 
+function FastMM_FreeMem_EraseBeforeFree(APointer: Pointer): Integer;
+begin
+  {Fill the user area of the block with the debug fill pattern before passing the block to the regular FreeMem handler.}
+  FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillPattern1B);
+
+  Result := FastMM_FreeMem(APointer);
+end;
+
 function FastMM_ReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
 {$ifndef PurePascal}
 asm
@@ -9952,7 +9974,10 @@ begin
   if DebugModeCounter <= 0 then
   begin
     LNewMemoryManager.GetMem := FastMM_GetMem;
-    LNewMemoryManager.FreeMem := FastMM_FreeMem;
+    if EraseFreedBlockContentCounter <= 0 then
+      LNewMemoryManager.FreeMem := FastMM_FreeMem
+    else
+      LNewMemoryManager.FreeMem := FastMM_FreeMem_EraseBeforeFree;
     LNewMemoryManager.ReallocMem := FastMM_ReallocMem;
     LNewMemoryManager.AllocMem := FastMM_AllocMem;
     LNewMemoryManager.RegisterExpectedMemoryLeak := FastMM_RegisterExpectedMemoryLeak;
@@ -10117,7 +10142,7 @@ begin
       if not DebugSupportConfigured then
         FastMM_ConfigureDebugMode;
 
-      Result := FastMM_SetNormalOrDebugMemoryManager
+      Result := FastMM_SetNormalOrDebugMemoryManager;
     end
     else
       Result := True;
@@ -10155,6 +10180,37 @@ begin
     AStackTraceEntryCount := CFastMM_StackTrace_MaximumEntryCount;
 
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
+end;
+
+function FastMM_BeginEraseFreedBlockContent: Boolean;
+begin
+  if CurrentInstallationState = mmisInstalled then
+  begin
+    if AtomicIncrement(EraseFreedBlockContentCounter) = 1 then
+      Result := FastMM_SetNormalOrDebugMemoryManager
+    else
+      Result := True;
+  end
+  else
+    Result := False;
+end;
+
+function FastMM_EndEraseFreedBlockContent: Boolean;
+begin
+  if CurrentInstallationState = mmisInstalled then
+  begin
+    if AtomicDecrement(EraseFreedBlockContentCounter) = 0 then
+      Result := FastMM_SetNormalOrDebugMemoryManager
+    else
+      Result := True;
+  end
+  else
+    Result := False;
+end;
+
+function FastMM_EraseFreedBlockContentActive: Boolean;
+begin
+  Result := EraseFreedBlockContentCounter > 0;
 end;
 
 procedure FastMM_ApplyConditionalDefines;
