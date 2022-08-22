@@ -155,6 +155,11 @@ uses
 {$LongStrings On}
 {$Align 8}
 
+{Optionally import the legacy version 4 defines.}
+{$ifdef FastMM_IncludeLegacyOptionsFile}
+  {$Include FastMM4Options.inc}
+{$endif}
+
 {Translate legacy v4 defines to their current names.}
 {$ifdef FullDebugMode} {$define FastMM_FullDebugMode} {$endif}
 {$ifdef LoadDebugDLLDynamically} {$define FastMM_DebugLibraryDynamicLoading} {$endif}
@@ -168,6 +173,7 @@ uses
 {$ifdef ShareMM} {$define FastMM_ShareMMIfLibrary} {$endif}
 {$ifdef ShareMM} {$define FastMM_AttemptToUseSharedMM} {$endif}
 {$ifdef ShareMM} {$define FastMM_NeverUninstall} {$endif}
+{$ifdef NoDebugInfo} {$undef FastMM_NoDebugInfo} {$endif}
 
 {If the "FastMM_FullDebugMode" is defined then a static dependency on the debug support library is assumed, unless
 dynamic loading is explicitly specified.}
@@ -201,6 +207,11 @@ dynamic loading is explicitly specified.}
     {$define WeakMemoryOrdering}
     {$define PurePascal}
   {$endif}
+{$endif}
+
+{Optionally disable debug info in this unit, so the debugger does not step into it.}
+{$ifdef FastMM_NoDebugInfo}
+  {$DEBUGINFO OFF}
 {$endif}
 
 const
