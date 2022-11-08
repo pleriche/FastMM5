@@ -1,6 +1,8 @@
 # FastMM5
 FastMM is a fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
+![FastMM5-social.png](Images/FastMM5-social.png "FastMM5-social.png")
+
 Version 5 is a complete rewrite of FastMM. It is designed from the ground up to simultaneously keep the strengths and address the shortcomings of version 4.992:
 * Multithreaded scaling across multiple CPU cores is massively improved, without memory usage blowout. It can be configured to scale close to linearly for any number of CPU cores.
 * In the Fastcode memory manager benchmark tool FastMM 5 scores 15% higher than FastMM 4.992 on the single threaded benchmarks, and 30% higher on the multithreaded benchmarks. (I7-8700K CPU, EnableMMX and AssumeMultithreaded options enabled.)
