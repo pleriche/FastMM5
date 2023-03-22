@@ -141,7 +141,9 @@ Supported Platforms:
 
 unit FastMM5;
 
+
 interface
+
 
 uses
   Winapi.Windows;
@@ -284,6 +286,7 @@ const
 
   {The default name of debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
+
 
 type
 
@@ -674,6 +677,7 @@ procedure FastMM_SetEventLogFilename(APEventLogFilename: PWideChar);
 function FastMM_GetEventLogFilename: PWideChar;
 {Deletes the event log file.}
 function FastMM_DeleteEventLogFile: Boolean;
+
 
 var
 
@@ -1094,6 +1098,7 @@ const
 
   CCopyrightMessage: PAnsiChar = 'FastMM (c) 2004 - 2021 Pierre le Riche';
 
+
 type
 
   TFastMM_MaximumLengthStackTrace = array[0..CFastMM_StackTrace_MaximumEntryCount - 1] of NativeUInt;
@@ -1486,6 +1491,7 @@ type
     procedure VirtualMethod72; virtual; procedure VirtualMethod73; virtual; procedure VirtualMethod74; virtual;
   end;
 
+
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -1597,6 +1603,7 @@ const
     2496,
     CMaximumSmallBlockSize // = 2624
   );
+
 
 var
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
@@ -8601,6 +8608,7 @@ const
   CMaxMemoryLogNodes = 100000;
   CQuickSortMinimumItemsInPartition = 8;
 
+
 type
   {While scanning the memory pool the list of classes is built up in a binary search tree.}
   PMemoryLogNode = ^TMemoryLogNode;
@@ -10417,12 +10425,15 @@ begin
   Result := True;
 end;
 
+
 {$ifndef FastMM_DisableAutomaticInstall}
 initialization
   FastMM_Initialize;
 
+
 finalization
   FastMM_Finalize;
 {$endif}
+
 
 end.

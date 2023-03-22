@@ -3,10 +3,13 @@ been allocated, and the initialization sections of other units are likely to all
 
 unit FastMMInitSharing;
 
+
 interface
+
 
 uses
   FastMM5;
+
 
 implementation
 

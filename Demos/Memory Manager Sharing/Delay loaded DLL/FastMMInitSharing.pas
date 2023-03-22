@@ -3,10 +3,13 @@ been allocated, and the initialization sections of other units are likely to all
 
 unit FastMMInitSharing;
 
+
 interface
+
 
 uses
   FastMM5;
+
 
 implementation
 
@@ -29,5 +32,6 @@ initialization
     {Another module is already sharing its memory manager, so try to use that.}
     FastMM_AttemptToUseSharedMemoryManager;
   end;
+
 
 end.
