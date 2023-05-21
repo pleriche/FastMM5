@@ -362,7 +362,8 @@ type
     ReservedSpace2: Byte;
     {The number of entries in the allocation and free call stacks in the debug footer.}
     StackTraceEntryCount: Byte;
-    {The debug block signature.  This will always be CIsDebugBlockFlag.}
+    {The debug block signature.  This will be CIsDebugBlockFlag if the debug block is in use, and (CIsDebugBlockFlag or
+    CBlockIsFreeFlag) if it has been freed or is in the process of being freed.}
     DebugBlockFlags: SmallInt;
     {Returns a pointer to the start of the debug footer.  The debug footer consists of the footer checksum (dword),
     followed by the allocation stack trace and then the free stack trace.}
@@ -2351,7 +2352,7 @@ var
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := Winapi.Windows.VirtualAlloc(nil, ABlockSize, MEM_RESERVE, PAGE_NOACCESS);
+    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
   end
   else
   begin
@@ -2359,7 +2360,7 @@ begin
       LAllocationFlags := MEM_COMMIT or MEM_TOP_DOWN
     else
       LAllocationFlags := MEM_COMMIT;
-    Result := Winapi.Windows.VirtualAlloc(nil, ABlockSize, LAllocationFlags, PAGE_READWRITE);
+    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), LAllocationFlags, PAGE_READWRITE);
     {The emergency address space reserve is released when address space runs out for the first time.  This allows some
     subsequent memory allocation requests to succeed in order to allow the application to allocate some memory for error
     handling, etc. in response to the EOutOfMemory exception.  This only applies to 32-bit applications.}
@@ -2389,12 +2390,12 @@ function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: Nativ
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_NOACCESS) <> nil;
+    Result := Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) <> nil;
   end
   else
   begin
-    Result := (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_RESERVE, PAGE_READWRITE) <> nil)
-      and (Winapi.Windows.VirtualAlloc(APAddress, ABlockSize, MEM_COMMIT, PAGE_READWRITE) <> nil);
+    Result := (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_READWRITE) <> nil)
+      and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) <> nil);
   end;
 
   if Result then
@@ -2490,7 +2491,7 @@ begin
   if AReturnLibraryFilename and IsLibrary then
     LModuleHandle := HInstance;
 
-  LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, CharCount(APBufferEnd, APFilenameBuffer));
+  LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
   Inc(Result, LNumChars);
 end;
 
@@ -2503,7 +2504,7 @@ begin
   if Result >= APBufferEnd then
     Exit;
 
-  LBufferSize := (NativeInt(APBufferEnd) - NativeInt(Result)) div SizeOf(WideChar);
+  LBufferSize := (NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar);
   LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
@@ -2886,7 +2887,7 @@ begin
     Exit(NativeUInt(LLeakedClass));
 
   LStringType := FastMM_DetectStringData(APMemoryBlock, AAvailableSpaceInBlock);
-  Result := Ord(LStringType);
+  Result := NativeUInt(Ord(LStringType));
 end;
 
 {Counts the number of characters up to the trailing #0}
@@ -2946,7 +2947,7 @@ end;
 function NativeUIntToHexadecimalBuffer(AValue: NativeUInt; APTarget, APTargetBufferEnd: PWideChar): PWideChar;
 var
   LTempBuffer: array[0..15] of WideChar;
-  LDigit: NativeInt;
+  LDigit: NativeUInt;
   LDigitCount: Integer;
   LPPos: PWideChar;
 begin
@@ -2974,7 +2975,7 @@ end;
 function NativeUIntToTextBuffer(AValue: NativeUInt; APTarget, APTargetBufferEnd: PWideChar): PWideChar;
 var
   LTempBuffer: array[0..20] of WideChar;
-  LDigit: NativeInt;
+  LDigit: NativeUInt;
   LDigitCount: Integer;
   LPPos: PWideChar;
 begin
@@ -3008,7 +3009,7 @@ begin
   if AValue < 0 then
     Result := AppendTextToBuffer(@CMinusSign, 1, Result, APTargetBufferEnd);
 
-  Result := NativeUIntToTextBuffer(Abs(AValue), Result, APTargetBufferEnd);
+  Result := NativeUIntToTextBuffer(NativeUInt(Abs(AValue)), Result, APTargetBufferEnd);
 end;
 
 function BlockContentTypeToTextBuffer(ABlockContentType: NativeUInt; APTarget, APTargetBufferEnd: PWideChar): PWideChar;
@@ -4364,7 +4365,7 @@ begin
     begin
       OS_GetVirtualMemoryRegionInfo(LPCurrentSegment, LMemoryRegionInfo);
 
-      Result := OS_FreeVirtualMemory(LPCurrentSegment, LMemoryRegionInfo.RegionSize);
+      Result := OS_FreeVirtualMemory(LPCurrentSegment, NativeInt(LMemoryRegionInfo.RegionSize));
       if Result <> 0 then
         Break;
 
@@ -4607,7 +4608,7 @@ begin
         {There is enough space after the block to extend it - determine by how much}
         LNewSegmentSize := (LNewAllocSize - LOldAvailableSize + CLargeBlockGranularity - 1) and -CLargeBlockGranularity;
         if NativeUInt(LNewSegmentSize) > LMemoryRegionInfo.RegionSize then
-          LNewSegmentSize := LMemoryRegionInfo.RegionSize;
+          LNewSegmentSize := NativeInt(LMemoryRegionInfo.RegionSize);
         {Attempt to reserve the address range (which will fail if another thread has just reserved it) and commit it
         immediately afterwards.}
         if OS_AllocateVirtualMemoryAtAddress(LPNextSegment, LNewSegmentSize, False) then
@@ -4783,7 +4784,7 @@ begin
   {Get the bin for blocks of this size.  If the block is not aligned to a bin size, then put it in the closest bin
   smaller than the block size.}
   if AMediumBlockSize < CMaximumMediumBlockSize then
-    LBinNumber := GetBinNumberForMediumBlockSize(AMediumBlockSize)
+    LBinNumber := Cardinal(GetBinNumberForMediumBlockSize(AMediumBlockSize))
   else
     LBinNumber := CMediumBlockBinCount - 1;
   LPBin := @APMediumBlockManager.FirstFreeBlockInBin[LBinNumber];
@@ -4843,7 +4844,7 @@ begin
   begin
     {Calculate the bin number from the bin pointer:  LPNextFreeBlock will be a pointer to the bin, since the bin is now
     empty.)}
-    LBinNumber := (NativeInt(LPNextFreeBlock) - NativeInt(@APMediumBlockManager.FirstFreeBlockInBin)) shr CPointerSizeBitShift;
+    LBinNumber := (NativeUInt(LPNextFreeBlock) - NativeUInt(@APMediumBlockManager.FirstFreeBlockInBin)) shr CPointerSizeBitShift;
     LBinGroupNumber := LBinNumber shr 5; //32 bins per group
     {Flag this bin as empty}
     APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]
@@ -7886,7 +7887,7 @@ end;
 
 procedure FastMM_NoOpGetStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
 var
-  i: Integer;
+  i: Cardinal;
 begin
   for i := 1 to AMaxDepth do
   begin
@@ -9256,7 +9257,7 @@ end;
 
 {Tries to account for a memory leak.  If the block is an expected leak then it is removed from the list of leaks and
 the leak type is returned.}
-function FastMM_PerformMemoryLeakCheck_DetectLeakType(AAddress: Pointer; ASpaceInsideBlock: NativeUInt): TMemoryLeakType;
+function FastMM_PerformMemoryLeakCheck_DetectLeakType(AAddress: Pointer; ASpaceInsideBlock: NativeInt): TMemoryLeakType;
 var
   LLeak: TExpectedMemoryLeak;
 begin
