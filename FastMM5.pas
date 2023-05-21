@@ -173,7 +173,7 @@ uses
 {$ifdef ShareMM} {$define FastMM_ShareMMIfLibrary} {$endif}
 {$ifdef ShareMM} {$define FastMM_AttemptToUseSharedMM} {$endif}
 {$ifdef ShareMM} {$define FastMM_NeverUninstall} {$endif}
-{$ifdef NoDebugInfo} {$undef FastMM_NoDebugInfo} {$endif}
+{$ifdef NoDebugInfo} {$define FastMM_NoDebugInfo} {$endif}
 
 {If the "FastMM_FullDebugMode" is defined then a static dependency on the debug support library is assumed, unless
 dynamic loading is explicitly specified.}
