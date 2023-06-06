@@ -550,14 +550,16 @@ the total used by the heap, as well as all internal management structures.  This
 FastMM_SetMemoryUsageLimit call.}
 function FastMM_GetCurrentMemoryUsage: NativeUInt;
 
-{Returns a THeapStatus structure with information about the current memory usage.}
+{Returns a THeapStatus structure with information about the current memory usage.  Note that this call requires walking
+of the entire memory pool and is thus very expensive.}
 function FastMM_GetHeapStatus: THeapStatus;
 
 {Returns the number of allocated bytes, the number of overhead bytes (wastage due to management structures and internal
 fragmentation), as well as the efficiency percentage.  The efficiency percentage is the total allocated bytes divided
 by the total address space committed (whether in use or reserved for future use) multiplied by 100.  Note that freed
 blocks not yet released to the operating system are included in the overhead, which differs from FastMM_GetHeapStatus
-that exposes freed blocks in separate fields.}
+that exposes freed blocks in separate fields.  Note that this call requires walking of the entire memory pool and is
+thus very expensive.}
 function FastMM_GetUsageSummary: TFastMM_UsageSummary;
 
 {Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class.
