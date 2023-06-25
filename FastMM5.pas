@@ -1,6 +1,6 @@
 {
 
-FastMM 5.04
+FastMM 5.05
 
 Description:
   A fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU
@@ -217,7 +217,7 @@ dynamic loading is explicitly specified.}
 const
 
   {The current version of FastMM.  The first digit is the major version, followed by a two digit minor version number.}
-  CFastMM_Version = 504;
+  CFastMM_Version = 505;
 
   {The number of arenas for small, medium and large blocks.  Increasing the number of arenas decreases the likelihood
   of thread contention happening (when the number of threads inside a GetMem call is greater than the number of arenas),
