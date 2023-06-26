@@ -542,8 +542,9 @@ checking for corruption of the debug header, footer, and in the case of freed bl
 modified after the block was freed.  If a corruption is encountered an error message will be logged and/or displayed
 (as per the error logging configuration) and an invalid pointer exception will be raised.  This is a function that
 always returns True (unless an exception is raised), so may be used in a debug watch to scan blocks every time the
-debugger stops on a breakpoint, etc.}
-function FastMM_ScanDebugBlocksForCorruption: Boolean;
+debugger stops on a breakpoint, etc.  ALockTimeoutMilliseconds is the maximum wait time for another thread to release
+a lock on a block before the block is skipped (0 = no waiting).}
+function FastMM_ScanDebugBlocksForCorruption(ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
 
 {Returns the number of bytes of address space that is currently either committed or reserved by FastMM.  This includes
 the total used by the heap, as well as all internal management structures.  This may be restricted via the
@@ -551,22 +552,25 @@ FastMM_SetMemoryUsageLimit call.}
 function FastMM_GetCurrentMemoryUsage: NativeUInt;
 
 {Returns a THeapStatus structure with information about the current memory usage.  Note that this call requires walking
-of the entire memory pool and is thus very expensive.}
-function FastMM_GetHeapStatus: THeapStatus;
+of the entire memory pool and is thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for another
+thread to release a lock on a block before the block is skipped (0 = no waiting).}
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal = 50): THeapStatus;
 
 {Returns the number of allocated bytes, the number of overhead bytes (wastage due to management structures and internal
 fragmentation), as well as the efficiency percentage.  The efficiency percentage is the total allocated bytes divided
 by the total address space committed (whether in use or reserved for future use) multiplied by 100.  Note that freed
 blocks not yet released to the operating system are included in the overhead, which differs from FastMM_GetHeapStatus
 that exposes freed blocks in separate fields.  Note that this call requires walking of the entire memory pool and is
-thus very expensive.}
-function FastMM_GetUsageSummary: TFastMM_UsageSummary;
+thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for another thread to release a lock on a block
+before the block is skipped (0 = no waiting).}
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastMM_UsageSummary;
 
 {Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.  ALockTimeoutMilliseconds is the maximum
-amount of time to wait for a lock on a manager to be released, before it is skipped.  Returns True on success.}
+amount of time to wait for a lock on a manager to be released, before it is skipped (0 = no waiting).  Returns True on
+success.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
-  ALockTimeoutMilliseconds: Cardinal = 1000): Boolean;
+  ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -8490,9 +8494,10 @@ begin
     System.Error(reInvalidPtr);
 end;
 
-function FastMM_ScanDebugBlocksForCorruption: Boolean;
+function FastMM_ScanDebugBlocksForCorruption(ALockTimeoutMilliseconds: Cardinal): Boolean;
 begin
-  FastMM_WalkBlocks(FastMM_ScanDebugBlocksForCorruption_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], False);
+  FastMM_WalkBlocks(FastMM_ScanDebugBlocksForCorruption_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], False,
+    nil, ALockTimeoutMilliseconds);
 
   Result := True;
 end;
@@ -8550,23 +8555,24 @@ begin
 end;
 
 {Returns a THeapStatus structure with information about the current memory usage.}
-function FastMM_GetHeapStatus: THeapStatus;
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
 begin
   Result := Default(THeapStatus);
 
   FastMM_WalkBlocks(FastMM_GetHeapStatus_CallBack,
-    [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result);
+    [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result,
+    ALockTimeoutMilliseconds);
 
   Result.TotalFree := Result.FreeSmall + Result.FreeBig + Result.Unused;
   Result.TotalAddrSpace := Result.TotalCommitted;
   Result.Overhead := Result.TotalAddrSpace - Result.TotalAllocated - Result.TotalFree;
 end;
 
-function FastMM_GetUsageSummary: TFastMM_UsageSummary;
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal): TFastMM_UsageSummary;
 var
   LHeapStatus: THeapStatus;
 begin
-  LHeapStatus := FastMM_GetHeapStatus;
+  LHeapStatus := FastMM_GetHeapStatus(ALockTimeoutMilliseconds);
 
   Result.AllocatedBytes := LHeapStatus.TotalAllocated;
   Result.OverheadBytes := LHeapStatus.TotalAddrSpace - LHeapStatus.TotalAllocated;
@@ -8812,7 +8818,7 @@ begin
   end;
 end;
 
-{Writes a log file containing a summary of the memory mananger state and a summary of allocated blocks grouped by class.
+{Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
   ALockTimeoutMilliseconds: Cardinal): Boolean;
@@ -9492,13 +9498,15 @@ begin
 end;
 
 procedure FastMM_PerformMemoryLeakCheck;
+const
+  CFastMM_PerformMemoryLeakCheck_LockTimeout = 1000;
 var
   LLeakSummary: TMemoryLeakSummary;
 begin
   LLeakSummary := Default(TMemoryLeakSummary);
 
   FastMM_WalkBlocks(FastMM_PerformMemoryLeakCheck_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], True,
-    @LLeakSummary);
+    @LLeakSummary, CFastMM_PerformMemoryLeakCheck_LockTimeout);
 
   {Build the leak summary by walking all the block categories.}
   if (LLeakSummary.LeakCount > 0)
