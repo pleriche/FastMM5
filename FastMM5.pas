@@ -1456,7 +1456,7 @@ type
   public
     {Virtual method calls that will redirect to VirtualMethodOnFreedObject}
     function Equals(Obj: TObject): Boolean; override;
-    function GetHashCode: Integer; override;
+    function GetHashCode: {$if CompilerVersion < 36}Integer{$else}NativeInt{$endif}; override;
     function ToString: string; override;
     function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
     procedure AfterConstruction; override;
@@ -3722,7 +3722,7 @@ begin
   VirtualMethodOnFreedObject('FreeInstance');
 end;
 
-function TFastMM_FreedObject.GetHashCode: Integer;
+function TFastMM_FreedObject.GetHashCode: {$if CompilerVersion < 36}Integer{$else}NativeInt{$endif};
 begin
   VirtualMethodOnFreedObject('GetHashCode');
   Result := 0; //Suppress compiler warning
