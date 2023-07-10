@@ -9174,7 +9174,7 @@ end;
 
 {Registers expected memory leaks.  Returns True on success.  The list of leaked blocks is limited, so failure is
 possible if the list is full.}
-function FastMM_RegisterExpectedMemoryLeak(ALeakedPointer: Pointer): Boolean; overload;
+function FastMM_RegisterExpectedMemoryLeak(ALeakedPointer: Pointer): Boolean;
 var
   LNewEntry: TExpectedMemoryLeak;
 begin
@@ -9189,7 +9189,7 @@ begin
   ExpectedMemoryLeaksListLocked := 0;
 end;
 
-function FastMM_RegisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean; overload;
+function FastMM_RegisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean;
 var
   LNewEntry: TExpectedMemoryLeak;
 begin
@@ -9204,7 +9204,7 @@ begin
   ExpectedMemoryLeaksListLocked := 0;
 end;
 
-function FastMM_RegisterExpectedMemoryLeak(ALeakedBlockSize: NativeInt; ACount: Integer = 1): Boolean; overload;
+function FastMM_RegisterExpectedMemoryLeak(ALeakedBlockSize: NativeInt; ACount: Integer = 1): Boolean;
 var
   LNewEntry: TExpectedMemoryLeak;
 begin
@@ -9219,7 +9219,7 @@ begin
   ExpectedMemoryLeaksListLocked := 0;
 end;
 
-function FastMM_UnregisterExpectedMemoryLeak(ALeakedPointer: Pointer): Boolean; overload;
+function FastMM_UnregisterExpectedMemoryLeak(ALeakedPointer: Pointer): Boolean;
 var
   LNewEntry: TExpectedMemoryLeak;
 begin
@@ -9234,12 +9234,12 @@ begin
   ExpectedMemoryLeaksListLocked := 0;
 end;
 
-function FastMM_UnregisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean; overload;
+function FastMM_UnregisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean;
 begin
   Result := FastMM_RegisterExpectedMemoryLeak(ALeakedObjectClass, -ACount);
 end;
 
-function FastMM_UnregisterExpectedMemoryLeak(ALeakedBlockSize: NativeInt; ACount: Integer = 1): Boolean; overload;
+function FastMM_UnregisterExpectedMemoryLeak(ALeakedBlockSize: NativeInt; ACount: Integer = 1): Boolean;
 begin
   Result := FastMM_RegisterExpectedMemoryLeak(ALeakedBlockSize, -ACount);
 end;
