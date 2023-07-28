@@ -112,6 +112,9 @@ Usage Instructions:
     with EnableMemoryLeakReporting - if the application is not running under the debugger then the
     EnableMemoryLeakReporting define is ignored.
 
+    FastMM_RequireIDEPresenceForLeakReporting (or RequireIDEPresenceForLeakReporting) - Used in conjunction with
+    EnableMemoryLeakReporting - if the Delphi IDE is not running then the EnableMemoryLeakReporting define is ignored.
+
     FastMM_NoMessageBoxes (or NoMessageBoxes) - Clears the set of events that will cause a message box to be displayed
     (FastMM_MessageBoxEvents) on startup.
 
@@ -168,6 +171,7 @@ uses
 {$ifdef Align16Bytes} {$define FastMM_Align16Bytes} {$endif}
 {$ifdef EnableMemoryLeakReporting} {$define FastMM_EnableMemoryLeakReporting} {$endif}
 {$ifdef RequireDebuggerPresenceForLeakReporting} {$define FastMM_RequireDebuggerPresenceForLeakReporting} {$endif}
+{$ifdef RequireIDEPresenceForLeakReporting} {$define FastMM_RequireIDEPresenceForLeakReporting} {$endif}
 {$ifdef NoMessageBoxes} {$define FastMM_NoMessageBoxes} {$endif}
 {$ifdef ShareMM} {$define FastMM_ShareMM} {$endif}
 {$ifdef ShareMM} {$define FastMM_ShareMMIfLibrary} {$endif}
@@ -10268,10 +10272,14 @@ begin
   {$endif}
 
   {$ifdef FastMM_EnableMemoryLeakReporting}
+  if True
   {$ifdef FastMM_RequireDebuggerPresenceForLeakReporting}
-  if DebugHook <> 0 then
+     and (DebugHook <> 0)
   {$endif}
-  begin
+  {$ifdef FastMM_RequireIDEPresenceForLeakReporting}
+     and (FindWindowA('TAppBuilder', nil) <> 0)
+  {$endif}
+  then begin
     FastMM_LogToFileEvents := FastMM_LogToFileEvents + [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary];
     FastMM_MessageBoxEvents := FastMM_MessageBoxEvents + [mmetUnexpectedMemoryLeakSummary];
   end;
