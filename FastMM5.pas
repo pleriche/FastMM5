@@ -527,10 +527,14 @@ function FastMM_ProcessAllPendingFrees: Boolean;
 AWalkBlockTypes = [] then all block types is assumed.  Note that pending free blocks are treated as used blocks for the
 purpose of the AWalkUsedBlocksOnly parameter.  Call FastMM_ProcessAllPendingFrees first in order to process all pending
 frees if this is a concern.  ALockTimeoutMilliseconds is the maximum number of millseconds that FastMM_WalkBlocks will
-wait to acquire a lock on an arena, skipping the arena if it is unable to do so.  Returns True if all blocks were walked
-successfully, False if one or more arenas were skipped due to a lock timeout.}
+wait to acquire a lock on an arena, skipping the arena if it is unable to do so.  Specify AMinimumAllocationGroup and
+AMaximumAllocationGroup to walk only blocks in the specified allocation group range (see FastMM_CurrentAllocationGroup).
+Note that only blocks that were allocated in debug mode are linked to an allocation group, other blocks are treated as
+having an allocation group of 0.  Returns True if all blocks were walked successfully, False if one or more arenas were
+skipped due to a lock timeout.}
 function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
-  AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil; ALockTimeoutMilliseconds: Cardinal = 1000): Boolean;
+  AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil; ALockTimeoutMilliseconds: Cardinal = 1000;
+  AMinimumAllocationGroup: Cardinal = 0; AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
 
 {Attempts to determine whether APMemoryBlock points to string data.  Used by the leak classification code when a block
 cannot be identified as a class instance.  May also be used inside the FastMM_WalkBlocks callback in order to determine
@@ -571,10 +575,13 @@ function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastM
 
 {Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.  ALockTimeoutMilliseconds is the maximum
-amount of time to wait for a lock on a manager to be released, before it is skipped (0 = no waiting).  Returns True on
-success.}
+amount of time to wait for a lock on a manager to be released, before it is skipped (0 = no waiting).  Specify
+AMinimumAllocationGroup and AMaximumAllocationGroup to only list details for blocks in the specified allocation group
+range (see FastMM_CurrentAllocationGroup).  Note that only blocks that were allocated in debug mode are linked to an
+allocation group, other blocks are treated as having an allocation group of 0.  Returns True on success.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
-  ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
+  ALockTimeoutMilliseconds: Cardinal = 50; AMinimumAllocationGroup: Cardinal = 0;
+  AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -8114,17 +8121,27 @@ begin
 
 end;
 
-{Adjusts the block information for blocks that contain a debug mode sub-block.}
-procedure FastMM_WalkBlocks_AdjustForDebugSubBlock(var ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo); inline;
+{Adjusts the block information for blocks that contain a debug mode sub-block.  Returns True if the allocation group for
+the block is within the given range, False otherwise.}
+function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
+  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean; inline;
 begin
   if BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
     ABlockInfo.DebugInformation := ABlockInfo.BlockAddress;
     ABlockInfo.UsableSize := ABlockInfo.DebugInformation.UserSize;
     Inc(PByte(ABlockInfo.BlockAddress), CDebugBlockHeaderSize);
+
+    Result := (ABlockInfo.DebugInformation.AllocationGroup >= AMinimumAllocationGroup)
+      and (ABlockInfo.DebugInformation.AllocationGroup <= AMaximumAllocationGroup);
   end
   else
+  begin
     ABlockInfo.DebugInformation := nil;
+
+    {Non-debug blocks have an allocation group of 0.}
+    Result := AMinimumAllocationGroup = 0;
+  end;
 end;
 
 {Checks for timeout while waiting on a locked resource.  Returns False if the timeout has expired.}
@@ -8154,7 +8171,8 @@ end;
 
 {Walks the block types indicated by the AWalkBlockTypes set, calling ACallBack for each allocated block.}
 function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes;
-  AWalkUsedBlocksOnly: Boolean; AUserData: Pointer; ALockTimeoutMilliseconds: Cardinal): Boolean;
+  AWalkUsedBlocksOnly: Boolean; AUserData: Pointer;
+  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean;
 var
   LArenaIndex: Integer;
   LLockWaitTimeMilliseconds, LTimestampMilliseconds: Cardinal;
@@ -8176,6 +8194,11 @@ begin
 
   if AWalkBlockTypes = [] then
     AWalkBlockTypes := [Low(TFastMM_WalkAllocatedBlocksBlockType)..High(TFastMM_WalkAllocatedBlocksBlockType)];
+
+  {Medium and small block pools cannot be linked to an allocation group, so if the minimum allocation group is greater
+  than 0 then these are automatically excluded.}
+  if AMinimumAllocationGroup > 0 then
+    AWalkBlockTypes := AWalkBlockTypes - [btMediumBlockSpan, btSmallBlockSpan];
 
   {Walk the large block managers}
   if btLargeBlock in AWalkBlockTypes then
@@ -8215,8 +8238,8 @@ begin
         LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
         LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
 
-        FastMM_WalkBlocks_AdjustForDebugSubBlock(LBlockInfo);
-        ACallBack(LBlockInfo);
+        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+          ACallBack(LBlockInfo);
 
         LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
       end;
@@ -8404,8 +8427,8 @@ begin
                     LBlockInfo.SmallBlockSpanBlockSize := 0;
                     LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                     LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-                    FastMM_WalkBlocks_AdjustForDebugSubBlock(LBlockInfo);
-                    ACallBack(LBlockInfo);
+                    if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                      ACallBack(LBlockInfo);
                   end;
                 end;
 
@@ -8436,8 +8459,8 @@ begin
                       LBlockInfo.SmallBlockSpanBlockSize := 0;
                       LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
 
-                      FastMM_WalkBlocks_AdjustForDebugSubBlock(LBlockInfo);
-                      ACallBack(LBlockInfo);
+                      if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                        ACallBack(LBlockInfo);
                     end;
 
                     Inc(LSmallBlockOffset, LPSmallBlockManager.BlockSize);
@@ -8825,7 +8848,7 @@ end;
 {Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
-  ALockTimeoutMilliseconds: Cardinal): Boolean;
+  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8850,7 +8873,7 @@ begin
     try
       {Obtain the list of classes, together with the total memory usage and block count for each.}
       FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
-        ALockTimeoutMilliseconds);
+        ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup);
 
       {Sort the classes in descending total memory usage order:  Do the initial QuickSort pass over the list to sort the
       list in groups of QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
@@ -10279,7 +10302,8 @@ begin
   {$ifdef FastMM_RequireIDEPresenceForLeakReporting}
      and (FindWindowA('TAppBuilder', nil) <> 0)
   {$endif}
-  then begin
+  then
+  begin
     FastMM_LogToFileEvents := FastMM_LogToFileEvents + [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary];
     FastMM_MessageBoxEvents := FastMM_MessageBoxEvents + [mmetUnexpectedMemoryLeakSummary];
   end;
