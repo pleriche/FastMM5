@@ -7843,6 +7843,11 @@ begin
   if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
     FastMM_ScanDebugBlocksForCorruption;
 
+  {All blocks are at least 16 byte aligned under 64-bit and 8-byte aligned under 32-bit.  Catch potentially invalid
+  pointers early, before they can cause serious trouble.}
+  if NativeUInt(APointer) and {$ifdef 64Bit}15{$else}7{$endif} <> 0 then
+    System.Error(reInvalidPtr);
+
   Result := FastMM_FreeMem(APointer);
 end;
 
@@ -7853,6 +7858,11 @@ var
 begin
   if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
     FastMM_ScanDebugBlocksForCorruption;
+
+  {All blocks are at least 16 byte aligned under 64-bit and 8-byte aligned under 32-bit.  Catch potentially invalid
+  pointers early, before they can cause serious trouble.}
+  if NativeUInt(APointer) and {$ifdef 64Bit}15{$else}7{$endif} <> 0 then
+    System.Error(reInvalidPtr);
 
   {Read the flags from the block header.}
   LBlockHeader := PBlockStatusFlags(APointer)[-1];
