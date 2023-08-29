@@ -1,7 +1,7 @@
 [core]
-	autocrlf=true
+  autocrlf=true
+
 # Set the default behavior, in case people don't have core.autocrlf set.
-* text=auto
 
 # Explicitly declare text files you want to always be normalized and converted
 # to native line endings on checkout.
@@ -12,6 +12,8 @@
 *.md text eol=lf
 
 # Declare files that will always have CRLF line endings on checkout.
+*.txt text eol=crlf
+*.reg text eol=crlf
 *.sln text eol=crlf
 *.dpr text eol=crlf
 *.pas text eol=crlf
