@@ -1,6 +1,8 @@
 # FastMM5
 FastMM is a fast replacement memory manager for Embarcadero Delphi applications that scales well across multiple threads and CPU cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
+![FastMM5-social.png](Images/FastMM5-social.png "FastMM5-social.png")
+
 Version 5 is a complete rewrite of FastMM. It is designed from the ground up to simultaneously keep the strengths and address the shortcomings of version 4.992:
 * Multithreaded scaling across multiple CPU cores is massively improved, without memory usage blowout. It can be configured to scale close to linearly for any number of CPU cores.
 * In the Fastcode memory manager benchmark tool FastMM 5 scores 15% higher than FastMM 4.992 on the single threaded benchmarks, and 30% higher on the multithreaded benchmarks. (I7-8700K CPU, EnableMMX and AssumeMultithreaded options enabled.)
@@ -108,3 +110,11 @@ Windows, 32-bit and 64-bit
 * Ensure that the event log file is closed before showing any dialogs, so the user can access it while the dialog is displayed.
 * Implement several 32-bit SSE2 move routines (64-bit already used SSE2)
 * Make the static dependency on the FastMM_FullDebugMode library optional when FastMM_FullDebugMode is defined. When FastMM_DebugLibraryDynamicLoading (or LoadDebugDLLDynamically) is defined then the DLL will be loaded dynamically.
+
+##### Version 5.05
+* Add the FastMM_AllocateTopDown (Boolean, default False) option. When True, allocates all memory from the top of the address space downward.  This is useful to catch bad pointer typecasts in 64-bit code, where pointers would otherwise often fit in a 32-bit variable.  Note that this comes with a performance impact in the other of O(n^2), where n is the number of chunks obtained from the OS.
+* Add support for Eurekalog 7 in FastMM_FullDebugMode.
+* Add FastMM_BeginEraseFreedBlockContent and FastMM_EndEraseFreedBlockContent calls. These calls enable/disable the erasure of the content of freed blocks.  Calls may be nested, in which case erasure is only disabled when the number of FastMM_EndEraseFreedBlockContent calls equal the number of FastMM_BeginEraseFreedBlockContent calls.  When enabled the content of all freed blocks is filled with the debug pattern $80808080 before being returned to the memory pool.  This is useful for security purposes, and may also help catch "use after free" programming errors (like debug mode, but at reduced CPU cost).
+* Add support for the FastMM_IncludeLegacyOptionsFile define. If defined the legacy FastMM4Options.inc will be included (and the version 4 options will be translated to the equivalent v5 options).
+* Add the FastMM_NoDebugInfo option. If defined then debug info will not be emitted for FastMM5.pas, stopping the debugger from stepping into it.
+* Fix a race condition in FastMM_ScanDebugBlocksForCorruption that could erroneously report a debug block that is in the process of being freed by another thread as corrupted.
