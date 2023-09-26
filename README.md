@@ -15,7 +15,7 @@ Version 5 is a complete rewrite of FastMM. It is designed from the ground up to 
 Homepage: https://github.com/pleriche/FastMM5
 
 ### Developed by
-Pierre le Riche, copyright 2004 - 2020, all rights reserved
+Pierre le Riche, copyright 2004 - 2023, all rights reserved
 
 ### Sponsored by
 [gs-soft AG](https://www.gs-soft.com/)
