@@ -2781,11 +2781,18 @@ var
       and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtSelfPtr))
       and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtParent)) then
     begin
-      {Get a pointer to the parent class' self pointer}
-      LParentClassSelfPointer := PPointer(PByte(AClassPointer) + vmtParent)^;
-      {Is the "Self" pointer valid?}
-      if PPointer(PByte(AClassPointer) + vmtSelfPtr)^ <> AClassPointer then
+      try
+        {Get a pointer to the parent class' self pointer}
+        LParentClassSelfPointer := PPointer(PByte(AClassPointer) + vmtParent)^;
+        {Is the "Self" pointer valid?}
+        if PPointer(PByte(AClassPointer) + vmtSelfPtr)^ <> AClassPointer then
+          Exit(False);
+      except
+        {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
+        thread frees the block at an inopportune moment then the reads above may cause an A/V.  If this happens then
+        the AClassPointer cannot be a class.}
         Exit(False);
+      end;
       {No more parent classes?}
       if LParentClassSelfPointer = nil then
         Exit(True);
