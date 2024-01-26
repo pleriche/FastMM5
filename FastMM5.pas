@@ -158,6 +158,11 @@ uses
 {$LongStrings On}
 {$Align 8}
 
+{Disable some compiler warnings}
+{$warn Unsafe_Code Off}
+{$warn Unsafe_Type Off}
+{$warn Unsafe_Cast Off}
+
 {Optionally import the legacy version 4 defines.}
 {$ifdef FastMM_IncludeLegacyOptionsFile}
   {$Include FastMM4Options.inc}
@@ -2521,7 +2526,7 @@ begin
   if Result >= APBufferEnd then
     Exit;
 
-  LBufferSize := (NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar);
+  LBufferSize := Cardinal((NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar));
   LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
@@ -2590,7 +2595,7 @@ end;
 
 function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; inline;
 begin
-  Result := (NativeInt(APFirstFreeChar) - NativeInt(APBufferStart)) div SizeOf(WideChar);
+  Result := Integer((NativeInt(APFirstFreeChar) - NativeInt(APBufferStart)) div SizeOf(WideChar));
 end;
 
 {Converts the UTF-16 text pointed to by APWideText to UTF-8 in the buffer provided.  Returns a pointer to the byte
@@ -2734,7 +2739,7 @@ begin
       Inc(LPBufferPos, AWideCharCount * 2);
     end;
 
-    Result := OS_WriteFile(AFileHandle, LPBufferStart, NativeInt(LPBufferPos) - NativeInt(LPBufferStart));
+    Result := OS_WriteFile(AFileHandle, LPBufferStart, Integer(NativeInt(LPBufferPos) - NativeInt(LPBufferStart)));
 
   finally
     OS_FreeVirtualMemory(LPBufferStart, LBufferSize);
@@ -3316,21 +3321,21 @@ begin
   Result := APTokenValueBufferPos;
 
   LDateBuffer[3] := WideChar(Ord('0') + AYear mod 10);
-  AYear := AYear div 10;
+  AYear := Word(AYear div 10);
   LDateBuffer[2] := WideChar(Ord('0') + AYear mod 10);
-  AYear := AYear div 10;
+  AYear := Word(AYear div 10);
   LDateBuffer[1] := WideChar(Ord('0') + AYear mod 10);
-  AYear := AYear div 10;
+  AYear := Word(AYear div 10);
   LDateBuffer[0] := WideChar(Ord('0') + AYear mod 10);
 
   LDateBuffer[4] := '-';
   LDateBuffer[6] := WideChar(Ord('0') + AMonth mod 10);
-  AMonth := AMonth div 10;
+  AMonth := Word(AMonth div 10);
   LDateBuffer[5] := WideChar(Ord('0') + AMonth mod 10);
 
   LDateBuffer[7] := '-';
   LDateBuffer[9] := WideChar(Ord('0') + ADay mod 10);
-  ADay := ADay div 10;
+  ADay := Word(ADay div 10);
   LDateBuffer[8] := WideChar(Ord('0') + ADay mod 10);
 
   Result := AddTokenValue(ATokenValues, ATokenID, @LDateBuffer, Length(LDateBuffer), Result, APBufferEnd);
@@ -3345,17 +3350,17 @@ begin
   Result := APTokenValueBufferPos;
 
   LTimeBuffer[1] := WideChar(Ord('0') + AHour mod 10);
-  AHour := AHour div 10;
+  AHour := Word(AHour div 10);
   LTimeBuffer[0] := WideChar(Ord('0') + AHour mod 10);
 
   LTimeBuffer[2] := ':';
   LTimeBuffer[4] := WideChar(Ord('0') + AMinute mod 10);
-  AMinute := AMinute div 10;
+  AMinute := Word(AMinute div 10);
   LTimeBuffer[3] := WideChar(Ord('0') + AMinute mod 10);
 
   LTimeBuffer[5] := ':';
   LTimeBuffer[7] := WideChar(Ord('0') + ASecond mod 10);
-  ASecond := ASecond div 10;
+  ASecond := Word(ASecond div 10);
   LTimeBuffer[6] := WideChar(Ord('0') + ASecond mod 10);
 
   Result := AddTokenValue(ATokenValues, ATokenID, @LTimeBuffer, Length(LTimeBuffer), Result, APBufferEnd);
@@ -3424,7 +3429,7 @@ begin
   {Add the block dump tokens.  The maximum dump size is less than the size of a medium block, so it's safe to read
   beyond the end of the block (due to the medium block header that will always follow a small block span).}
   if LBlockUserSize < CMemoryDumpMaxBytes - CMediumBlockHeaderSize then
-    LMemoryDumpSize := LBlockUserSize + CMediumBlockHeaderSize
+    LMemoryDumpSize := Integer(LBlockUserSize + CMediumBlockHeaderSize)
   else
     LMemoryDumpSize := CMemoryDumpMaxBytes;
 
@@ -3902,7 +3907,7 @@ begin
   if ABlockIsFree then
     PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CBlockIsFreeFlag
   else
-    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and (not CBlockIsFreeFlag);
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and Word(not CBlockIsFreeFlag);
 end;
 
 {Returns True if the block contains a debug sub-block.}
@@ -3917,7 +3922,7 @@ begin
   if ABlockHasDebugInfo then
     PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CHasDebugInfoFlag
   else
-    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and (not CHasDebugInfoFlag);
+    PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and Word(not CHasDebugInfoFlag);
 end;
 
 {Calculates the size of a debug block footer, given the number of stack trace entries.}
@@ -4754,7 +4759,7 @@ procedure SetMediumBlockHeader_SetMediumBlockSpan(APMediumBlock: Pointer; APMedi
 begin
   {Store the offset to the medium block span.}
   PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSpanOffsetMultiple :=
-    (NativeUInt(APMediumBlock) - NativeUInt(APMediumBlockSpan)) shr CMediumBlockAlignmentBits;
+    Word((NativeUInt(APMediumBlock) - NativeUInt(APMediumBlockSpan)) shr CMediumBlockAlignmentBits);
 end;
 
 procedure SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock: Pointer; ABlockSize: Integer; ABlockIsFree: Boolean;
@@ -4794,7 +4799,7 @@ begin
   end;
 
   {Store the block size.}
-  PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSizeMultiple := ABlockSize shr CMediumBlockAlignmentBits;
+  PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSizeMultiple := Word(ABlockSize shr CMediumBlockAlignmentBits);
 end;
 
 {Inserts a medium block into the appropriate medium block bin.  The header for APMediumFreeBlock must already be set
@@ -4868,7 +4873,7 @@ begin
   begin
     {Calculate the bin number from the bin pointer:  LPNextFreeBlock will be a pointer to the bin, since the bin is now
     empty.)}
-    LBinNumber := (NativeUInt(LPNextFreeBlock) - NativeUInt(@APMediumBlockManager.FirstFreeBlockInBin)) shr CPointerSizeBitShift;
+    LBinNumber := Cardinal((NativeUInt(LPNextFreeBlock) - NativeUInt(@APMediumBlockManager.FirstFreeBlockInBin)) shr CPointerSizeBitShift);
     LBinGroupNumber := LBinNumber shr 5; //32 bins per group
     {Flag this bin as empty}
     APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber] := APMediumBlockManager.MediumBlockBinBitmaps[LBinGroupNumber]
@@ -5131,7 +5136,7 @@ begin
 
     {May need a memory fence here for ARM.}
 
-    APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := NativeInt(Result) - NativeInt(LPNewSpan);
+    APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := Integer(NativeInt(Result) - NativeInt(LPNewSpan));
   end
   else
   begin
@@ -6135,18 +6140,18 @@ begin
             {Split the block in two}
             LPNextBlock := PMediumFreeBlockContent(PByte(APointer) + LNewBlockSize);
 
-            SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, True, False);
+            SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, Integer(LSecondSplitSize), True, False);
             SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
             {The second split is an entirely new block so all the header fields must be set.}
             SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
 
             {Put the remainder in a bin if it is big enough}
             if LSecondSplitSize >= CMinimumMediumBlockSize then
-              InsertMediumBlockIntoBin(LPMediumBlockManager, LPNextBlock, LSecondSplitSize);
+              InsertMediumBlockIntoBin(LPMediumBlockManager, LPNextBlock, Integer(LSecondSplitSize));
           end;
 
           {Set the size and flags for this block}
-          SetMediumBlockHeader_SetSizeAndFlags(APointer, LNewBlockSize, False, False);
+          SetMediumBlockHeader_SetSizeAndFlags(APointer, Integer(LNewBlockSize), False, False);
 
           {Unlock the medium blocks}
           LPMediumBlockManager.MediumBlockManagerLocked := 0;
@@ -6210,13 +6215,13 @@ begin
 
       {Set a proper header for the second split.}
       LPNextBlock := PMediumBlockHeader(PByte(APointer) + LNewBlockSize);
-      SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, LSecondSplitSize, False, False);
+      SetMediumBlockHeader_SetSizeAndFlags(LPNextBlock, Integer(LSecondSplitSize), False, False);
       SetMediumBlockHeader_SetMediumBlockSpan(LPNextBlock, LPMediumBlockSpan);
       {The second split is an entirely new block so all the header fields must be set.}
       SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
 
       {Adjust the size of this block.}
-      SetMediumBlockHeader_SetSizeAndFlags(APointer, LNewBlockSize, False, False);
+      SetMediumBlockHeader_SetSizeAndFlags(APointer, Integer(LNewBlockSize), False, False);
 
       {Free the second split.}
       FastMM_FreeMem(LPNextBlock);
@@ -6287,14 +6292,14 @@ begin
     if ABlockHasDebugInfo then
     begin
       PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
-        (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
-        + (CHasDebugInfoFlag + CBlockIsFreeFlag + CIsSmallBlockFlag);
+        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        + (CHasDebugInfoFlag + CBlockIsFreeFlag + CIsSmallBlockFlag));
     end
     else
     begin
       PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
-        (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
-        + (CBlockIsFreeFlag + CIsSmallBlockFlag);
+        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        + (CBlockIsFreeFlag + CIsSmallBlockFlag));
     end;
 
   end
@@ -6304,14 +6309,14 @@ begin
     if ABlockHasDebugInfo then
     begin
       PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
-        (((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
-        + (CHasDebugInfoFlag + CIsSmallBlockFlag);
+        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        + (CHasDebugInfoFlag + CIsSmallBlockFlag));
     end
     else
     begin
       PSmallBlockHeader(APSmallBlock)[-1].BlockStatusFlagsAndSpanOffset :=
-        ((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift
-        + CIsSmallBlockFlag;
+        Word(((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift
+        + CIsSmallBlockFlag);
     end;
 
   end;
@@ -8233,7 +8238,7 @@ begin
     begin
       LPLargeBlockManager := @LargeBlockManagers[LArenaIndex];
 
-      LBlockInfo.ArenaIndex := LArenaIndex;
+      LBlockInfo.ArenaIndex := Byte(LArenaIndex);
 
       LLockWaitTimeMilliseconds := 0;
       while (AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) <> 0)
@@ -8274,7 +8279,7 @@ begin
     begin
       LPMediumBlockManager := @MediumBlockManagers[LArenaIndex];
 
-      LBlockInfo.ArenaIndex := LArenaIndex;
+      LBlockInfo.ArenaIndex := Byte(LArenaIndex);
 
       LLockWaitTimeMilliseconds := 0;
       while (AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) <> 0)
@@ -8332,7 +8337,7 @@ begin
           LBlockInfo.UsableSize := LPMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize;
           LBlockInfo.BlockType := btMediumBlockSpan;
           LBlockInfo.BlockIsFree := False;
-          LBlockInfo.ArenaIndex := LArenaIndex;
+          LBlockInfo.ArenaIndex := Byte(LArenaIndex);
           if LBlockOffsetFromMediumSpanStart > CMediumBlockSpanHeaderSize then
           begin
             LBlockInfo.IsSequentialFeedMediumBlockSpan := True;
@@ -8416,7 +8421,7 @@ begin
               begin
                 LBlockInfo.BlockAddress := LPMediumBlock;
                 LBlockInfo.BlockSize := LMediumBlockSize;
-                LBlockInfo.ArenaIndex := LArenaIndex;
+                LBlockInfo.ArenaIndex := Byte(LArenaIndex);
                 LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
 
                 if LPSmallBlockManager <> nil then
@@ -8468,7 +8473,7 @@ begin
                     begin
                       LBlockInfo.BlockSize := LPSmallBlockManager.BlockSize;
                       LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize - CSmallBlockHeaderSize;
-                      LBlockInfo.ArenaIndex := (NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena);
+                      LBlockInfo.ArenaIndex := Byte((NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena));
                       LBlockInfo.BlockType := btSmallBlock;
                       LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                       LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
@@ -8910,7 +8915,7 @@ begin
       LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenOverheadKB,
         LMemoryManagerUsageSummary.OverheadBytes div 1024, LPTokenPos, LPStateLogBufferStart);
       AddTokenValue_NativeInt(LTokenValues, CStateLogTokenEfficiencyPercentage,
-        Round(LMemoryManagerUsageSummary.EfficiencyPercentage), LPTokenPos, LPStateLogBufferStart);
+        NativeInt(Round(LMemoryManagerUsageSummary.EfficiencyPercentage)), LPTokenPos, LPStateLogBufferStart);
       LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate, LTokenValues, LPStateLogBufferStart,
         LPBufferEnd);
 
@@ -8925,7 +8930,7 @@ begin
         LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassInstanceCount,
           LPNode.InstanceCount, LPTokenPos, LPStateLogBufferStart);
         LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassAverageBytesPerInstance,
-          Round(LPNode.TotalMemoryUsage / LPNode.InstanceCount), LPTokenPos, LPStateLogBufferStart);
+          NativeUInt(Round(LPNode.TotalMemoryUsage / LPNode.InstanceCount)), LPTokenPos, LPStateLogBufferStart);
         AddTokenValue_BlockContentType(LTokenValues, CEventLogTokenObjectClass, LPNode.BlockContentType, LPTokenPos,
           LPStateLogBufferStart);
         LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate_UsageDetail, LTokenValues, LPStateLogPos,
@@ -9293,7 +9298,7 @@ function FastMM_GetRegisteredMemoryLeaks: TFastMM_RegisteredMemoryLeaks;
 
   procedure AddEntries(AEntry: PExpectedMemoryLeak);
   var
-    LInd: Integer;
+    LInd: NativeInt;
   begin
     while AEntry <> nil do
     begin
@@ -9637,7 +9642,7 @@ begin
       LNextStartIndex := LSmallBlockSize div CSmallBlockGranularity;
       while LStartIndex < LNextStartIndex do
       begin
-        SmallBlockTypeLookup[LStartIndex] := LManagerIndex;
+        SmallBlockTypeLookup[LStartIndex] := Byte(LManagerIndex);
         Inc(LStartIndex);
       end;
       {Set the start of the next block type}
@@ -9886,7 +9891,7 @@ begin
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
 
       LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0;
-      LPSmallBlockManager.BlockSize := LSmallBlockSize;
+      LPSmallBlockManager.BlockSize := Word(LSmallBlockSize);
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
 
