@@ -486,6 +486,9 @@ type
     EfficiencyPercentage: Double;
   end;
 
+  {Sort order for the FastMM_LogStateToFile output.}
+  TFastMM_LogStateToFile_SortOrder = (soDescendingTotalMemoryUsage, soAlphabetical);
+
 {------------------------Core memory manager interface------------------------}
 function FastMM_GetMem(ASize: NativeInt): Pointer;
 function FastMM_FreeMem(APointer: Pointer): Integer;
@@ -586,7 +589,8 @@ range (see FastMM_CurrentAllocationGroup).  Note that only blocks that were allo
 allocation group, other blocks are treated as having an allocation group of 0.  Returns True on success.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
   ALockTimeoutMilliseconds: Cardinal = 50; AMinimumAllocationGroup: Cardinal = 0;
-  AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
+  AMaximumAllocationGroup: Cardinal = $ffffffff;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -8705,6 +8709,8 @@ type
   end;
   PMemoryLogInfo = ^TMemoryLogInfo;
 
+  TMemoryLogNode_SortCompare = function(const ANode1, ANode2: TMemoryLogNode): Integer;
+
 procedure FastMM_LogStateToFile_Callback(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
 var
   LBlockContentType, LBlockContentTypeHashBits: NativeUInt;
@@ -8775,28 +8781,60 @@ begin
   Inc(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
 end;
 
+{FastMM_LogStateToFile node sort compare methods.  Returns <0 if ANode1 sorts before ANode2, 0 if they sort equally,
+and >0 if ANode1 must sort after ANode2.}
+
+function FastMM_LogStateToFile_NodeSortCompare_Alphabetical(const ANode1, ANode2: TMemoryLogNode): Integer;
+const
+  CMaxContentDescriptionLength = 256;
+var
+  LContent1, LContent2: array[0..CMaxContentDescriptionLength - 1] of WideChar;
+  i: Integer;
+begin
+  BlockContentTypeToTextBuffer(ANode1.BlockContentType, @LContent1, @LContent1[CMaxContentDescriptionLength - 1]);
+  BlockContentTypeToTextBuffer(ANode2.BlockContentType, @LContent2, @LContent2[CMaxContentDescriptionLength - 1]);
+
+  for i := 0 to CMaxContentDescriptionLength - 1 do
+  begin
+    Result := Ord(LContent1[i]) - Ord(LContent2[i]);
+    if Result <> 0 then
+      Break;
+  end;
+end;
+
+function FastMM_LogStateToFile_NodeSortCompare_DescendingMemoryUsage(const ANode1, ANode2: TMemoryLogNode): Integer;
+begin
+  if ANode1.TotalMemoryUsage > ANode2.TotalMemoryUsage then
+    Result := -1
+  else if ANode1.TotalMemoryUsage < ANode2.TotalMemoryUsage then
+    Result := 1
+  else
+    Result := FastMM_LogStateToFile_NodeSortCompare_Alphabetical(ANode1, ANode2); //Sort same size alphabetically
+end;
+
 {FastMM_LogStateToFile subroutine:  A median-of-3 quicksort routine for sorting a TMemoryLogNodes array.}
-procedure FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
+procedure FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer;
+  ASortCompare: TMemoryLogNode_SortCompare);
 var
   M, I, J: Integer;
   LPivot, LTempItem: TMemoryLogNode;
 begin
   while True do
   begin
-    {Order the left, middle and right items in descending order}
+    {Put the left, middle and right items in the correct order}
     M := ARightIndex shr 1;
-    if APLeftItem[0].TotalMemoryUsage < APLeftItem[M].TotalMemoryUsage then
+    if ASortCompare(APLeftItem[0], APLeftItem[M]) > 0 then
     begin
       LTempItem := APLeftItem[0];
       APLeftItem[0] := APLeftItem[M];
       APLeftItem[M] := LTempItem;
     end;
-    if APLeftItem[M].TotalMemoryUsage < APLeftItem[ARightIndex].TotalMemoryUsage then
+    if ASortCompare(APLeftItem[M], APLeftItem[ARightIndex]) > 0 then
     begin
       LTempItem := APLeftItem[ARightIndex];
       APLeftItem[ARightIndex] := APLeftItem[M];
       APLeftItem[M] := LTempItem;
-      if APLeftItem[0].TotalMemoryUsage < APLeftItem[M].TotalMemoryUsage then
+      if ASortCompare(APLeftItem[0], APLeftItem[M]) > 0 then
       begin
         LTempItem := APLeftItem[0];
         APLeftItem[0] := APLeftItem[M];
@@ -8814,14 +8852,15 @@ begin
     J := ARightIndex - 1;
     while true do
     begin
-      {Find the first item from the left that is not greater than the pivot}
+      {Find the first item from the left that does not sort before the pivot.}
       repeat
         Inc(I);
-      until APLeftItem[I].TotalMemoryUsage <= LPivot.TotalMemoryUsage;
-      {Find the first item from the right that is not less than the pivot}
+      until ASortCompare(APLeftItem[I], LPivot) >= 0;
+
+      {Find the first item from the right that does not sort after the pivot.}
       repeat
         Dec(J);
-      until APLeftItem[J].TotalMemoryUsage >= LPivot.TotalMemoryUsage;
+      until ASortCompare(APLeftItem[J], LPivot) <= 0;
       {Stop the loop when the two indexes cross}
       if J < I then
         Break;
@@ -8837,7 +8876,7 @@ begin
 
     {Sort the left-hand partition}
     if J >= (CQuickSortMinimumItemsInPartition - 1) then
-      FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem, J);
+      FastMM_LogStateToFile_QuickSortLogNodes(APLeftItem, J, ASortCompare);
 
     {Sort the right-hand partition}
     APLeftItem := @APLeftItem[I + 1];
@@ -8848,7 +8887,8 @@ begin
 end;
 
 {FastMM_LogStateToFile subroutine:  An InsertionSort routine for sorting a TMemoryLogNodes array.}
-procedure FastMM_LogStateToFile_InsertionSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
+procedure FastMM_LogStateToFile_InsertionSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer;
+  ASortCompare: TMemoryLogNode_SortCompare);
 var
   I, J: Integer;
   LCurNode: TMemoryLogNode;
@@ -8858,7 +8898,7 @@ begin
     LCurNode := APLeftItem[I];
     {Scan backwards to find the best insertion spot}
     J := I;
-    while (J > 0) and (APLeftItem[J - 1].TotalMemoryUsage < LCurNode.TotalMemoryUsage) do
+    while (J > 0) and (ASortCompare(APLeftItem[J - 1], LCurNode) > 0) do
     begin
       APLeftItem[J] := APLeftItem[J - 1];
       Dec(J);
@@ -8870,7 +8910,8 @@ end;
 {Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
-  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean;
+  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8883,6 +8924,7 @@ var
   LInd: Integer;
   LPNode: PMemoryLogNode;
   LFileHandle: THandle;
+  LSortCompare: TMemoryLogNode_SortCompare;
 begin
   {Get the current memory manager usage summary.}
   LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
@@ -8897,11 +8939,16 @@ begin
       FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
         ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup);
 
-      {Sort the classes in descending total memory usage order:  Do the initial QuickSort pass over the list to sort the
-      list in groups of QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
+      {Sort the classes:  Do the initial QuickSort pass over the list to sort the list in groups of
+      QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
+      case ASortOrder of
+        soAlphabetical: LSortCompare := FastMM_LogStateToFile_NodeSortCompare_Alphabetical;
+      else
+        LSortCompare := FastMM_LogStateToFile_NodeSortCompare_DescendingMemoryUsage;
+      end;
       if LPLogInfo.NodeCount >= CQuickSortMinimumItemsInPartition then
-        FastMM_LogStateToFile_QuickSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1);
-      FastMM_LogStateToFile_InsertionSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1);
+        FastMM_LogStateToFile_QuickSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1, LSortCompare);
+      FastMM_LogStateToFile_InsertionSortLogNodes(@LPLogInfo.Nodes[0], LPLogInfo.NodeCount - 1, LSortCompare);
 
       LPTokenBufferStart := @LPLogInfo.Nodes[LPLogInfo.NodeCount];
       LPStateLogBufferStart := @LPTokenBufferStart[CTokenBufferMaxWideChars];
