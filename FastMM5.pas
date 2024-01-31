@@ -586,11 +586,12 @@ The file will be saved in the encoding specified by FastMM_TextFileEncoding.  AL
 amount of time to wait for a lock on a manager to be released, before it is skipped (0 = no waiting).  Specify
 AMinimumAllocationGroup and AMaximumAllocationGroup to only list details for blocks in the specified allocation group
 range (see FastMM_CurrentAllocationGroup).  Note that only blocks that were allocated in debug mode are linked to an
-allocation group, other blocks are treated as having an allocation group of 0.  Returns True on success.}
+allocation group, other blocks are treated as having an allocation group of 0.  If ATruncateFile = True then the existing
+content of the file is deleted before writing the new log.  Returns True on success.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
   ALockTimeoutMilliseconds: Cardinal = 50; AMinimumAllocationGroup: Cardinal = 0;
   AMaximumAllocationGroup: Cardinal = $ffffffff;
-  ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage): Boolean;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage; ATruncateFile: Boolean = True): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -883,7 +884,10 @@ var
 
   {Memory state logging messages}
   FastMM_LogStateToFileTemplate: PWideChar = 'FastMM State Capture:'#13#10
-    + '---------------------'#13#10
+    + '---------------------'#13#10#13#10
+    + 'Timestamp:'#13#10
+    + '{1} {2}'#13#10#13#10
+    + 'Usage Summary:'#13#10
     + '{18}K Allocated'#13#10
     + '{19}K Overhead'#13#10
     + '{20}% Efficiency'#13#10#13#10
@@ -8911,7 +8915,7 @@ end;
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
   ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal;
-  ASortOrder: TFastMM_LogStateToFile_SortOrder): Boolean;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder; ATruncateFile: Boolean): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8993,7 +8997,8 @@ begin
       end;
 
       {Delete the old file and write the new one.}
-      OS_DeleteFile(PWideChar(AFilename));
+      if ATruncateFile then
+        OS_DeleteFile(PWideChar(AFilename));
       if OpenOrCreateTextFile(PWideChar(AFilename), True, LFileHandle) then
       begin
         Result := AppendTextFile(LFileHandle, LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
