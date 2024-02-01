@@ -588,10 +588,10 @@ AMinimumAllocationGroup and AMaximumAllocationGroup to only list details for blo
 range (see FastMM_CurrentAllocationGroup).  Note that only blocks that were allocated in debug mode are linked to an
 allocation group, other blocks are treated as having an allocation group of 0.  If ATruncateFile = True then the existing
 content of the file is deleted before writing the new log.  Returns True on success.}
-function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string = '';
+function FastMM_LogStateToFile(APFilename: PWideChar; APAdditionalDetails: PWideChar = nil;
+  ATruncateFile: Boolean = True; ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage;
   ALockTimeoutMilliseconds: Cardinal = 50; AMinimumAllocationGroup: Cardinal = 0;
-  AMaximumAllocationGroup: Cardinal = $ffffffff;
-  ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage; ATruncateFile: Boolean = True): Boolean;
+  AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -8913,9 +8913,9 @@ end;
 
 {Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
-function FastMM_LogStateToFile(const AFilename: string; const AAdditionalDetails: string;
-  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal;
-  ASortOrder: TFastMM_LogStateToFile_SortOrder; ATruncateFile: Boolean): Boolean;
+function FastMM_LogStateToFile(APFilename: PWideChar; APAdditionalDetails: PWideChar; ATruncateFile: Boolean;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder;
+  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8989,17 +8989,16 @@ begin
       end;
 
       {Append the additional information}
-      if AAdditionalDetails <> '' then
+      if APAdditionalDetails <> nil then
       begin
         LPStateLogPos := AppendTextToBuffer(CRLF, 2, LPStateLogPos, LPBufferEnd);
-        LPStateLogPos := AppendTextToBuffer(PWideChar(AAdditionalDetails), Length(AAdditionalDetails), LPStateLogPos,
-          LPBufferEnd);
+        LPStateLogPos := AppendTextToBuffer(APAdditionalDetails, LPStateLogPos, LPBufferEnd);
       end;
 
       {Delete the old file and write the new one.}
       if ATruncateFile then
-        OS_DeleteFile(PWideChar(AFilename));
-      if OpenOrCreateTextFile(PWideChar(AFilename), True, LFileHandle) then
+        OS_DeleteFile(APFilename);
+      if OpenOrCreateTextFile(APFilename, True, LFileHandle) then
       begin
         Result := AppendTextFile(LFileHandle, LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
         OS_CloseFile(LFileHandle);
