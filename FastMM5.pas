@@ -407,7 +407,7 @@ type
     {The usable size of the block.  This is BlockSize less any headers, footers, other management structures and
     internal fragmentation.}
     UsableSize: NativeInt;
-    {An arbitrary pointer value passed in to the WalkAllocatedBlocks routine, which is passed through to the callback.}
+    {An arbitrary pointer value passed in to the FastMM_WalkBlocks routine, which is passed through to the callback.}
     UserData: Pointer;
     {The arena number for the block}
     ArenaIndex: Byte;
@@ -581,17 +581,22 @@ thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for anot
 before the block is skipped (0 = no waiting).}
 function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastMM_UsageSummary;
 
-{Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class.
-The file will be saved in the encoding specified by FastMM_TextFileEncoding.  ALockTimeoutMilliseconds is the maximum
-amount of time to wait for a lock on a manager to be released, before it is skipped (0 = no waiting).  Specify
-AMinimumAllocationGroup and AMaximumAllocationGroup to only list details for blocks in the specified allocation group
-range (see FastMM_CurrentAllocationGroup).  Note that only blocks that were allocated in debug mode are linked to an
-allocation group, other blocks are treated as having an allocation group of 0.  If ATruncateFile = True then the existing
-content of the file is deleted before writing the new log.  Returns True on success.}
+{Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class,
+returning True on success.  The file will be saved in the encoding specified by FastMM_TextFileEncoding.  If
+ATruncateFile = True then the existing content of the file is deleted before writing the new log.
+ALockTimeoutMilliseconds is the maximum amount of time to wait for a lock on a manager to be released, before it is
+skipped (0 = no waiting).  The range specified by AAddUsageInAllocationGroupsFrom and AAddUsageInAllocationGroupsUpTo
+limits which blocks are counted towards the usage report by filtering on their associated allocation group (see
+FastMM_CurrentAllocationGroup).  In order to log the difference in usage between two allocation group ranges, specify a
+valid range for ASubtractUsageInAllocationGroupsFrom and ASubtractUsageInAllocationGroupsUpTo - this will cause the
+memory pool to be walked a second time, with all usage in this allocation group range subtracted from the usage logged
+during the first pass.  Note that only blocks that were allocated in debug mode are linked to an allocation group, other
+blocks are treated as having an allocation group of 0.}
 function FastMM_LogStateToFile(APFilename: PWideChar; APAdditionalDetails: PWideChar = nil;
   ATruncateFile: Boolean = True; ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage;
-  ALockTimeoutMilliseconds: Cardinal = 50; AMinimumAllocationGroup: Cardinal = 0;
-  AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
+  ALockTimeoutMilliseconds: Cardinal = 50; AAddUsageInAllocationGroupsFrom: Cardinal = 0;
+  AAddUsageInAllocationGroupsUpTo: Cardinal = $ffffffff; ASubtractUsageInAllocationGroupsFrom: Cardinal = $ffffffff;
+  ASubtractUsageInAllocationGroupsUpTo: Cardinal = 0): Boolean;
 
 {------------------------Memory Manager Sharing------------------------}
 
@@ -8696,14 +8701,16 @@ type
     {A class reference or a string type enum.}
     BlockContentType: NativeUInt;
     {The number of instances of the class}
-    InstanceCount: NativeUInt;
+    InstanceCount: NativeInt;
     {The total memory usage for this class}
-    TotalMemoryUsage: NativeUInt;
+    TotalMemoryUsage: NativeInt;
   end;
   TMemoryLogNodes = array[0..CMaxMemoryLogNodes - 1] of TMemoryLogNode;
   PMemoryLogNodes = ^TMemoryLogNodes;
 
   TMemoryLogInfo = record
+    {Is this the usage addition pass or the usage subtraction pass?}
+    SubtractUsage: Boolean;
     {The number of nodes in "Nodes" that are used.}
     NodeCount: Integer;
     {The root node of the binary search tree.  The content of this node is not actually used, it just simplifies the
@@ -8781,8 +8788,16 @@ begin
   end;
 
   {Update the statistics for the class}
-  Inc(LPClassNode.InstanceCount);
-  Inc(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
+  if not LPLogInfo.SubtractUsage then
+  begin
+    Inc(LPClassNode.InstanceCount);
+    Inc(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
+  end
+  else
+  begin
+    Dec(LPClassNode.InstanceCount);
+    Dec(LPClassNode.TotalMemoryUsage, ABlockInfo.UsableSize);
+  end;
 end;
 
 {FastMM_LogStateToFile node sort compare methods.  Returns <0 if ANode1 sorts before ANode2, 0 if they sort equally,
@@ -8914,8 +8929,9 @@ end;
 {Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by class.
 The file will be saved in the encoding specified by FastMM_TextFileEncoding.}
 function FastMM_LogStateToFile(APFilename: PWideChar; APAdditionalDetails: PWideChar; ATruncateFile: Boolean;
-  ASortOrder: TFastMM_LogStateToFile_SortOrder;
-  ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean;
+  ASortOrder: TFastMM_LogStateToFile_SortOrder; ALockTimeoutMilliseconds,
+  AAddUsageInAllocationGroupsFrom, AAddUsageInAllocationGroupsUpTo,
+  ASubtractUsageInAllocationGroupsFrom, ASubtractUsageInAllocationGroupsUpTo: Cardinal): Boolean;
 const
   CStateLogMaxChars = 1024 * 1024;
   CRLF: PWideChar = #13#10;
@@ -8925,7 +8941,8 @@ var
   LPLogInfo: PMemoryLogInfo;
   LPTokenBufferStart, LPStateLogBufferStart, LPBufferEnd, LPTokenPos, LPStateLogPos: PWideChar;
   LTokenValues: TEventLogTokenValues;
-  LInd: Integer;
+  LInd, LNewCount: Integer;
+  LAverageBlockSize: NativeInt;
   LPNode: PMemoryLogNode;
   LFileHandle: THandle;
   LSortCompare: TMemoryLogNode_SortCompare;
@@ -8941,7 +8958,31 @@ begin
     try
       {Obtain the list of classes, together with the total memory usage and block count for each.}
       FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
-        ALockTimeoutMilliseconds, AMinimumAllocationGroup, AMaximumAllocationGroup);
+        ALockTimeoutMilliseconds, AAddUsageInAllocationGroupsFrom, AAddUsageInAllocationGroupsUpTo);
+
+      {If a diff is required then walk the memory pool a second time, subtracting the usage from the second allocation
+      group range.}
+      if ASubtractUsageInAllocationGroupsFrom <= ASubtractUsageInAllocationGroupsUpTo then
+      begin
+        LPLogInfo.SubtractUsage := True;
+        FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
+          ALockTimeoutMilliseconds, ASubtractUsageInAllocationGroupsFrom, ASubtractUsageInAllocationGroupsUpTo);
+
+        {Cull nodes that have both a 0 count and a 0 total usage.}
+        LNewCount := 0;
+        for LInd := 0 to LPLogInfo.NodeCount - 1 do
+        begin
+          LPNode := @LPLogInfo.Nodes[LInd];
+          if (LPNode.InstanceCount <> 0) or (LPNode.TotalMemoryUsage <> 0) then
+          begin
+            if LNewCount <> LInd then
+              LPLogInfo.Nodes[LNewCount] := LPNode^;
+            Inc(LNewCount);
+          end;
+        end;
+        LPLogInfo.NodeCount := LNewCount;
+
+      end;
 
       {Sort the classes:  Do the initial QuickSort pass over the list to sort the list in groups of
       QuickSortMinimumItemsInPartition size, and then do the final InsertionSort pass.}
@@ -8976,12 +9017,16 @@ begin
       begin
         LPNode := @LPLogInfo.Nodes[LInd];
 
-        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassTotalBytesUsed,
+        LPTokenPos := AddTokenValue_NativeInt(LTokenValues, CStateLogTokenClassTotalBytesUsed,
           LPNode.TotalMemoryUsage, LPTokenBufferStart, LPStateLogBufferStart);
-        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassInstanceCount,
+        LPTokenPos := AddTokenValue_NativeInt(LTokenValues, CStateLogTokenClassInstanceCount,
           LPNode.InstanceCount, LPTokenPos, LPStateLogBufferStart);
-        LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenClassAverageBytesPerInstance,
-          NativeUInt(Round(LPNode.TotalMemoryUsage / LPNode.InstanceCount)), LPTokenPos, LPStateLogBufferStart);
+        if LPNode.InstanceCount <> 0 then
+          LAverageBlockSize := NativeInt(Round(LPNode.TotalMemoryUsage / LPNode.InstanceCount))
+        else
+          LAverageBlockSize := 0;
+        LPTokenPos := AddTokenValue_NativeInt(LTokenValues, CStateLogTokenClassAverageBytesPerInstance,
+          LAverageBlockSize, LPTokenPos, LPStateLogBufferStart);
         AddTokenValue_BlockContentType(LTokenValues, CEventLogTokenObjectClass, LPNode.BlockContentType, LPTokenPos,
           LPStateLogBufferStart);
         LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate_UsageDetail, LTokenValues, LPStateLogPos,
