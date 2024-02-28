@@ -345,12 +345,14 @@ type
     Reserved2: Pointer;
     {Reserved space for future use.}
 {$ifdef 32Bit}
-    ReservedSpace1: array[0..23] of Byte;
+    ReservedSpace1: array[0..19] of Byte;
 {$else}
-    ReservedSpace1: array[0..7] of Byte;
+    ReservedSpace1: array[0..3] of Byte;
 {$endif}
     {The xor of all subsequent dwords in this structure.}
     HeaderCheckSum: Cardinal;
+    {The number of milliseconds since startup when the block was allocated.}
+    AllocationTickCount: Cardinal;
     {The allocation number:  All debug mode allocations are numbered sequentially.  This number may be useful in memory
     leak analysis.  If it reaches 4G it wraps back to 0.}
     AllocationNumber: Cardinal;
@@ -777,8 +779,8 @@ var
     1: The current date in yyyy-mm-dd format.
     2: The current time in HH:nn:ss format.
     3: Block size in bytes
-    4: The ID of the allocating thread (in hexadecimal).
-    5: The ID of the freeing thread (in hexadecimal).
+    4: The ID of the allocating thread (in decimal).
+    5: The ID of the freeing thread (in decimal).
     6: The stack trace when the block was allocated.
     7: The stack trace when the block was freed.
     8: The object class for the block.  For freed blocks this will be the prior object class, otherwise it will be the
@@ -799,6 +801,7 @@ var
     22: The number of instances of the class (FastMM_LogStateToFile)
     23: The average number of bytes per instance for the class (FastMM_LogStateToFile)
     24: The stack trace for a virtual method call on a freed object
+    25: The number of milliseconds ago when the block was allocated.
   }
 
   {This entry precedes every entry in the event log.}
@@ -818,7 +821,7 @@ var
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_MemoryLeakDetailMessage_DebugBlock: PWideChar = 'A memory block has been leaked. The size is: {3}'#13#10#13#10
-    + 'This block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
+    + 'This block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'The block is currently used for an object of class: {8}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
@@ -832,14 +835,14 @@ var
   {Attempts to free or reallocate a debug block that has alredy been freed.}
   FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
-    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10;
   FastMM_DebugBlockReallocOfFreedBlock: PWideChar = 'An attempt was made to resize a block that has already been freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
-    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10;
 
@@ -847,8 +850,8 @@ var
   FastMM_BlockModifiedAfterFreeMessage: PWideChar = 'A memory block was modified after it was freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
     + 'Modifications were detected at offsets (with lengths in brackets): {15}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
-    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
@@ -858,15 +861,15 @@ var
     + '{12}'#13#10'{13}'#13#10;
   FastMM_BlockFooterCorruptedMessage_AllocatedBlock: PWideChar = 'A memory block footer has been corrupted.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_BlockFooterCorruptedMessage_FreedBlock: PWideChar = 'A memory block footer has been corrupted.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
-    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
@@ -878,8 +881,8 @@ var
     + 'Freed object class: {8}'#13#10#13#10
     + 'Virtual method: {17}'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated by thread 0x{4}, and the stack trace (return addresses) at the time was:'
-    + '{6}'#13#10#13#10'This block was freed by thread 0x{5}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10'The stack trace for the virtual call that lead to this error is:'
     + '{24}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
@@ -1081,6 +1084,7 @@ const
   CEventLogTokenEventLogFilename = 16;
   CEventLogTokenVirtualMethodName = 17;
   CEventLogTokenVirtualMethodCallOnFreedObject = 24;
+  CEventLogTokenAllocationRelativeTime = 25;
 
   CStateLogTokenAllocatedKB = 18;
   CStateLogTokenOverheadKB = 19;
@@ -3423,6 +3427,7 @@ var
   LBlockContentType: NativeUInt;
   LMemoryDumpSize, LBlockHeader: Integer;
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
+  LElapsedTimerTicksSinceAllocation: Cardinal;
 begin
   Result := APBuffer;
 
@@ -3458,8 +3463,12 @@ begin
   begin
     LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APBlock)[-1];
 
-    Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenAllocatedByThread, LPDebugBlockHeader.AllocatedByThread,
+    Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocatedByThread, LPDebugBlockHeader.AllocatedByThread,
       Result, APBufferEnd);
+
+    LElapsedTimerTicksSinceAllocation := OS_GetMillisecondsSinceStartup - LPDebugBlockHeader.AllocationTickCount;
+    Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationRelativeTime,
+      LElapsedTimerTicksSinceAllocation, Result, APBufferEnd);
 
     Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationNumber, LPDebugBlockHeader.AllocationNumber,
       Result, APBufferEnd);
@@ -3469,7 +3478,7 @@ begin
 
     if LBlockHeader and CBlockIsFreeFlag = CBlockIsFreeFlag then
     begin
-      Result := AddTokenValue_Hexadecimal(ATokenValues, CEventLogTokenFreedByThread, LPDebugBlockHeader.FreedByThread,
+      Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenFreedByThread, LPDebugBlockHeader.FreedByThread,
         Result, APBufferEnd);
 
       Result := AddTokenValue_StackTrace(ATokenValues, CEventLogTokenFreeStackTrace, LPDebugBlockHeader.DebugFooter_FreeStackTracePtr,
@@ -4000,7 +4009,7 @@ var
   LPUserArea: PByte;
 begin
   LByteOffset := APDebugBlockHeader.UserSize;
-  LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
+  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
 
   {Store a pointer to the freed object class if the block is large enough.}
   if LByteOffset >= CTObjectInstanceSize then
@@ -4060,7 +4069,7 @@ begin
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
 
   {Add the modification detail tokens.}
-  LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
+  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
   LLogCount := 0;
   LOffset := 0;
   LTokenValues[CEventLogTokenModifyAfterFreeDetail] := LPBufferPos;
@@ -4122,7 +4131,7 @@ var
   LFillPatternIntact: Boolean;
 begin
   LByteOffset := APDebugBlockHeader.UserSize;
-  LPUserArea := PByte(APDebugBlockHeader) + SizeOf(TFastMM_DebugBlockHeader);
+  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
   LFillPatternIntact := True;
 
   {If the block is large enough the first 4/8 bytes should be a pointer to the freed object class.}
@@ -7839,6 +7848,7 @@ begin
   end;
   PFastMM_DebugBlockHeader(Result).AllocationGroup := FastMM_CurrentAllocationGroup;
   PFastMM_DebugBlockHeader(Result).AllocationNumber := AtomicIncrement(FastMM_LastAllocationNumber);
+  PFastMM_DebugBlockHeader(Result).AllocationTickCount := OS_GetMillisecondsSinceStartup;
   PFastMM_DebugBlockHeader(Result).AllocatedByThread := OS_GetCurrentThreadID;
   PFastMM_DebugBlockHeader(Result).FreedByThread := 0;
   PFastMM_DebugBlockHeader(Result).DebugBlockFlags := CIsDebugBlockFlag;
