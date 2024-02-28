@@ -821,7 +821,7 @@ var
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_MemoryLeakDetailMessage_DebugBlock: PWideChar = 'A memory block has been leaked. The size is: {3}'#13#10#13#10
-    + 'This block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'This block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'The block is currently used for an object of class: {8}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
@@ -835,13 +835,13 @@ var
   {Attempts to free or reallocate a debug block that has alredy been freed.}
   FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10;
   FastMM_DebugBlockReallocOfFreedBlock: PWideChar = 'An attempt was made to resize a block that has already been freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10;
@@ -850,7 +850,7 @@ var
   FastMM_BlockModifiedAfterFreeMessage: PWideChar = 'A memory block was modified after it was freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
     + 'Modifications were detected at offsets (with lengths in brackets): {15}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
@@ -861,14 +861,14 @@ var
     + '{12}'#13#10'{13}'#13#10;
   FastMM_BlockFooterCorruptedMessage_AllocatedBlock: PWideChar = 'A memory block footer has been corrupted.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
     + 'Current memory dump of {10} bytes starting at pointer address {11}:'#13#10
     + '{12}'#13#10'{13}'#13#10;
   FastMM_BlockFooterCorruptedMessage_FreedBlock: PWideChar = 'A memory block footer has been corrupted.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10
     + 'The allocation number is: {9}'#13#10#13#10
@@ -881,7 +881,7 @@ var
     + 'Freed object class: {8}'#13#10#13#10
     + 'Virtual method: {17}'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
-    + 'The block was allocated {25}ms ago by thread {4}, and the stack trace (return addresses) at the time was:'
+    + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
     + '{6}'#13#10#13#10'This block was freed by thread {5}, and the stack trace (return addresses) at the time was:'
     + '{7}'#13#10#13#10'The stack trace for the virtual call that lead to this error is:'
     + '{24}'#13#10#13#10
@@ -1084,7 +1084,8 @@ const
   CEventLogTokenEventLogFilename = 16;
   CEventLogTokenVirtualMethodName = 17;
   CEventLogTokenVirtualMethodCallOnFreedObject = 24;
-  CEventLogTokenAllocationRelativeTime = 25;
+  CEventLogTokenAllocationDate = 25;
+  CEventLogTokenAllocationTime = 26;
 
   CStateLogTokenAllocatedKB = 18;
   CStateLogTokenOverheadKB = 19;
@@ -2517,6 +2518,32 @@ begin
   Result := Winapi.Windows.GetTickCount;
 end;
 
+procedure OS_MillisecondsSinceStartupToDateTime(AMillisecondsSinceStartup: Cardinal;
+  var AYear, AMonth, ADay, AHour, AMinute, ASecond, AMilliseconds: Word);
+var
+  LSystemTime: TSystemTime;
+  LFileTime: TFileTime;
+  LTimeDelta: Cardinal;
+begin
+  {Get the current time, as well as the delta between the current time and the required timestamp.}
+  Winapi.Windows.GetLocalTime(LSystemTime);
+  LTimeDelta := OS_GetMillisecondsSinceStartup - AMillisecondsSinceStartup;
+
+  {Convert the current time to a format in which the delta can be subtracted easily, subtract the delta, and then
+  convert it back.}
+  Winapi.Windows.SystemTimeToFileTime(LSystemTime, LFileTime);
+  Dec(Int64(LFileTime), Int64(LTimeDelta) * 10000);
+  Winapi.Windows.FileTimeToSystemTime(LFileTime, LSystemTime);
+
+  AYear := LSystemTime.wYear;
+  AMonth := LSystemTime.wMonth;
+  ADay := LSystemTime.wDay;
+  AHour := LSystemTime.wHour;
+  AMinute := LSystemTime.wMinute;
+  ASecond := LSystemTime.wSecond;
+  AMilliseconds := LSystemTime.wMilliseconds;
+end;
+
 {Fills a buffer with the full path and filename of the application.  If AReturnLibraryFilename = True and this is a
 library then the full path and filename of the library is returned instead.}
 function OS_GetApplicationFilename(APFilenameBuffer, APBufferEnd: PWideChar; AReturnLibraryFilename: Boolean): PWideChar;
@@ -3427,7 +3454,7 @@ var
   LBlockContentType: NativeUInt;
   LMemoryDumpSize, LBlockHeader: Integer;
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
-  LElapsedTimerTicksSinceAllocation: Cardinal;
+  LYear, LMonth, LDay, LHour, LMinute, LSecond, LMilliseconds: Word;
 begin
   Result := APBuffer;
 
@@ -3466,9 +3493,10 @@ begin
     Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocatedByThread, LPDebugBlockHeader.AllocatedByThread,
       Result, APBufferEnd);
 
-    LElapsedTimerTicksSinceAllocation := OS_GetMillisecondsSinceStartup - LPDebugBlockHeader.AllocationTickCount;
-    Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationRelativeTime,
-      LElapsedTimerTicksSinceAllocation, Result, APBufferEnd);
+    OS_MillisecondsSinceStartupToDateTime(LPDebugBlockHeader.AllocationTickCount, LYear, LMonth, LDay, LHour, LMinute,
+      LSecond, LMilliseconds);
+    Result := AddTokenValue_Date(ATokenValues, CEventLogTokenAllocationDate, LYear, LMonth, LDay, Result, APBufferEnd);
+    Result := AddTokenValue_Time(ATokenValues, CEventLogTokenAllocationTime, LHour, LMinute, LSecond, Result, APBufferEnd);
 
     Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationNumber, LPDebugBlockHeader.AllocationNumber,
       Result, APBufferEnd);
