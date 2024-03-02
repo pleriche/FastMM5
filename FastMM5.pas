@@ -801,7 +801,8 @@ var
     22: The number of instances of the class (FastMM_LogStateToFile)
     23: The average number of bytes per instance for the class (FastMM_LogStateToFile)
     24: The stack trace for a virtual method call on a freed object
-    25: The number of milliseconds ago when the block was allocated.
+    25: The date when the block was allocated.
+    26: The time when the block was allocated.
   }
 
   {This entry precedes every entry in the event log.}
@@ -3386,10 +3387,10 @@ begin
 end;
 
 {Adds a date token in ISO 8601 date format, e.g. 2020-01-01}
-function AddTokenValue_Time(var ATokenValues: TEventLogTokenValues; ATokenID: Integer; AHour, AMinute, ASecond: Word;
-  APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
+function AddTokenValue_Time(var ATokenValues: TEventLogTokenValues; ATokenID: Integer;
+  AHour, AMinute, ASecond, AMilliseconds: Word; APTokenValueBufferPos, APBufferEnd: PWideChar): PWideChar;
 var
-  LTimeBuffer: array[0..7] of WideChar;
+  LTimeBuffer: array[0..11] of WideChar;
 begin
   Result := APTokenValueBufferPos;
 
@@ -3407,6 +3408,13 @@ begin
   ASecond := Word(ASecond div 10);
   LTimeBuffer[6] := WideChar(Ord('0') + ASecond mod 10);
 
+  LTimeBuffer[8] := '.';
+  LTimeBuffer[11] := WideChar(Ord('0') + AMilliseconds mod 10);
+  AMilliseconds := Word(AMilliseconds div 10);
+  LTimeBuffer[10] := WideChar(Ord('0') + AMilliseconds mod 10);
+  AMilliseconds := Word(AMilliseconds div 10);
+  LTimeBuffer[9] := WideChar(Ord('0') + AMilliseconds mod 10);
+
   Result := AddTokenValue(ATokenValues, ATokenID, @LTimeBuffer, Length(LTimeBuffer), Result, APBufferEnd);
 end;
 
@@ -3421,7 +3429,7 @@ begin
   OS_GetCurrentDateTime(LYear, LMonth, LDay, LHour, LMinute, LSecond, LMilliseconds);
 
   Result := AddTokenValue_Date(ATokenValues, CEventLogTokenCurrentDate, LYear, LMonth, LDay, Result, APBufferEnd);
-  Result := AddTokenValue_Time(ATokenValues, CEventLogTokenCurrentTime, LHour, LMinute, LSecond, Result, APBufferEnd);
+  Result := AddTokenValue_Time(ATokenValues, CEventLogTokenCurrentTime, LHour, LMinute, LSecond, LMilliseconds, Result, APBufferEnd);
 end;
 
 function AddTokenValue_BlockContentType(var ATokenValues: TEventLogTokenValues; ATokenID: Integer;
@@ -3496,7 +3504,7 @@ begin
     OS_MillisecondsSinceStartupToDateTime(LPDebugBlockHeader.AllocationTickCount, LYear, LMonth, LDay, LHour, LMinute,
       LSecond, LMilliseconds);
     Result := AddTokenValue_Date(ATokenValues, CEventLogTokenAllocationDate, LYear, LMonth, LDay, Result, APBufferEnd);
-    Result := AddTokenValue_Time(ATokenValues, CEventLogTokenAllocationTime, LHour, LMinute, LSecond, Result, APBufferEnd);
+    Result := AddTokenValue_Time(ATokenValues, CEventLogTokenAllocationTime, LHour, LMinute, LSecond, LMilliseconds, Result, APBufferEnd);
 
     Result := AddTokenValue_NativeUInt(ATokenValues, CEventLogTokenAllocationNumber, LPDebugBlockHeader.AllocationNumber,
       Result, APBufferEnd);
