@@ -488,6 +488,20 @@ type
     EfficiencyPercentage: Double;
   end;
 
+  TFastMM_MemoryManagerState = packed record
+    {Small block type states.  SmallBlockTypeCount indicates how many entries in SmallBlockTypeStates are used.}
+    SmallBlockTypeCount: Cardinal;
+    SmallBlockTypeStates: array[0..63] of TSmallBlockTypeState;
+    {Medium block stats}
+    AllocatedMediumBlockCount: Cardinal;
+    TotalAllocatedMediumBlockSize: NativeUInt;
+    ReservedMediumBlockAddressSpace: NativeUInt;
+    {Large block stats}
+    AllocatedLargeBlockCount: Cardinal;
+    TotalAllocatedLargeBlockSize: NativeUInt;
+    ReservedLargeBlockAddressSpace: NativeUInt;
+  end;
+
   {Sort order for the FastMM_LogStateToFile output.}
   TFastMM_LogStateToFile_SortOrder = (soDescendingTotalMemoryUsage, soAlphabetical);
 
@@ -582,6 +596,14 @@ that exposes freed blocks in separate fields.  Note that this call requires walk
 thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for another thread to release a lock on a block
 before the block is skipped (0 = no waiting).}
 function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastMM_UsageSummary;
+
+{Returns a detailed breakdown of the memory usage by block sze.}
+procedure FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
+  ALockTimeoutMilliseconds: Cardinal = 50);
+
+{Gets the state of every 64K block in lower 4GB of the address space.  (This covers the entire address space under
+32-bit.)}
+procedure FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal = 50);
 
 {Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class,
 returning True on success.  The file will be saved in the encoding specified by FastMM_TextFileEncoding.  If
@@ -1450,12 +1472,13 @@ type
   TMemoryLeakType = (mltUnexpectedLeak, mltExpectedLeakRegisteredByPointer, mltExpectedLeakRegisteredByClass,
     mltExpectedLeakRegisteredBySize);
 
+  TMemoryRegionState = (mrsFree, mrsReserved, mrsAllocated);
   TMemoryAccessRight = (marExecute, marRead, marWrite);
   TMemoryAccessRights = set of TMemoryAccessRight;
   TMemoryRegionInfo = record
     RegionStartAddress: Pointer;
     RegionSize: NativeUInt;
-    RegionIsFree: Boolean;
+    RegionState: TMemoryRegionState;
     AccessRights: TMemoryAccessRights;
   end;
 
@@ -2464,7 +2487,14 @@ begin
   begin
     AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
     AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
-    AMemoryRegionInfo.RegionIsFree := LMemInfo.State = MEM_FREE;
+
+    if LMemInfo.State = MEM_FREE then
+      AMemoryRegionInfo.RegionState := mrsFree
+    else if LMemInfo.State = MEM_COMMIT then
+      AMemoryRegionInfo.RegionState := mrsAllocated
+    else
+      AMemoryRegionInfo.RegionState := mrsReserved;
+
     AMemoryRegionInfo.AccessRights := [];
     if (LMemInfo.State = MEM_COMMIT) and (LMemInfo.Protect and PAGE_GUARD = 0) then
     begin
@@ -2475,6 +2505,7 @@ begin
       if (LMemInfo.Protect and (PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
         Include(AMemoryRegionInfo.AccessRights, marExecute);
     end;
+
   end
   else
   begin
@@ -2816,8 +2847,7 @@ var
     end;
 
     {The address must be readable.}
-    Result := (not LMemoryRegionInfo.RegionIsFree)
-      and (marRead in LMemoryRegionInfo.AccessRights);
+    Result := marRead in LMemoryRegionInfo.AccessRights;
   end;
 
   {Returns True if AClassPointer points to a class VMT}
@@ -4685,7 +4715,7 @@ begin
     {Can another large block segment be allocated directly after this segment, thus negating the need to move the data?}
     LPNextSegment := Pointer(PByte(LPLargeBlockHeader) + LPLargeBlockHeader.ActualBlockSize);
     OS_GetVirtualMemoryRegionInfo(LPNextSegment, LMemoryRegionInfo);
-    if LMemoryRegionInfo.RegionIsFree then
+    if LMemoryRegionInfo.RegionState = mrsFree then
     begin
       {Round the region size to the previous 64K}
       LMemoryRegionInfo.RegionSize := LMemoryRegionInfo.RegionSize and -CLargeBlockGranularity;
@@ -8610,6 +8640,12 @@ begin
   Result := True;
 end;
 
+{Returns the number of bytes of address space that is currently either committed or reserved by FastMM.}
+function FastMM_GetCurrentMemoryUsage: NativeUInt;
+begin
+  Result := MemoryUsageCurrent;
+end;
+
 procedure FastMM_GetHeapStatus_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
 var
   LPHeapStatus: ^THeapStatus;
@@ -8656,12 +8692,6 @@ begin
   end;
 end;
 
-{Returns the number of bytes of address space that is currently either committed or reserved by FastMM.}
-function FastMM_GetCurrentMemoryUsage: NativeUInt;
-begin
-  Result := MemoryUsageCurrent;
-end;
-
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
 begin
@@ -8689,6 +8719,165 @@ begin
     Result.EfficiencyPercentage := Result.AllocatedBytes / LHeapStatus.TotalAddrSpace * 100
   else
     Result.EfficiencyPercentage := 100;
+end;
+
+procedure FastMM_GetMemoryManagerState_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+var
+  LPMemoryManagerState: ^TFastMM_MemoryManagerState;
+  LSmallBlockTypeIndex: Cardinal;
+begin
+  LPMemoryManagerState := ABlockInfo.UserData;
+
+  case ABlockInfo.BlockType of
+
+    btLargeBlock:
+    begin
+      Inc(LPMemoryManagerState.ReservedLargeBlockAddressSpace, ABlockInfo.BlockSize);
+
+      if not ABlockInfo.BlockIsFree then
+      begin
+        Inc(LPMemoryManagerState.AllocatedLargeBlockCount);
+        Inc(LPMemoryManagerState.TotalAllocatedLargeBlockSize, ABlockInfo.UsableSize);
+      end;
+    end;
+
+    btMediumBlockSpan:
+    begin
+      Inc(LPMemoryManagerState.ReservedMediumBlockAddressSpace, ABlockInfo.BlockSize);
+    end;
+
+    btMediumBlock:
+    begin
+      if not ABlockInfo.BlockIsFree then
+      begin
+        Inc(LPMemoryManagerState.AllocatedMediumBlockCount);
+        Inc(LPMemoryManagerState.TotalAllocatedMediumBlockSize, ABlockInfo.UsableSize);
+      end;
+    end;
+
+    btSmallBlockSpan:
+    begin
+      {Reassign the the memory used by the small block span to the small block type.}
+      LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.SmallBlockSpanBlockSize) - 1) shr CSmallBlockGranularityBits];
+      Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].ReservedAddressSpace, ABlockInfo.BlockSize);
+      Dec(LPMemoryManagerState.ReservedMediumBlockAddressSpace, ABlockInfo.BlockSize);
+    end;
+
+    btSmallBlock:
+    begin
+      LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.BlockSize) - 1) shr CSmallBlockGranularityBits];
+      Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].AllocatedBlockCount);
+    end;
+
+  end;
+end;
+
+{Returns a detailed breakdown of the memory usage by block sze.}
+procedure FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
+  ALockTimeoutMilliseconds: Cardinal = 50);
+var
+  i, j: Integer;
+  LCurrentSmallBlockType: TSmallBlockTypeState;
+begin
+  AMemoryManagerState := Default(TFastMM_MemoryManagerState);
+  AMemoryManagerState.SmallBlockTypeCount := CSmallBlockTypeCount;
+
+  for i := 0 to CSmallBlockTypeCount - 1 do
+  begin
+    AMemoryManagerState.SmallBlockTypeStates[i].InternalBlockSize := SmallBlockManagers[0][i].BlockSize;
+    AMemoryManagerState.SmallBlockTypeStates[i].UseableBlockSize := SmallBlockManagers[0][i].BlockSize - CSmallBlockHeaderSize;
+  end;
+
+  FastMM_WalkBlocks(FastMM_GetMemoryManagerState_CallBack,
+    [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @AMemoryManagerState,
+    ALockTimeoutMilliseconds);
+
+  {Sort the small blocks in ascending order using insertion sort.}
+  for i := 1 to CSmallBlockTypeCount - 1 do
+  begin
+    LCurrentSmallBlockType := AMemoryManagerState.SmallBlockTypeStates[i];
+
+    j := i;
+    while (j > 0) and (AMemoryManagerState.SmallBlockTypeStates[j - 1].InternalBlockSize > LCurrentSmallBlockType.InternalBlockSize) do
+    begin
+      AMemoryManagerState.SmallBlockTypeStates[j] := AMemoryManagerState.SmallBlockTypeStates[j - 1];
+      Dec(j);
+    end;
+
+    AMemoryManagerState.SmallBlockTypeStates[j] := LCurrentSmallBlockType;
+  end;
+
+end;
+
+procedure FastMM_GetMemoryMap_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+var
+  LPMemoryMap: ^TMemoryMap;
+  LInd, LStartChunkIndex, LEndChunkIndex: NativeUInt;
+begin
+  LPMemoryMap := ABlockInfo.UserData;
+
+  if not ABlockInfo.BlockIsFree then
+  begin
+    LStartChunkIndex := NativeUInt(ABlockInfo.UserData) shr 16;
+
+    LEndChunkIndex := LStartChunkIndex + NativeUInt(ABlockInfo.BlockSize shr 16);
+    if LEndChunkIndex > High(TMemoryMap) then
+      LEndChunkIndex := High(TMemoryMap);
+
+    for LInd := LStartChunkIndex to LEndChunkIndex do
+      LPMemoryMap[LInd] := csAllocated;
+  end;
+end;
+
+{Gets the state of every 64K block in lower 4GB of the address space.  (This covers the entire address space under
+32-bit.)}
+procedure FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal);
+var
+  LChunkIndex, LNextChunkIndex: NativeUInt;
+  LMemoryRegionInfo: TMemoryRegionInfo;
+begin
+  {Clear the map}
+  FillChar(AMemoryMap, SizeOf(AMemoryMap), Ord(csUnallocated));
+
+  {Walk all large blocks and medium block spans}
+  FastMM_WalkBlocks(FastMM_GetMemoryMap_CallBack, [btLargeBlock, btMediumBlockSpan], False, @AMemoryMap,
+    ALockTimeoutMilliseconds);
+
+  {Fill in the rest of the map}
+  LChunkIndex := 0;
+  while LChunkIndex <= High(AMemoryMap) do
+  begin
+    {If the chunk is not allocated by this MM, what is its status?}
+    if AMemoryMap[LChunkIndex] = csUnallocated then
+    begin
+      {Query the address space starting at the chunk boundary}
+      OS_GetVirtualMemoryRegionInfo(Pointer(LChunkIndex * 65536), LMemoryRegionInfo);
+
+      if LMemoryRegionInfo.RegionSize = 0 then
+      begin
+        {VirtualQuery may fail for addresses >2GB if a large address space is not enabled.}
+        FillChar(AMemoryMap[LChunkIndex], 65536 - LChunkIndex, csSysReserved);
+        Break;
+      end;
+
+      {Get the chunk number after the region}
+      LNextChunkIndex := (LMemoryRegionInfo.RegionSize - 1) shr 16 + LChunkIndex + 1;
+      if LNextChunkIndex > 65536 then
+        LNextChunkIndex := 65536;
+
+      {Set the status of all the chunks in the region}
+      case LMemoryRegionInfo.RegionState of
+        mrsAllocated: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, csSysAllocated);
+        mrsReserved: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, csSysReserved);
+      end;
+
+      {Point to the start of the next chunk}
+      LChunkIndex := LNextChunkIndex;
+    end
+    else
+      Inc(LChunkIndex);
+  end;
+
 end;
 
 {Returns True if there are live pointers using this memory manager.}
