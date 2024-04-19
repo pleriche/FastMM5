@@ -200,7 +200,7 @@ dynamic loading is explicitly specified.}
   {$define 64Bit}
 {$else}
   {$define 32Bit}
-{$endif}
+{$ifend}
 
 {$ifdef CPUX86}
   {$ifndef PurePascal}
@@ -289,7 +289,7 @@ const
   CFastMM_SmallBlockArenaCount = 4;
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
-{$endif}
+{$ifend}
 
   {The default name of debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
@@ -2388,6 +2388,224 @@ begin
 {$endif}
 end;
 
+{------------------------------------------}
+{--------Atomic calls for Delphi XE2-------}
+{------------------------------------------}
+
+{$IF RTLVersion < 24.00}
+
+function AtomicIncrement(var Target: Cardinal): Cardinal; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, -1
+  LOCK XADD [RCX], EAX
+  DEC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, -1
+  LOCK XADD [ECX], EAX
+  DEC     EAX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  NEG     RDX
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  NEG     EDX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Integer; Value: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     EAX, EDX
+  //     RCX Target
+  //     EAX Value
+  LOCK XCHG [RCX], EAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Pointer; Value: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XCHG [RCX], RAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Integer; Value: Integer; Compare: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  //     R8  Compare
+  // <-- EAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     EDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], EDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Compare
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Int64; Value: Int64; Compare: Int64): Int64; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  PUSH EBX
+  PUSH EDI
+  MOV EDI, EAX  // Target
+  MOV EAX, DWORD PTR [Compare]
+  MOV EDX, DWORD PTR [Compare+4]
+  MOV EBX, DWORD PTR [Value]
+  MOV ECX, DWORD PTR [Value+4]
+  LOCK CMPXCHG8B QWORD PTR [EDI]
+  POP EDI
+  POP EBX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Pointer; Value: Pointer; Compare: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     RDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Comp
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+{$IFEND}
 
 {------------------------------------------}
 {---------Operating system calls-----------}
@@ -3981,7 +4199,7 @@ asm
 {$endif}
   bsf eax, eax
 end;
-{$endif}
+{$ifend}
 
 {Returns True if the block is not in use.}
 function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
@@ -4477,7 +4695,7 @@ begin
     LRemainingSize := NativeUInt(APLargeBlockHeader.ActualBlockSize);
 {$if CompilerVersion < 31}
     Result := 0; //Workaround for spurious warning with older compilers
-{$endif}
+{$ifend}
     while True do
     begin
       OS_GetVirtualMemoryRegionInfo(LPCurrentSegment, LMemoryRegionInfo);
@@ -9718,7 +9936,7 @@ begin
   begin
     {$if CompilerVersion < 31}
     LChildDirection := False; //Workaround for spurious warning with older compilers
-    {$endif}
+    {$ifend}
     while True do
     begin
       LPSummaryEntry := @APLeakSummary.MemoryLeakEntries[i];
@@ -10155,20 +10373,20 @@ var
 begin
   {---------Bug checks-------}
 
-  {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$endif}
-  {$if CMediumBlockHeaderSize <> 8} {$message error 'Medium block header size must be 8 bytes'} {$endif}
-  {$if CLargeBlockHeaderSize and 63 <> 0} {$message error 'Large block header size must be multiple of 64 bytes'} {$endif}
+  {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$ifend}
+  {$if CMediumBlockHeaderSize <> 8} {$message error 'Medium block header size must be 8 bytes'} {$ifend}
+  {$if CLargeBlockHeaderSize and 63 <> 0} {$message error 'Large block header size must be multiple of 64 bytes'} {$ifend}
   {In order to ensure minimum alignment is always honoured the debug block header must be a multiple of 64.}
-  {$if CDebugBlockHeaderSize and 63 <> 0} {$message error 'Debug block header must be a multiple of 64 bytes'} {$endif}
+  {$if CDebugBlockHeaderSize and 63 <> 0} {$message error 'Debug block header must be a multiple of 64 bytes'} {$ifend}
 
   {Span headers have to be a multiple of 64 bytes in order to ensure that 64-byte alignment of user data is possible.}
-  {$if CSmallBlockSpanHeaderSize and 63 <> 0} {$message error 'Small block span header size must be multiple of 64 bytes'} {$endif}
-  {$if CMediumBlockSpanHeaderSize and 63 <> 0} {$message error 'Medium block span header size must be multiple of 64 bytes'} {$endif}
+  {$if CSmallBlockSpanHeaderSize and 63 <> 0} {$message error 'Small block span header size must be multiple of 64 bytes'} {$ifend}
+  {$if CMediumBlockSpanHeaderSize and 63 <> 0} {$message error 'Medium block span header size must be multiple of 64 bytes'} {$ifend}
 
-  {$if CSmallBlockManagerSize and 63 <> 0} {$message error 'Small block manager size must be a multiple of 64 bytes'} {$endif}
-  {$if CSmallBlockManagerSize <> (1 shl CSmallBlockManagerSizeBits)} {$message error 'Small block manager size mismatch'} {$endif}
+  {$if CSmallBlockManagerSize and 63 <> 0} {$message error 'Small block manager size must be a multiple of 64 bytes'} {$ifend}
+  {$if CSmallBlockManagerSize <> (1 shl CSmallBlockManagerSizeBits)} {$message error 'Small block manager size mismatch'} {$ifend}
 
-  {$if CLargeBlockManagerSize and 63 <> 0} {$message error 'Large block manager size must be a multiple of 64 bytes'} {$endif}
+  {$if CLargeBlockManagerSize and 63 <> 0} {$message error 'Large block manager size must be a multiple of 64 bytes'} {$ifend}
 
   {---------General configuration-------}
 
