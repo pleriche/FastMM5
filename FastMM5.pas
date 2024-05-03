@@ -4817,56 +4817,54 @@ begin
   LLargeBlockActualSize := (ASize + CLargeBlockHeaderSize + CLargeBlockGranularity - 1) and -CLargeBlockGranularity;
   if LLargeBlockActualSize <= CMaximumMediumBlockSize then
     Exit(nil);
+
   {Get the large block.}
   Result := OS_AllocateVirtualMemory(LLargeBlockActualSize, False);
+  if Result = nil then
+    Exit;
 
-  {Set the Large block fields}
-  if Result <> nil then
+  {Set the large block size and flags}
+  PLargeBlockHeader(Result).UserAllocatedSize := ASize;
+  PLargeBlockHeader(Result).ActualBlockSize := LLargeBlockActualSize;
+  PLargeBlockHeader(Result).BlockIsSegmented := False;
+  PLargeBlockHeader(Result).BlockStatusFlags := CIsLargeBlockFlag;
+
+  {Insert the block in the first available arena.}
+  while True do
   begin
-    {Set the large block size and flags}
-    PLargeBlockHeader(Result).UserAllocatedSize := ASize;
-    PLargeBlockHeader(Result).ActualBlockSize := LLargeBlockActualSize;
-    PLargeBlockHeader(Result).BlockIsSegmented := False;
-    PLargeBlockHeader(Result).BlockStatusFlags := CIsLargeBlockFlag;
 
-    {Insert the block in the first available arena.}
-    while True do
+    LPLargeBlockManager := @LargeBlockManagers[0];
+    for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
     begin
 
-      LPLargeBlockManager := @LargeBlockManagers[0];
-      for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
+      if (LPLargeBlockManager.LargeBlockManagerLocked = 0)
+        and (AtomicExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1) = 0) then
       begin
+        PLargeBlockHeader(Result).LargeBlockManager := LPLargeBlockManager;
 
-        if (LPLargeBlockManager.LargeBlockManagerLocked = 0)
-          and (AtomicExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1) = 0) then
-        begin
-          PLargeBlockHeader(Result).LargeBlockManager := LPLargeBlockManager;
+        {Insert the large block into the linked list of large blocks}
+        LOldFirstLargeBlock := LPLargeBlockManager.FirstLargeBlockHeader;
+        PLargeBlockHeader(Result).PreviousLargeBlockHeader := Pointer(LPLargeBlockManager);
+        LPLargeBlockManager.FirstLargeBlockHeader := Result;
+        PLargeBlockHeader(Result).NextLargeBlockHeader := LOldFirstLargeBlock;
+        LOldFirstLargeBlock.PreviousLargeBlockHeader := Result;
 
-          {Insert the large block into the linked list of large blocks}
-          LOldFirstLargeBlock := LPLargeBlockManager.FirstLargeBlockHeader;
-          PLargeBlockHeader(Result).PreviousLargeBlockHeader := Pointer(LPLargeBlockManager);
-          LPLargeBlockManager.FirstLargeBlockHeader := Result;
-          PLargeBlockHeader(Result).NextLargeBlockHeader := LOldFirstLargeBlock;
-          LOldFirstLargeBlock.PreviousLargeBlockHeader := Result;
+        LPLargeBlockManager.LargeBlockManagerLocked := 0;
 
-          LPLargeBlockManager.LargeBlockManagerLocked := 0;
+        {Add the size of the header}
+        Inc(PByte(Result), CLargeBlockHeaderSize);
 
-          {Add the size of the header}
-          Inc(PByte(Result), CLargeBlockHeaderSize);
-
-          Exit;
-        end;
-
-        {Try the next arena.}
-        Inc(LPLargeBlockManager);
+        Exit;
       end;
 
+      {Try the next arena.}
+      Inc(LPLargeBlockManager);
     end;
 
     {All large block managers are locked:  Back off and try again.}
     LogLargeBlockThreadContentionAndYieldToOtherThread;
-
   end;
+
 end;
 
 function FastMM_FreeMem_FreeLargeBlock(APLargeBlock: Pointer): Integer;
