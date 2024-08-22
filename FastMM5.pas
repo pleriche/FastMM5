@@ -1135,11 +1135,9 @@ const
   CMemoryDumpMaxBytes = 256;
   CMemoryDumpMaxBytesPerLine = 32;
 
-  {The debug block fill pattern, in several sizes.}
-  CDebugFillPattern8B = $8080808080808080;
-  CDebugFillPattern4B = $80808080;
-  CDebugFillPattern2B = $8080;
-  CDebugFillPattern1B = $80;
+  {The debug fill pattern for freed and allocated blocks.}
+  CDebugFillByteFreedBlock = $80;
+  CDebugFillByteAllocatedBlock = $90;
 
   {The first few frames of a GetMem or FreeMem stack trace are inside system.pas and this unit, so does not provide any
   useful information.  Specify how many of the initial frames should be skipped here.  Note that these are actual
@@ -4078,7 +4076,7 @@ begin
   Result := True;
 end;
 
-procedure FillDebugBlockWithDebugPattern(APDebugBlockHeader: PFastMM_DebugBlockHeader);
+procedure FillFreedDebugBlockWithDebugPattern(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 var
   LByteOffset: NativeInt;
   LPUserArea: PByte;
@@ -4091,7 +4089,7 @@ begin
   begin
     PPointerArray(LPUserArea)[0] := TFastMM_FreedObject;
     {$ifdef 32Bit}
-    PIntegerArray(LPUserArea)[1] := Integer(CDebugFillPattern4B);
+    PIntegerArray(LPUserArea)[1] := Integer(Cardinal($01010101) * CDebugFillByteFreedBlock);
     {$endif}
     Dec(LByteOffset, 8);
     Inc(LPUserArea, 8);
@@ -4100,19 +4098,19 @@ begin
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
-    LPUserArea[LByteOffset] := CDebugFillPattern1B;
+    LPUserArea[LByteOffset] := CDebugFillByteFreedBlock;
   end;
 
   if LByteOffset and 2 <> 0 then
   begin
     Dec(LByteOffset, 2);
-    PWord(@LPUserArea[LByteOffset])^ := CDebugFillPattern2B;
+    PWord(@LPUserArea[LByteOffset])^ := Word($0101) * CDebugFillByteFreedBlock;
   end;
 
   if LByteOffset and 4 <> 0 then
   begin
     Dec(LByteOffset, 4);
-    PCardinal(@LPUserArea[LByteOffset])^ := CDebugFillPattern4B;
+    PCardinal(@LPUserArea[LByteOffset])^ := Cardinal($01010101) * CDebugFillByteFreedBlock;
   end;
 
   {Loop over the remaining 8 byte chunks using a negative offset.}
@@ -4120,14 +4118,49 @@ begin
   LByteOffset := - LByteOffset;
   while LByteOffset < 0 do
   begin
-    PUInt64(@LPUserArea[LByteOffset])^ := CDebugFillPattern8B;
+    PUInt64(@LPUserArea[LByteOffset])^ := UInt64($0101010101010101) * CDebugFillByteFreedBlock;
     Inc(LByteOffset, 8);
   end;
+end;
 
+procedure FillAllocatedDebugBlockWithDebugPattern(APDebugBlockHeader: PFastMM_DebugBlockHeader);
+var
+  LByteOffset: NativeInt;
+  LPUserArea: PByte;
+begin
+  LByteOffset := APDebugBlockHeader.UserSize;
+  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+
+  if LByteOffset and 1 <> 0 then
+  begin
+    Dec(LByteOffset);
+    LPUserArea[LByteOffset] := CDebugFillByteAllocatedBlock;
+  end;
+
+  if LByteOffset and 2 <> 0 then
+  begin
+    Dec(LByteOffset, 2);
+    PWord(@LPUserArea[LByteOffset])^ := Word($0101) * CDebugFillByteAllocatedBlock;
+  end;
+
+  if LByteOffset and 4 <> 0 then
+  begin
+    Dec(LByteOffset, 4);
+    PCardinal(@LPUserArea[LByteOffset])^ := Cardinal($01010101) * CDebugFillByteAllocatedBlock;
+  end;
+
+  {Loop over the remaining 8 byte chunks using a negative offset.}
+  Inc(LPUserArea, LByteOffset);
+  LByteOffset := - LByteOffset;
+  while LByteOffset < 0 do
+  begin
+    PUInt64(@LPUserArea[LByteOffset])^ := UInt64($0101010101010101) * CDebugFillByteAllocatedBlock;
+    Inc(LByteOffset, 8);
+  end;
 end;
 
 {The debug header and footer are assumed to be valid.}
-procedure LogDebugBlockFillPatternCorrupted(APDebugBlockHeader: PFastMM_DebugBlockHeader);
+procedure LogFreedDebugBlockFillPatternCorrupted(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 const
   CMaxLoggedChanges = 32;
 var
@@ -4150,7 +4183,7 @@ begin
   LTokenValues[CEventLogTokenModifyAfterFreeDetail] := LPBufferPos;
   while LOffset < APDebugBlockHeader.UserSize do
   begin
-    if LPUserArea[LOffset] <> CDebugFillPattern1B then
+    if LPUserArea[LOffset] <> CDebugFillByteFreedBlock then
     begin
 
       {Found the start of a changed block, now find the length}
@@ -4159,7 +4192,7 @@ begin
       begin
         Inc(LOffset);
         if (LOffset >= APDebugBlockHeader.UserSize)
-          or (LPUserArea[LOffset] = CDebugFillPattern1B) then
+          or (LPUserArea[LOffset] = CDebugFillByteFreedBlock) then
         begin
           Break;
         end;
@@ -4199,7 +4232,7 @@ end;
 
 {Checks that the debug fill pattern in the debug block is intact.  Returns True if the block is intact, otherwise
 (optionally) logs and/or displays the error and returns False.}
-function CheckDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
+function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
 var
   LByteOffset: NativeInt;
   LPUserArea: PByte;
@@ -4214,7 +4247,7 @@ begin
   begin
     LFillPatternIntact := (PPointer(LPUserArea)^ = TFastMM_FreedObject)
     {$ifdef 32Bit}
-      and (PIntegerArray(LPUserArea)[1] = Integer(CDebugFillPattern4B));
+      and (PIntegerArray(LPUserArea)[1] = Integer(Cardinal($01010101) * CDebugFillByteFreedBlock));
     {$endif};
     Dec(LByteOffset, 8);
     Inc(LPUserArea, 8);
@@ -4224,21 +4257,21 @@ begin
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
-    if LPUserArea[LByteOffset] <> CDebugFillPattern1B then
+    if LPUserArea[LByteOffset] <> CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
   if LByteOffset and 2 <> 0 then
   begin
     Dec(LByteOffset, 2);
-    if PWord(@LPUserArea[LByteOffset])^ <> CDebugFillPattern2B then
+    if PWord(@LPUserArea[LByteOffset])^ <> Word($0101) * CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
   if LByteOffset and 4 <> 0 then
   begin
     Dec(LByteOffset, 4);
-    if PCardinal(@LPUserArea[LByteOffset])^ <> CDebugFillPattern4B then
+    if PCardinal(@LPUserArea[LByteOffset])^ <> Cardinal($01010101) * CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
@@ -4247,7 +4280,7 @@ begin
   LByteOffset := - LByteOffset;
   while LByteOffset < 0 do
   begin
-    if PUInt64(@LPUserArea[LByteOffset])^ <> CDebugFillPattern8B then
+    if PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock then
     begin
       LFillPatternIntact := False;
       Break;
@@ -4259,7 +4292,7 @@ begin
   if not LFillPatternIntact then
   begin
     {Log the block error.}
-    LogDebugBlockFillPatternCorrupted(APDebugBlockHeader);
+    LogFreedDebugBlockFillPatternCorrupted(APDebugBlockHeader);
     Result := False;
   end
   else
@@ -4270,7 +4303,7 @@ end;
 function CheckFreeDebugBlockIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
 begin
   Result := CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader)
-    and CheckDebugBlockFillPatternIntact(APDebugBlockHeader);
+    and CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader);
 end;
 
 procedure EnsureEmergencyReserveAddressSpaceAllocated;
@@ -4338,7 +4371,7 @@ begin
   LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
 
   {Fill the user area of the block with the debug pattern.}
-  FillDebugBlockWithDebugPattern(LPActualBlock);
+  FillFreedDebugBlockWithDebugPattern(LPActualBlock);
 
   {The block is now free.}
   LPActualBlock.DebugBlockFlags := CIsDebugBlockFlag or CBlockIsFreeFlag;
@@ -7785,7 +7818,7 @@ end;
 function FastMM_FreeMem_EraseBeforeFree(APointer: Pointer): Integer;
 begin
   {Fill the user area of the block with the debug fill pattern before passing the block to the regular FreeMem handler.}
-  FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillPattern1B);
+  FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillByteFreedBlock);
 
   Result := FastMM_FreeMem(APointer);
 end;
@@ -7929,7 +7962,7 @@ begin
 
   {Fill the block with the debug pattern}
   if AFillBlockWithDebugPattern then
-    FillDebugBlockWithDebugPattern(Result);
+    FillAllocatedDebugBlockWithDebugPattern(Result);
 
   {Set the flag in the actual block header to indicate that the block contains debug information.}
   SetBlockHasDebugInfo(Result, True);
@@ -8635,7 +8668,7 @@ begin
   end;
 
   {If it is a free block, check whether it has been modified after being freed.}
-  if ABlockInfo.BlockIsFree and (not CheckDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
+  if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
     System.Error(reInvalidPtr);
 end;
 
@@ -10269,11 +10302,14 @@ begin
   end;
 
   {---------Debug setup-------}
-  {Reserve 64K starting at address $80800000.  $80808080 is the debug fill pattern under 32-bit, so we don't want any
-  pointer dereferences at this address to succeed.  This is only necessary under 32-bit, since $8080808000000000 is
-  already reserved for the OS under 64-bit.}
 {$ifdef 32Bit}
-  OS_AllocateVirtualMemoryAtAddress(Pointer($80800000), $10000, True);
+  {Reserve 64K starting at address $80800000.  $80808080 is the debug fill pattern for freed blocks under 32-bit, so we
+  don't want any pointer dereferences at this address to succeed.  This is only necessary under 32-bit, since
+  $8080808000000000 is already reserved for the OS under 64-bit.}
+  OS_AllocateVirtualMemoryAtAddress(Pointer(Cardinal($01010000) * CDebugFillByteFreedBlock), $10000, True);
+  {If the allocated block fill pattern differs, reserve its corresponding address range as well.}
+  if CDebugFillByteFreedBlock <> CDebugFillByteAllocatedBlock then
+    OS_AllocateVirtualMemoryAtAddress(Pointer(Cardinal($01010000) * CDebugFillByteAllocatedBlock), $10000, True);
 {$endif}
 
   FastMM_GetStackTrace := @FastMM_NoOpGetStackTrace;
