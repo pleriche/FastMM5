@@ -1663,6 +1663,15 @@ const
     CMaximumSmallBlockSize // = 2624
   );
 
+  {Virtual method table offsets.  These are needed to determine whether a memory block is being used by an object, e.g.
+  for leak and state reporting.  Normally these offsets can be assumed to match the constants in system.pas, but if this
+  memory manager instance is in a library that is compiled with a different version of Delphi than the main application
+  then it may be necessary to change these constants to match the constants that the application was compiled with.}
+  SelfPtrVMTOffset = vmtSelfPtr;
+  ParentVMTOffset = vmtParent;
+  TypeInfoVMTOffset = vmtTypeInfo;
+  ClassNameVMTOffset = vmtClassName;
+
 var
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
   SmallBlockTypeLookup: array[0.. CMaximumSmallBlockSize div CSmallBlockGranularity - 1] of Byte;
@@ -2858,14 +2867,14 @@ var
     {Check that the self pointer as well as parent class self pointer addresses are valid}
     if (ADepth < 1000)
       and (NativeUInt(AClassPointer) > 65535)
-      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtSelfPtr))
-      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + vmtParent)) then
+      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + SelfPtrVMTOffset))
+      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + ParentVMTOffset)) then
     begin
       try
         {Get a pointer to the parent class' self pointer}
-        LParentClassSelfPointer := PPointer(PByte(AClassPointer) + vmtParent)^;
+        LParentClassSelfPointer := PPointer(PByte(AClassPointer) + ParentVMTOffset)^;
         {Is the "Self" pointer valid?}
-        if PPointer(PByte(AClassPointer) + vmtSelfPtr)^ <> AClassPointer then
+        if PPointer(PByte(AClassPointer) + SelfPtrVMTOffset)^ <> AClassPointer then
           Exit(False);
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
@@ -3135,7 +3144,7 @@ var
   LPTarget: PWideChar;
   LPSource: PAnsiChar;
   LCharInd, LNumChars: Integer;
-  LClassInfo: Pointer;
+  LPClassInfo: Pointer;
   LPShortString: PShortString;
 begin
   Result := APTarget;
@@ -3153,10 +3162,10 @@ begin
       LPTarget := @LBuffer;
 
       {Get the name of the unit.}
-      LClassInfo := LClass.ClassInfo;
-      if LClassInfo <> nil then
+      LPClassInfo := PPointer(@PByte(LClass)[TypeInfoVMTOffset])^;
+      if LPClassInfo <> nil then
       begin
-        LPShortString := @PClassData(PByte(LClassInfo) + 2 + PByte(PByte(LClassInfo) + 1)^).UnitName;
+        LPShortString := @PClassData(PByte(LPClassInfo) + 2 + PByte(PByte(LPClassInfo) + 1)^).UnitName;
         LPSource := @LPShortString^[1];
         LNumChars := Length(LPShortString^);
 
@@ -3179,7 +3188,7 @@ begin
       end;
 
       {Append the class name}
-      LPShortString := PShortString(PPointer(PByte(LClass) + vmtClassName)^);
+      LPShortString := PShortString(PPointer(PByte(LClass) + ClassNameVMTOffset)^);
       LPSource := @LPShortString^[1];
       LNumChars := Length(LPShortString^);
       for LCharInd := 1 to LNumChars do
