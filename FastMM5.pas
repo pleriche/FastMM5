@@ -1665,10 +1665,22 @@ const
   for leak and state reporting.  Normally these offsets can be assumed to match the constants in system.pas, but if this
   memory manager instance is in a library that is compiled with a different version of Delphi than the main application
   then it may be necessary to change these constants to match the constants that the application was compiled with.}
+{$ifdef UseDelphi5VMTOffsets}
+  SelfPtrVMTOffset = -76;
+  TypeInfoVMTOffset = -60;
+  ClassNameVMTOffset = -44;
+  ParentVMTOffset = -36;
+  {$define VMTOffsetsDeclared}
+  {$define OldStringHeader}
+{$endif}
+
+{$ifndef VMTOffsetsDeclared}
+  {Use the VMT offsets of the Delphi version used to compile this unit if there is no override.}
   SelfPtrVMTOffset = vmtSelfPtr;
-  ParentVMTOffset = vmtParent;
   TypeInfoVMTOffset = vmtTypeInfo;
   ClassNameVMTOffset = vmtClassName;
+  ParentVMTOffset = vmtParent;
+{$endif}
 
 var
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
@@ -2911,8 +2923,10 @@ type
 {$ifdef 64Bit}
     _Padding: Integer;
 {$endif}
+{$ifndef OldStringHeader}
     codePage: Word;
     elemSize: Word;
+{$endif}
     refCnt: Integer;
     length: Integer;
   end;
@@ -2933,9 +2947,13 @@ begin
     Exit(sdtNotAString);
 
   {Element size must be either 1 (Ansi) or 2 (Unicode)}
+{$ifndef OldStringHeader}
   LElementSize := PStrRec(APMemoryBlock).elemSize;
   if (LElementSize <> 1) and (LElementSize <> 2) then
     Exit(sdtNotAString);
+{$else}
+  LElementSize := 1;
+{$endif}
 
   {Get the string length and check whether it fits inside the block}
   LStringLength := PStrRec(APMemoryBlock).length;
