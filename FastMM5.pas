@@ -699,11 +699,24 @@ function FastMM_ExitDebugMode: Boolean;
 FastMM_ExitDebugMode.}
 function FastMM_DebugModeActive: Boolean;
 
+{Enables/disables the erasure of the content of newly allocated blocks.  Calls may be nested, in which case erasure is
+only disabled when the number of FastMM_EndEraseAllocatedBlockContent calls equal the number of
+FastMM_BeginEraseAllocatedBlockContent calls.  When enabled the content of all newly allocated blocks is filled with the
+debug pattern $90909090 before being passed to the application.  This may help catch application bugs involving the use
+of uninitialized memory.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
+in debug mode.}
+function FastMM_BeginEraseAllocatedBlockContent: Boolean;
+function FastMM_EndEraseAllocatedBlockContent: Boolean;
+{Returns True if newly allocated blocks are currently erased, i.e. FastMM_BeginEraseAllocatedBlockContent has been
+called more times than FastMM_EndEraseAllocatedBlockContent.}
+function FastMM_EraseAllocatedBlockContentActive: Boolean;
+
 {Enables/disables the erasure of the content of freed blocks.  Calls may be nested, in which case erasure is only
 disabled when the number of FastMM_EndEraseFreedBlockContent calls equal the number of
 FastMM_BeginEraseFreedBlockContent calls.  When enabled the content of all freed blocks is filled with the debug pattern
 $80808080 before being returned to the memory pool.  This is useful for security purposes, and may also help catch "use
-after free" programming errors (like debug mode, but at reduced CPU cost).}
+after free" programming errors.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
+in debug mode.}
 function FastMM_BeginEraseFreedBlockContent: Boolean;
 function FastMM_EndEraseFreedBlockContent: Boolean;
 {Returns True if free blocks are currently erased on free, i.e. FastMM_BeginEraseFreedBlockContent has been called more
@@ -1728,6 +1741,9 @@ var
 
   {The difference between the number of times FastMM_EnterDebugMode has been called vs FastMM_ExitDebugMode.}
   DebugModeCounter: Integer;
+
+  {The difference between the number of times FastMM_BeginEraseAllocatedBlockContent has been called vs FastMM_EndEraseAllocatedBlockContent.}
+  EraseAllocatedBlockContentCounter: Integer;
 
   {The difference between the number of times FastMM_BeginEraseFreedBlockContent has been called vs FastMM_EndEraseFreedBlockContent.}
   EraseFreedBlockContentCounter: Integer;
@@ -7619,6 +7635,15 @@ begin
 {$endif}
 end;
 
+function FastMM_GetMem_EraseAllocatedBlock(ASize: NativeInt): Pointer;
+begin
+  Result := FastMM_GetMem(ASize);
+
+  {Fill the user area of the block with the debug fill pattern before returning it to the application.}
+  if Result <> nil then
+    FillChar(Result^, FastMM_BlockMaximumUserBytes(Result), CDebugFillByteAllocatedBlock);
+end;
+
 function FastMM_FreeMem(APointer: Pointer): Integer;
 {$ifndef PurePascal}
 asm
@@ -10456,7 +10481,10 @@ begin
   {Debug mode or normal memory manager?}
   if DebugModeCounter <= 0 then
   begin
-    LNewMemoryManager.GetMem := FastMM_GetMem;
+    if EraseAllocatedBlockContentCounter <= 0 then
+      LNewMemoryManager.GetMem := FastMM_GetMem
+    else
+      LNewMemoryManager.GetMem := FastMM_GetMem_EraseAllocatedBlock;
     if EraseFreedBlockContentCounter <= 0 then
       LNewMemoryManager.FreeMem := FastMM_FreeMem
     else
@@ -10663,6 +10691,37 @@ begin
     AStackTraceEntryCount := CFastMM_StackTrace_MaximumEntryCount;
 
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
+end;
+
+function FastMM_BeginEraseAllocatedBlockContent: Boolean;
+begin
+  if CurrentInstallationState = mmisInstalled then
+  begin
+    if AtomicIncrement(EraseAllocatedBlockContentCounter) = 1 then
+      Result := FastMM_SetNormalOrDebugMemoryManager
+    else
+      Result := True;
+  end
+  else
+    Result := False;
+end;
+
+function FastMM_EndEraseAllocatedBlockContent: Boolean;
+begin
+  if CurrentInstallationState = mmisInstalled then
+  begin
+    if AtomicDecrement(EraseAllocatedBlockContentCounter) = 0 then
+      Result := FastMM_SetNormalOrDebugMemoryManager
+    else
+      Result := True;
+  end
+  else
+    Result := False;
+end;
+
+function FastMM_EraseAllocatedBlockContentActive: Boolean;
+begin
+  Result := EraseAllocatedBlockContentCounter > 0;
 end;
 
 function FastMM_BeginEraseFreedBlockContent: Boolean;
