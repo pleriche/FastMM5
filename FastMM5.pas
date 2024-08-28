@@ -2887,8 +2887,11 @@ var
 
   {Returns True if AClassPointer points to a class VMT}
   function InternalIsValidClass(AClassPointer: Pointer; ADepth: Integer = 0): Boolean;
+  const
+    CMaxVMTSize = $1000; //Assume a VMT will not be larger than this
   var
     LParentClassSelfPointer: PPointer;
+    LPClassNameString: PShortString;
   begin
     {Check that the self pointer as well as parent class self pointer addresses are valid}
     if (ADepth < 1000)
@@ -2902,6 +2905,16 @@ var
         {Is the "Self" pointer valid?}
         if PPointer(PByte(AClassPointer) + SelfPtrVMTOffset)^ <> AClassPointer then
           Exit(False);
+
+        {Do a sanity check on the pointer to the name of the class.  The short string containing the name is always just
+        after the VMT.}
+        LPClassNameString := PShortString(PPointer(PByte(AClassPointer) + ClassNameVMTOffset)^);
+        if (NativeUInt(LPClassNameString) - NativeUInt(AClassPointer) > CMaxVMTSize)
+          or (not IsValidVMTAddress(LPClassNameString)) then
+        begin
+          Exit(False);
+        end;
+
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
         thread frees the block at an inopportune moment then the reads above may cause an A/V.  If this happens then
