@@ -2864,12 +2864,12 @@ var
   LMemoryRegionInfo: TMemoryRegionInfo;
 
   {Checks whether the given address is a valid address for a VMT entry.}
-  function IsValidVMTAddress(APAddress: Pointer): Boolean;
+  function IsValidVMTAddress(APAddress: Pointer; AMustBePointerAligned: Boolean): Boolean;
   begin
-    {Do some basic pointer checks:  Must be pointer aligned and beyond 64K. (The low 64K is never readable, at least
-    under Windows.)}
+    {Do some basic pointer checks:  The pointer must be beyond 64K since the the low 64K is never readable, at least
+    under Windows.  Also optionally check that the pointer is aligned to SizeOf(Pointer).}
     if (NativeUInt(APAddress) <= 65535)
-      or (NativeUInt(APAddress) and (SizeOf(Pointer) - 1) <> 0) then
+      or (AMustBePointerAligned and (NativeUInt(APAddress) and (SizeOf(Pointer) - 1) <> 0)) then
     begin
       Exit(False);
     end;
@@ -2896,8 +2896,8 @@ var
     {Check that the self pointer as well as parent class self pointer addresses are valid}
     if (ADepth < 1000)
       and (NativeUInt(AClassPointer) > 65535)
-      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + SelfPtrVMTOffset))
-      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + ParentVMTOffset)) then
+      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + SelfPtrVMTOffset), True)
+      and IsValidVMTAddress(Pointer(PByte(AClassPointer) + ParentVMTOffset), True) then
     begin
       try
         {Get a pointer to the parent class' self pointer}
@@ -2910,7 +2910,7 @@ var
         after the VMT.}
         LPClassNameString := PShortString(PPointer(PByte(AClassPointer) + ClassNameVMTOffset)^);
         if (NativeUInt(LPClassNameString) - NativeUInt(AClassPointer) > CMaxVMTSize)
-          or (not IsValidVMTAddress(LPClassNameString)) then
+          or (not IsValidVMTAddress(LPClassNameString, False)) then
         begin
           Exit(False);
         end;
@@ -2925,7 +2925,7 @@ var
       if LParentClassSelfPointer = nil then
         Exit(True);
       {Recursively check the parent class for validity.}
-      Result := IsValidVMTAddress(LParentClassSelfPointer)
+      Result := IsValidVMTAddress(LParentClassSelfPointer, True)
         and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
     end
     else
