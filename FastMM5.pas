@@ -793,8 +793,12 @@ var
   by the application to track memory issues.}
   FastMM_CurrentAllocationGroup: Cardinal;
   {This variable is incremented during every debug getmem call (wrapping to 0 once it hits 4G) and stored in the debug
-  header.  It may be useful for debugging purposes.}
+  header.  It may be useful for debugging purposes.  A break point may be triggered in the debugger for a specific
+  AllocationNumber via FastMM_DebugBreakAllocationNumber.}
   FastMM_LastAllocationNumber: Cardinal;
+  {If this value is non-zero and the block with matching allocation number is allocated then a break point will be
+  triggered in the debugger.}
+  FastMM_DebugBreakAllocationNumber: Cardinal;
   {These variables are incremented every time all the arenas for the block size are locked simultaneously and FastMM had
   to relinquish the thread's timeslice during a GetMem or ReallocMem call. (FreeMem frees can always be deferred, so
   will never cause a thread contention).  If these numbers are excessively high then it is an indication that the number
@@ -2691,6 +2695,11 @@ end;
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
 begin
   Winapi.Windows.OutputDebugString(APDebugMessage);
+end;
+
+procedure OS_DebugBreak; inline;
+begin
+  Winapi.Windows.DebugBreak;
 end;
 
 {Shows a message box if the program is not showing one already.}
@@ -8022,6 +8031,14 @@ begin
 
   {Set the flag in the actual block header to indicate that the block contains debug information.}
   SetBlockHasDebugInfo(Result, True);
+
+  {If the current allocation number matches FastMM_DebugBreakAllocationNumber then trigger a break point in the
+  debugger.}
+  if (FastMM_DebugBreakAllocationNumber <> 0)
+    and (PFastMM_DebugBlockHeader(Result).AllocationNumber = FastMM_DebugBreakAllocationNumber) then
+  begin
+    OS_DebugBreak;
+  end;
 
   {Return a pointer to the user data}
   Inc(PByte(Result), CDebugBlockHeaderSize);
