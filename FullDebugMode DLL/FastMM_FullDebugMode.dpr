@@ -1,6 +1,6 @@
 {
 
-Fast Memory Manager: FullDebugMode Support DLL 1.64
+Fast Memory Manager: FullDebugMode Support DLL 1.70
 
 Description:
  Support DLL for FastMM. With this DLL available, FastMM will report debug info (unit name, line numbers, etc.) for
@@ -51,6 +51,8 @@ Change log:
     to text.
  Version 1.65 (10 July 2023)
   - Made LogStackTrace thread safe.
+ Version 1.70 (19 July 2025)
+  - Invalidate the memory map cache when a library is loaded or unloaded.
 
 }
 
@@ -80,7 +82,8 @@ uses
 {$R *.res}
 
 {$StackFrames on}
-{$warn Symbol_Platform off}
+{$Warn Symbol_Platform off}
+{$Align 8}
 
 {The name of the 64-bit DLL has a '64' at the end.}
 {$if SizeOf(Pointer) = 8}
@@ -337,6 +340,27 @@ var
   MemoryPageAccessMap: array[0..1024 * 1024 - 1] of TMemoryPageAccess;
 
 {$IFDEF MSWINDOWS}
+
+procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
+const
+  CPageSize = 4096;
+var
+  LStartPage, LEndPage: NativeUInt;
+  LPageCount: NativeInt;
+begin
+  if ASize = 0 then
+    Exit;
+
+  LStartPage := NativeUInt(ABaseAddress) div CPageSize;
+  LEndPage := LStartPage + (ASize - 1) div CPageSize;
+  if LEndPage > High(MemoryPageAccessMap) then
+    LEndPage := High(MemoryPageAccessMap);
+
+  LPageCount := LEndPage - LStartPage + 1;
+  if LPageCount > 0 then
+    FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
+end;
+
 {Updates the memory page access map. Currently only supports the low 4GB of address space.}
 procedure UpdateMemoryPageAccessMap(AAddress: NativeUInt);
 var
@@ -405,14 +429,14 @@ end;
 {$IFDEF MSWINDOWS}
 {Returns true if the return address is a valid call site.  This function is only safe to call while exceptions are
 being handled.}
-function IsValidCallSite(AReturnAddress: NativeUInt): boolean;
+function IsValidCallSite(AReturnAddress: NativeUInt): Boolean;
 var
   LCallAddress: NativeUInt;
   LCode8Back, LCode4Back, LTemp: Cardinal;
   LOld8087CW: Word;
   LOldMXCSR: Cardinal;
 begin
-  {We assume (for now) that all code will execute within the first 4GB of address space.}
+  {We assume (for now) that all application code will execute within the first 4GB of address space.}
   if (AReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (AReturnAddress <= $ffffffff){$endif} then
   begin
     {The call address is up to 8 bytes before the return address}
@@ -533,8 +557,7 @@ function _NSGetExecutablePath(buf: PAnsiChar; BufSize: PCardinal): Integer; cdec
 
 procedure GetRawStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
 var
-  LStackTop, LStackBottom, LCurrentFrame, LNextFrame, LReturnAddress,
-    LStackAddress: NativeUInt;
+  LStackTop, LStackBottom, LCurrentFrame, LNextFrame, LReturnAddress, LStackAddress: NativeUInt;
   LLastOSError: Cardinal;
 
 {$IFDEF MACOS}
@@ -666,6 +689,90 @@ begin
   end;
   {$ENDIF}
 end;
+
+{--------------------------DLL load and unload notifications--------------------------}
+
+{$IFDEF MSWINDOWS}
+
+type
+
+  UNICODE_STRING = record
+    Length: Word;
+    MaximumLength: Word;
+    Buffer: PWideChar;
+  end;
+  PUNICODE_STRING = ^UNICODE_STRING;
+
+  TCLDR_DLL_NOTIFICATION_DATA = record
+    Flags: Cardinal;                //Reserved.
+    FullDllName: PUNICODE_STRING;   //The full path name of the DLL module.
+    BaseDllName: PUNICODE_STRING;   //The base file name of the DLL module.
+    DllBase: Pointer;               //A pointer to the base address for the DLL in memory.
+    SizeOfImage: Cardinal;          //The size of the DLL image, in bytes.
+  end;
+  PCLDR_DLL_NOTIFICATION_DATA = ^TCLDR_DLL_NOTIFICATION_DATA;
+
+  TLdrDllNotification = procedure(NotificationReason: Cardinal; NotificationData: PCLDR_DLL_NOTIFICATION_DATA;
+    Context: Pointer); stdcall;
+
+  TLdrRegisterDllNotification = function(Flags: Cardinal; NotificationFunction: TLdrDllNotification;
+    Context: Pointer; var Cookie: Pointer): LongInt; stdcall;
+
+  TLdrUnregisterDllNotification = function(Cookie: Pointer): LongInt; stdcall;
+
+procedure LdrDllNotification(NotificationReason: Cardinal; NotificationData: PCLDR_DLL_NOTIFICATION_DATA;
+  Context: Pointer); stdcall;
+begin
+  InvalidateMemoryPageAccessMap(NotificationData.DllBase, NotificationData.SizeOfImage);
+end;
+
+var
+  DllNotificationCookie: Pointer = nil;
+
+procedure RegisterDLLLoadAndUnloadNotifications;
+var
+  LdrRegisterDllNotification: TLdrRegisterDllNotification;
+begin
+  if DllNotificationCookie <> nil then
+    Exit;
+
+  {Attempt to register notifications when a DLL is loaded or unloaded.}
+  LdrRegisterDllNotification := GetProcAddress(GetModuleHandle('NTDLL.DLL'), 'LdrRegisterDllNotification');
+  if Assigned(LdrRegisterDllNotification) then
+  begin
+    if LdrRegisterDllNotification(0, LdrDllNotification, nil, DllNotificationCookie) <> ERROR_SUCCESS then
+      DllNotificationCookie := nil;
+  end;
+
+  if DllNotificationCookie = nil then
+    OutputDebugString('FastMM_FullDebugMode: Failed to register DLL load and unload notifications.');
+end;
+
+procedure UnregisterDLLLoadAndUnloadNotifications;
+var
+  LdrUnregisterDllNotification: TLdrUnregisterDllNotification;
+begin
+  if DllNotificationCookie = nil then
+    Exit;
+
+  LdrUnregisterDllNotification := GetProcAddress(GetModuleHandle('NTDLL.DLL'), 'LdrUnregisterDllNotification');
+  if Assigned(LdrUnregisterDllNotification)
+    and (LdrUnregisterDllNotification(DllNotificationCookie) = ERROR_SUCCESS) then
+  begin
+    DllNotificationCookie := nil;
+  end;
+
+  if DllNotificationCookie <> nil then
+    OutputDebugString('FastMM_FullDebugMode: Failed to deregister DLL load and unload notifications.');
+end;
+
+procedure DllMain(AReason: Integer);
+begin
+  if AReason = DLL_PROCESS_DETACH then
+    UnregisterDLLLoadAndUnloadNotifications;
+end;
+
+{$ENDIF}
 
 {-----------------------------Stack Trace Logging----------------------------}
 
@@ -905,11 +1012,24 @@ end;
 exports
   GetFrameBasedStackTrace,
   GetRawStackTrace,
+{$IFDEF MSWINDOWS}
+  InvalidateMemoryPageAccessMap,
+{$ENDIF}
   LogStackTrace;
 
 begin
 {$ifdef JCLDebug}
   JclStackTrackingOptions := JclStackTrackingOptions + [stAllModules];
 {$endif}
+
+{$IFDEF MSWINDOWS}
+
+  {When this DLL is unloaded we need to unregister DLL load and unload notifications.}
+  DLLProc := DllMain;
+
+  {The memory map used by the stack tracing code must be updated whenever a DLL is loaded or unloaded.}
+  RegisterDLLLoadAndUnloadNotifications;
+
+{$ENDIF}
 
 end.
