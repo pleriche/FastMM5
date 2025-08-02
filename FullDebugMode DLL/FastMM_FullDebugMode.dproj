@@ -31,12 +31,6 @@
         <CfgParent>Base</CfgParent>
         <Base>true</Base>
     </PropertyGroup>
-    <PropertyGroup Condition="('$(Platform)'=='Win32' and '$(Cfg_1)'=='true') or '$(Cfg_1_Win32)'!=''">
-        <Cfg_1_Win32>true</Cfg_1_Win32>
-        <CfgParent>Cfg_1</CfgParent>
-        <Cfg_1>true</Cfg_1>
-        <Base>true</Base>
-    </PropertyGroup>
     <PropertyGroup Condition="('$(Platform)'=='Win64' and '$(Cfg_1)'=='true') or '$(Cfg_1_Win64)'!=''">
         <Cfg_1_Win64>true</Cfg_1_Win64>
         <CfgParent>Cfg_1</CfgParent>
@@ -48,12 +42,6 @@
         <CfgParent>Base</CfgParent>
         <Base>true</Base>
     </PropertyGroup>
-    <PropertyGroup Condition="('$(Platform)'=='Win32' and '$(Cfg_2)'=='true') or '$(Cfg_2_Win32)'!=''">
-        <Cfg_2_Win32>true</Cfg_2_Win32>
-        <CfgParent>Cfg_2</CfgParent>
-        <Cfg_2>true</Cfg_2>
-        <Base>true</Base>
-    </PropertyGroup>
     <PropertyGroup Condition="('$(Platform)'=='Win64' and '$(Cfg_2)'=='true') or '$(Cfg_2_Win64)'!=''">
         <Cfg_2_Win64>true</Cfg_2_Win64>
         <CfgParent>Cfg_2</CfgParent>
@@ -63,25 +51,24 @@
     <PropertyGroup Condition="'$(Base)'!=''">
         <Manifest_File>None</Manifest_File>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
-        <VerInfo_MinorVer>65</VerInfo_MinorVer>
+        <VerInfo_MinorVer>70</VerInfo_MinorVer>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Winapi;$(DCC_Namespace)</DCC_Namespace>
-        <VerInfo_Build>8</VerInfo_Build>
+        <VerInfo_Build>9</VerInfo_Build>
         <GenDll>true</GenDll>
         <VerInfo_Locale>1033</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.65;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.70.0.9;InternalName=;LegalCopyright=(c) 2004-2025 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.70;Comments=</VerInfo_Keys>
         <SanitizedProjectName>FastMM_FullDebugMode</SanitizedProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <Debugger_HostApplication>FullDebugMode_DLL_TestApp.exe</Debugger_HostApplication>
         <DCC_Namespace>System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
         <AppDPIAwarenessMode>none</AppDPIAwarenessMode>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win64)'!=''">
         <Debugger_HostApplication>C:\Projects\CIMSO\Components\Current\PSD40\FastMM4\FullDebugMode DLL\FullDebugMode_DLL_TestApp.exe</Debugger_HostApplication>
         <DCC_Namespace>System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;$(DCC_Namespace)</DCC_Namespace>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
         <AppDPIAwarenessMode>none</AppDPIAwarenessMode>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.70.0.9;InternalName=;LegalCopyright=(c) 2004-2025 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.70;Comments=</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
         <Version>7.0</Version>
@@ -91,23 +78,17 @@
         <DCC_MapFile>3</DCC_MapFile>
         <DCC_Define>RELEASE;$(DCC_Define)</DCC_Define>
     </PropertyGroup>
-    <PropertyGroup Condition="'$(Cfg_1_Win32)'!=''">
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
-    </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1_Win64)'!=''">
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.70.0.9;InternalName=;LegalCopyright=(c) 2004-2025 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.70;Comments=</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2)'!=''">
         <Version>7.0</Version>
         <DCC_MapFile>3</DCC_MapFile>
         <DCC_Define>DEBUG;$(DCC_Define)</DCC_Define>
     </PropertyGroup>
-    <PropertyGroup Condition="'$(Cfg_2_Win32)'!=''">
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
-    </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2_Win64)'!=''">
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileVersion=1.65.0.8;InternalName=;LegalCopyright=(c) 2004-2023 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductVersion=1.65;Comments=;ProgramID=;FileDescription=FastMM Debug Support Library;ProductName=FastMM Debug Support Library</VerInfo_Keys>
         <DCC_RemoteDebug>true</DCC_RemoteDebug>
+        <Debugger_HostApplication>FullDebugMode_DLL_TestApp.exe</Debugger_HostApplication>
     </PropertyGroup>
     <ProjectExtensions>
         <Borland.Personality>Delphi.Personality.12</Borland.Personality>
