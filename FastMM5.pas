@@ -4226,7 +4226,14 @@ var
   LPUserArea: PByte;
   LOffset, LChangeStart: NativeInt;
   LLogCount: Integer;
+  LExpectedFillPatternFirst8Bytes: UInt64;
+  LExpectedFillPatternByte: Byte;
 begin
+  {If the block is large enough to be an object then the first pointer in the block would have been set to point to the
+  TFastMM_FreedObject class.}
+  LExpectedFillPatternFirst8Bytes := UInt64($0101010101010101) * CDebugFillByteFreedBlock;
+  if APDebugBlockHeader.UserSize >= CTObjectInstanceSize then
+    PPointer(@LExpectedFillPatternFirst8Bytes)^ := TFastMM_FreedObject;
 
   LTokenValues := Default(TEventLogTokenValues);
   LPBufferPos := @LTokenValueBuffer;
@@ -4239,7 +4246,12 @@ begin
   LTokenValues[CEventLogTokenModifyAfterFreeDetail] := LPBufferPos;
   while LOffset < APDebugBlockHeader.UserSize do
   begin
-    if LPUserArea[LOffset] <> CDebugFillByteFreedBlock then
+    if LOffset < 8 then
+      LExpectedFillPatternByte := PByte(@LExpectedFillPatternFirst8Bytes)[LOffset]
+    else
+      LExpectedFillPatternByte := CDebugFillByteFreedBlock;
+
+    if LPUserArea[LOffset] <> LExpectedFillPatternByte then
     begin
 
       {Found the start of a changed block, now find the length}
@@ -4247,11 +4259,17 @@ begin
       while True do
       begin
         Inc(LOffset);
-        if (LOffset >= APDebugBlockHeader.UserSize)
-          or (LPUserArea[LOffset] = CDebugFillByteFreedBlock) then
-        begin
+
+        if LOffset >= APDebugBlockHeader.UserSize then
           Break;
-        end;
+
+        if LOffset < 8 then
+          LExpectedFillPatternByte := PByte(@LExpectedFillPatternFirst8Bytes)[LOffset]
+        else
+          LExpectedFillPatternByte := CDebugFillByteFreedBlock;
+
+        if LPUserArea[LOffset] = LExpectedFillPatternByte then
+          Break;
       end;
 
       if LLogCount > 0 then
@@ -4308,7 +4326,6 @@ begin
     Dec(LByteOffset, 8);
     Inc(LPUserArea, 8);
   end;
-
 
   if LByteOffset and 1 <> 0 then
   begin
@@ -5971,7 +5988,7 @@ asm
 @Attempt1Failed:
 
   {--------------Attempt 2--------------
-  Try to get a block from a sequential feed span.  Splitting off a sequentisal feed block is very likely to touch a new
+  Try to get a block from a sequential feed span.  Splitting off a sequential feed block is very likely to touch a new
   memory page and thus cause an (expensive) page fault.}
 
   {edx = AMinimumBlockSize, eax = AMinimumBlockSize + CMediumBlockSpanHeaderSize}
