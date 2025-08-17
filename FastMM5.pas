@@ -147,7 +147,10 @@ unit FastMM5;
 interface
 
 uses
-  Winapi.Windows;
+  {$IFDEF MACOS}
+  FastMM5_OSXUtil, Posix.Pthread, Posix.Systypes
+  {$ELSE}
+  Winapi.Windows{$ENDIF};
 
 {$RangeChecks Off}
 {$BoolEval Off}
@@ -216,6 +219,10 @@ dynamic loading is explicitly specified.}
     {$define WeakMemoryOrdering}
     {$define PurePascal}
   {$endif}
+{$endif}
+
+{$ifdef MACOS}
+  {$define PurePascal}
 {$endif}
 
 {Optionally disable debug info in this unit, so the debugger does not step into it.}
@@ -292,7 +299,8 @@ const
 {$endif}
 
   {The default name of debug support library.}
-  CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
+  CFastMM_DefaultDebugSupportLibraryName = {$IFDEF MACOS} {$IFDEF CPUARM64} 'libFastMM_FullDebugModeARM64.dylib' {$ELSE} 'libFastMM_FullDebugMode64.dylib' {$ENDIF} {$ELSE}
+  {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif} {$ENDIF};
 
 type
 
@@ -2438,7 +2446,7 @@ function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 {Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
 function OS_FreeVirtualMemory(APointer: Pointer; ABlockSize: NativeInt): Integer;
 begin
-  if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
+  if {$IFDEF MSWINDOWS}Winapi.Windows.{$ENDIF}VirtualFree(APointer, {$IFDEF MSWINDOWS}0{$ELSE}ABlockSize{$ENDIF}, MEM_RELEASE) then
   begin
     AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
     Result := 0;
@@ -2455,7 +2463,7 @@ var
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
+    Result := {$ifdef MSWINDOWS}Winapi.Windows.{$ENDIF}VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
   end
   else
   begin
@@ -2463,7 +2471,7 @@ begin
       LAllocationFlags := MEM_COMMIT or MEM_TOP_DOWN
     else
       LAllocationFlags := MEM_COMMIT;
-    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), LAllocationFlags, PAGE_READWRITE);
+    Result := {$ifdef MSWINDOWS}Winapi.Windows.{$ENDIF}VirtualAlloc(nil, NativeUInt(ABlockSize), LAllocationFlags, PAGE_READWRITE);
     {The emergency address space reserve is released when address space runs out for the first time.  This allows some
     subsequent memory allocation requests to succeed in order to allow the application to allocate some memory for error
     handling, etc. in response to the EOutOfMemory exception.  This only applies to 32-bit applications.}
@@ -2493,12 +2501,12 @@ function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: Nativ
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) <> nil;
+    Result := {$ifdef MSWINDOWS}Winapi.Windows.{$endif}VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) <> nil;
   end
   else
   begin
-    Result := (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_READWRITE) <> nil)
-      and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) <> nil);
+    Result := ({$ifdef MSWINDOWS}Winapi.Windows.{$endif}VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_READWRITE) <> nil)
+      and ({$ifdef MSWINDOWS}Winapi.Windows.{$endif}VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) <> nil);
   end;
 
   if Result then
@@ -2519,10 +2527,13 @@ end;
 
 {Determines the size and state of the virtual memory region starting at APRegionStart.}
 procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegionInfo: TMemoryRegionInfo);
+{$ifdef MSWINDOWS}
 var
   LMemInfo: TMemoryBasicInformation;
+{$endif}
 begin
-  if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
+  {$ifdef MSWINDOWS}
+  if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then           //SZ: I don't know how to do this on MacOS
   begin
     AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
     AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
@@ -2547,6 +2558,7 @@ begin
 
   end
   else
+  {$endif}
   begin
     {VirtualQuery fails for addresses above the highest memory address accessible to the process. (Experimentally
     determined as addresses >= $ffff0000 under 32-bit, and addresses >= $7fffffff0000 under 64-bit.)}
@@ -2558,13 +2570,21 @@ end;
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun; inline;
 begin
+  {$ifdef MACOS}
+  YieldProcessor; // sched_yield;
+  {$else}
   Winapi.Windows.SwitchToThread;
+  {$endif}
 end;
 
 {Returns the thread ID for the calling thread.}
 function OS_GetCurrentThreadID: Cardinal; inline;
 begin
+  {$ifdef MACOS}
+  Result := Cardinal(pthread_self);
+  {$else}
   Result := Winapi.Windows.GetCurrentThreadID;
+  {$endif}
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
@@ -2572,7 +2592,7 @@ procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond
 var
   LSystemTime: TSystemTime;
 begin
-  Winapi.Windows.GetLocalTime(LSystemTime);
+  {$IFDEF MSWINDOWS}Winapi.Windows.{$ENDIF}GetLocalTime(LSystemTime);
   AYear := LSystemTime.wYear;
   AMonth := LSystemTime.wMonth;
   ADay := LSystemTime.wDay;
@@ -2586,9 +2606,14 @@ end;
 after 49.7 days.}
 function OS_GetMillisecondsSinceStartup: Cardinal;
 begin
+  {$ifdef MACOS}
+  Result := AbsoluteToNanoseconds(UpTime) div 1000000;
+  {$else}
   Result := Winapi.Windows.GetTickCount;
+  {$endif}
 end;
 
+{$IFDEF MSWINDOWS}
 procedure OS_MillisecondsSinceStartupToDateTime(AMillisecondsSinceStartup: Cardinal;
   var AYear, AMonth, ADay, AHour, AMinute, ASecond, AMilliseconds: Word);
 var
@@ -2614,6 +2639,33 @@ begin
   ASecond := LSystemTime.wSecond;
   AMilliseconds := LSystemTime.wMilliseconds;
 end;
+{$ENDIF}
+{$IFDEF MACOS}
+procedure OS_MillisecondsSinceStartupToDateTime(AMillisecondsSinceStartup: Cardinal;
+  var AYear, AMonth, ADay, AHour, AMinute, ASecond, AMilliseconds: Word);
+var
+  LSystemTime: TSystemTime;
+  CurTime: Int64;
+  LTimeDelta: Cardinal;
+begin
+  {Get the current time, as well as the delta between the current time and the required timestamp.}
+  GetLocalTime(LSystemTime);
+  LTimeDelta := OS_GetMillisecondsSinceStartup - AMillisecondsSinceStartup;
+
+  {Get the current time in milliseconds, so the delta can be subtracted easily, then convert it}
+  CurTime := GetTimeMilliSeconds;
+  Dec(CurTime, LTimeDelta);
+  LSystemTime := MilliSecondsToSystemTime(CurTime);
+
+  AYear := LSystemTime.wYear;
+  AMonth := LSystemTime.wMonth;
+  ADay := LSystemTime.wDay;
+  AHour := LSystemTime.wHour;
+  AMinute := LSystemTime.wMinute;
+  ASecond := LSystemTime.wSecond;
+  AMilliseconds := LSystemTime.wMilliseconds;
+end;
+{$ENDIF}
 
 {Fills a buffer with the full path and filename of the application.  If AReturnLibraryFilename = True and this is a
 library then the full path and filename of the library is returned instead.}
@@ -2627,9 +2679,14 @@ begin
   LModuleHandle := 0;
   if AReturnLibraryFilename and IsLibrary then
     LModuleHandle := HInstance;
-
+  {$ifdef MACOS}
+  var LBufferSize := (NativeInt(APBufferEnd) - NativeInt(Result)) div SizeOf(WideChar);
+  StrLCopy(Result, PChar(ParamStr(0)), LBufferSize);
+  Inc(Result, Length(ParamStr(0)));
+  {$else}
   LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
   Inc(Result, LNumChars);
+  {$endif}
 end;
 
 function OS_GetEnvironmentVariableValue(APEnvironmentVariableName, APValueBuffer, APBufferEnd: PWideChar): PWideChar;
@@ -2642,23 +2699,51 @@ begin
     Exit;
 
   LBufferSize := Cardinal((NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar));
-  LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
+  LNumChars := {$ifdef MSWINDOWS}Winapi.Windows.{$ENDIF}GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
 end;
+
+{$IFDEF MACOS}
+function AllocateUTF8String(APWideText: PWideChar; APBufferSize: PInteger): PAnsiChar; forward;
+{$ENDIF}
 
 {Returns True if the given file exists.  APFileName must be a #0 terminated string.}
 function OS_FileExists(APFileName: PWideChar): Boolean;
 begin
   {This will return True for folders and False for files that are locked by another process, but is "good enough" for
   the purpose for which it will be used.}
+  {$ifdef MACOS}
+  var Stat: _stat;
+  var LFileNameUTF8: PAnsiChar;
+  var BufSize: Integer;
+  LFileNameUTF8 := AllocateUTF8String(APFileName, @BufSize);
+  try
+    Result := lstat(PAnsiChar(UTF8Encode(APFileName)), Stat) = 0;
+  finally
+    OS_FreeVirtualMemory(LFileNameUTF8, BufSize);
+  end;
+  {$else}
   Result := Winapi.Windows.GetFileAttributesW(APFileName) <> INVALID_FILE_ATTRIBUTES;
+  {$endif}
 end;
 
 {Attempts to delete the file.  Returns True if it was successfully deleted.}
 function OS_DeleteFile(APFileName: PWideChar): Boolean;
 begin
+  {$ifdef MACOS}
+  var LFileNameUTF8: PAnsiChar;
+  var BufSize: Integer;
+  LFileNameUTF8 := AllocateUTF8String(APFileName, @BufSize);
+  try
+    Result := remove(PAnsiChar(LFileNameUTF8)) >= 0;
+  finally
+    OS_FreeVirtualMemory(LFileNameUTF8, BufSize);
+  end;
+
+  {$else}
   Result := Winapi.Windows.DeleteFileW(APFileName);
+  {$endif}
 end;
 
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
@@ -2666,8 +2751,20 @@ pointer will be set to the current end of the file.}
 function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
 begin
   {Try to open/create the file in read/write mode.}
+  {$IFDEF MACOS}
+  var LFileNameUTF8: PAnsiChar;
+  var BufSize: Integer;
+  LFileNameUTF8 := AllocateUTF8String(APFileName, @BufSize);
+  try
+    AFileHandle := CreateFileUTF8(LFileNameUTF8, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL, 0);
+  finally
+    OS_FreeVirtualMemory(LFileNameUTF8, BufSize);
+  end;
+  {$ELSE}
   AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
+  {$ENDIF}
   if AFileHandle = INVALID_HANDLE_VALUE then
     Exit(False);
 
@@ -2682,7 +2779,7 @@ function OS_WriteFile(AFileHandle: THandle; APData: Pointer; ADataSizeInBytes: I
 var
   LBytesWritten: Cardinal;
 begin
-  Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
+  {$IFDEF MSWINDOWS}Winapi.Windows.{$ENDIF}WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
   Result := LBytesWritten = Cardinal(ADataSizeInBytes);
 end;
 
@@ -2694,7 +2791,11 @@ end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
 begin
+  {$ifdef MACOS}
+  Writeln(APDebugMessage);
+  {$else}
   Winapi.Windows.OutputDebugString(APDebugMessage);
+  {$endif}
 end;
 
 procedure OS_DebugBreak; inline;
@@ -2705,7 +2806,12 @@ end;
 {Shows a message box if the program is not showing one already.}
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
+  {$ifdef MACOS}
+  WriteLn(APText);
+  WriteLn(APCaption);
+  {$else}
   Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+  {$endif}
 end;
 
 
@@ -2791,6 +2897,31 @@ begin
   if NativeUInt(LPIn) > NativeUInt(LPEnd) then
     Dec(Result);
 end;
+
+{$IFDEF MACOS}
+{Converts the UTF-16 text pointed to by APWideText to UTF-8 and allocates a buffer for the output.
+Returns a buffer to the first byte of the string. Returns the size of the buffer in LPBufferSize. (SZ)
+the buffer must be freed using OS_FreeVirtualMemory }
+function AllocateUTF8String(APWideText: PWideChar; APBufferSize: PInteger): PAnsiChar;
+var
+  LPBufferStart, LPBufferPos: PByte;
+  AWideCharCount: Integer;
+begin
+  {We need to add either a BOM or a couple of line breaks before the text, so a larger buffer is needed than the
+  maximum text size.  If converting to UTF-8 it is also possible for the resulting text to be bigger than the UTF-16
+  encoded text.}
+  AWideCharCount := Length(APWideText);
+  APBufferSize^ := (AWideCharCount + 4) * 3;
+
+  LPBufferStart := OS_AllocateVirtualMemory(APBufferSize^, False);
+  if LPBufferStart = nil then
+    Exit(nil);
+
+  LPBufferPos := LPBufferStart;
+  LPBufferPos := ConvertUTF16toUTF8(APWideText, AWideCharCount, LPBufferPos);
+  Result := PAnsiChar(LPBufferStart);
+end;
+{$ENDIF}
 
 function OpenOrCreateTextFile(APFileName: PWideChar; AAddLineBreakToExistingFile: Boolean;
   var AFileHandle: THandle): Boolean;
@@ -4776,6 +4907,8 @@ begin
   {Try to lock the large block manager so that the block may be freed.}
   if AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0 then
   begin
+    MemoryBarrier; // SZ: needed here?
+
     {Unlink the large block from the circular queue for the manager.}
     UnlinkLargeBlock(LPLargeBlockHeader);
 
@@ -5110,6 +5243,8 @@ begin
     if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, 0,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
+      MemoryBarrier; // SZ: needed here?
+
       LSequentialFeedFreeSize := LPreviousLastSequentialFeedBlockOffset - CMediumBlockSpanHeaderSize;
 
       {Get the block for the remaining space}
@@ -5262,6 +5397,7 @@ begin
   begin
 
     {Memory fence required for ARM here}
+    MemoryBarrier;
 
     if LPMediumBlockManager.PendingFreeList = nil then
     begin
@@ -5336,6 +5472,7 @@ begin
     APMediumBlockManager.SequentialFeedMediumBlockSpan := LPNewSpan;
 
     {May need a memory fence here for ARM.}
+    MemoryBarrier;
 
     APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := Integer(NativeInt(Result) - NativeInt(LPNewSpan));
   end
@@ -5446,6 +5583,8 @@ begin
         LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
         LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
       begin
+        MemoryBarrier; // SZ: needed here?
+
         Result := Pointer(PByte(LPSequentialFeedSpan) + LNewLastSequentialFeedBlockOffset.IntegerValue);
 
         {Set the header for the block.}
@@ -6220,6 +6359,7 @@ begin
       try to lock the manager, and allocate a new sequential feed span if necessary.}
       if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
       begin
+        MemoryBarrier; // SZ: needed here?
 
         {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
         if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
@@ -6711,6 +6851,7 @@ begin
   begin
 
     {ARM requires a memory fence here.}
+    MemoryBarrier;
 
     if LPSmallBlockManager.PendingFreeList = nil then
     begin
@@ -6849,6 +6990,7 @@ begin
   LPSmallBlockSpan.BlocksInUse := LTotalBlocksInSpan;
 
   {Memory fence required for ARM here.}
+  MemoryBarrier;
 
   {Set it up for sequential block serving}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
@@ -6977,6 +7119,7 @@ begin
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
       LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter) = LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter then
     begin
+      MemoryBarrier; // SZ: needed here?
 
       Result := @PByte(LPSequentialFeedSpan)[LNewLastSequentialFeedBlockOffset.IntegerValue];
       SetSmallBlockHeader(Result, LPSequentialFeedSpan, False, False);
@@ -7107,6 +7250,7 @@ asm
 @BlockHasNoDebugInfo:
 
   pop esi
+end;
 {$else}
 var
   LPFirstPartiallyFreeSpan, LPNewFirstPartiallyFreeSpan: PSmallBlockSpanHeader;
@@ -7137,6 +7281,7 @@ begin
   end;
 
   {ARM requires a data memory barrier here to ensure that all prior writes have completed before the arena is unlocked.}
+  MemoryBarrier;
 
   APSmallBlockManager.SmallBlockManagerLocked := 0;
 
@@ -7154,8 +7299,8 @@ begin
     SetBlockHasDebugInfo(Result, False);
   end;
 
-{$endif}
 end;
+{$endif}
 
 {Tries to allocate a small block through the given small block manager.  If the manager has no available blocks, or
 it is locked, then the corresponding managers in other arenas are also tried.}
@@ -7287,6 +7432,7 @@ asm
   call LogSmallBlockThreadContentionAndYieldToOtherThread
   pop eax
   jmp @Attempt1Loop
+end;
 {$else}
 begin
   while True do
@@ -7365,6 +7511,7 @@ begin
 
       if AtomicCmpExchange(APSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
       begin
+        MemoryBarrier; // SZ: needed here?
 
         {Check if there is a pending free list.  If so the first pending free block is returned and the rest are freed.}
         if APSmallBlockManager.PendingFreeList <> nil then
@@ -7405,8 +7552,8 @@ begin
     LogSmallBlockThreadContentionAndYieldToOtherThread;
 
   end;
-{$endif}
 end;
+{$endif}
 
 function FastMM_ReallocMem_ReallocSmallBlock(APointer: Pointer; ANewUserSize: NativeInt): Pointer;
 {$ifdef X86ASM}
@@ -8294,6 +8441,8 @@ begin
       begin
         if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
         begin
+          MemoryBarrier; // SZ: needed here?
+
           {Process the pending frees list.}
           LPPendingFreeBlock := AtomicExchange(LPSmallBlockManager.PendingFreeList, nil);
           if LPPendingFreeBlock <> nil then
@@ -8321,6 +8470,8 @@ begin
     begin
       if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
       begin
+        MemoryBarrier; // SZ: needed here?
+
         {Process the pending frees list.}
         LPPendingFreeBlock := AtomicExchange(LPMediumBlockManager.PendingFreeList, nil);
         if LPPendingFreeBlock <> nil then
@@ -8347,6 +8498,8 @@ begin
     begin
       if AtomicCmpExchange(LPLargeBlockManager.LargeBlockManagerLocked, 1, 0) = 0 then
       begin
+        MemoryBarrier; // SZ: needed here?
+
         if ProcessLargeBlockPendingFrees_ArenaAlreadyLocked(LPLargeBlockManager) <> 0 then
           System.Error(reInvalidPtr);
       end
@@ -8472,6 +8625,8 @@ begin
         Continue;
       end;
 
+      MemoryBarrier; // SZ: needed here?
+
       LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
       while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
       begin
@@ -8513,6 +8668,8 @@ begin
         Continue;
       end;
 
+      MemoryBarrier; // SZ: needed here?
+
       LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
       while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
       begin
@@ -8533,6 +8690,8 @@ begin
           begin
             OS_AllowOtherThreadToRun;
           end;
+
+          MemoryBarrier; // SZ: needed here?
 
           {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
           if GetMediumBlockSize(LPMediumBlock) = 0 then
@@ -8608,6 +8767,7 @@ begin
                 begin
 
                   {Memory fence required for ARM}
+                  MemoryBarrier;
 
                   {The last block may have been released before the manager was locked, so we need to check whether it is
                   still a small block span.}
@@ -8851,6 +9011,8 @@ begin
     Result.EfficiencyPercentage := 100;
 end;
 
+
+//@@@ check macos begin
 procedure FastMM_GetMemoryManagerState_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
 var
   LPMemoryManagerState: ^TFastMM_MemoryManagerState;
@@ -9009,6 +9171,8 @@ begin
   end;
 
 end;
+
+// @@@ check macos end
 
 {Returns True if there are live pointers using this memory manager.}
 function FastMM_HasLivePointers: Boolean;
@@ -9433,12 +9597,14 @@ procedure FastMM_BuildFileMappingObjectName;
 var
   i, LProcessID: Cardinal;
 begin
+  {$ifdef MSWINDOWS}
   LProcessID := GetCurrentProcessId;
   for i := 0 to 7 do
   begin
     SharingFileMappingObjectName[(High(SharingFileMappingObjectName) - 1) - i] :=
       AnsiChar(CHexDigits[((LProcessID shr (i * 4)) and $F)]);
   end;
+  {$endif}
 end;
 
 {Searches the current process for a shared memory manager}
@@ -9447,6 +9613,7 @@ var
   LPMapAddress: Pointer;
   LLocalMappingObjectHandle: NativeUInt;
 begin
+  {$ifdef mswindows}
   {Try to open the shared memory manager file mapping}
   LLocalMappingObjectHandle := OpenFileMappingA(FILE_MAP_READ, False, SharingFileMappingObjectName);
   {Is a memory manager in this process sharing its memory manager?}
@@ -9463,6 +9630,7 @@ begin
     UnmapViewOfFile(LPMapAddress);
     CloseHandle(LLocalMappingObjectHandle);
   end;
+  {$endif}
 end;
 
 {Searches the current process for a shared memory manager.  If no memory has been allocated using this memory manager
@@ -9474,6 +9642,7 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPMemoryManagerEx: PMemoryManagerEx;
 begin
+  {$ifdef mswindows}
   if CurrentInstallationState = mmisInstalled then
   begin
     {Is this MM being shared?  If so, switching to another MM is not allowed}
@@ -9523,6 +9692,9 @@ begin
     {Another memory manager has already been installed.}
     Result := False;
   end;
+  {$else}
+  Result := False;
+  {$endif}
 end;
 
 {Starts sharing this memory manager with other modules in the current process.  Only one memory manager may be shared
@@ -9531,6 +9703,7 @@ function FastMM_ShareMemoryManager: Boolean;
 var
   LPMapAddress: Pointer;
 begin
+  {$ifdef MSWINDOWS}
   if (CurrentInstallationState = mmisInstalled)
     and (not FastMM_InstalledMemoryManagerChangedExternally)
     and (SharingFileMappingObjectHandle = 0) then
@@ -9561,6 +9734,9 @@ begin
     {Either another memory manager has been set or this memory manager is already being shared}
     Result := False;
   end;
+  {$else}
+  Result := False;
+  {$endif}
 end;
 
 
@@ -10496,11 +10672,13 @@ begin
 
   FastMM_FreeDebugSupportLibrary;
 
+  {$ifdef MSWINDOWS}
   if SharingFileMappingObjectHandle <> 0 then
   begin
     CloseHandle(SharingFileMappingObjectHandle);
     SharingFileMappingObjectHandle := 0;
   end;
+  {$endif}
 
 end;
 
@@ -10517,6 +10695,8 @@ begin
   {SetMemoryManager is not thread safe.}
   while AtomicCmpExchange(SettingMemoryManager, 1, 0) <> 0 do
     OS_AllowOtherThreadToRun;
+
+  MemoryBarrier; // SZ: needed here?
 
   {Check that the memory manager has not been changed since the last time it was set.}
   if FastMM_InstalledMemoryManagerChangedExternally then
@@ -10575,6 +10755,7 @@ begin
     Exit;
   end;
 
+  {$ifdef MSWINDOWS}
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
     LTokenValues := Default(TEventLogTokenValues);
@@ -10583,6 +10764,7 @@ begin
 
     Exit;
   end;
+  {$endif}
 
   if FastMM_SetNormalOrDebugMemoryManager then
   begin
