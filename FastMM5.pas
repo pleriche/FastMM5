@@ -149,7 +149,7 @@ interface
 uses
 {$IFDEF MSWINDOWS}
   Winapi.Windows;
-{$ELSE}
+{$ELSE} {$IFDEF POSIX}
   System.SysUtils,
   System.Math,
   Posix.Base,
@@ -167,6 +167,8 @@ uses
   Posix.Signal,
   Posix.Stdio;
 {$DEFINE PurePascal}
+{$ENDIF}  {$ELSE}
+  PLATFORM NOT SUPPORTED!!!!
 {$ENDIF}
 
 
@@ -315,7 +317,7 @@ const
   {The default name of debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
 
-{$IFNDEF MSWINDOWS}
+{$IFDEF POSIX}
   {POSIX constants for memory management}
   PROT_NONE = 0;
   PROT_READ = 1;
@@ -388,7 +390,7 @@ const
 
 type
 
-{$IFNDEF MSWINDOWS}
+{$IFDEF POSIX}
   {POSIX types for memory management}
   size_t = NativeUInt;
   ssize_t = NativeInt;
@@ -1097,7 +1099,7 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
 
 implementation
 
-{$IFNDEF MSWINDOWS}
+{$IFDEF POSIX}
 {External POSIX function declarations}
 function __write(fd: Integer; const buf; count: Integer): Integer; cdecl; external 'libc.so.6' name 'write';
 function __close(fd: Integer): Integer; cdecl; external 'libc.so.6' name 'close';
@@ -2944,7 +2946,7 @@ end;
 
 {Returns True if the given file exists.  APFileName must be a #0 terminated string.}
 function OS_FileExists(APFileName: PWideChar): Boolean;
-{$IFNDEF MSWINDOWS}
+{$IFDEF POSIX}
 var
   LStatBuf: Posix.SysStat._stat;
 {$ENDIF}
