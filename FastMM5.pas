@@ -147,7 +147,30 @@ unit FastMM5;
 interface
 
 uses
+{$IFDEF MSWINDOWS}
   Winapi.Windows;
+{$ELSE} {$IFDEF POSIX}
+  System.SysUtils,
+  System.Math,
+  Posix.Base,
+  Posix.Stdlib,
+  Posix.Unistd,
+  Posix.SysMman,
+  Posix.Fcntl,
+  Posix.SysStat,
+  Posix.SysTime,
+  Posix.Time,
+  Posix.Errno,
+  Posix.PThread,
+  Posix.Dlfcn,
+  Posix.Sched,
+  Posix.Signal,
+  Posix.Stdio;
+{$DEFINE PurePascal}
+{$ENDIF}  {$ELSE}
+  PLATFORM NOT SUPPORTED!!!!
+{$ENDIF}
+
 
 {$RangeChecks Off}
 {$BoolEval Off}
@@ -294,7 +317,122 @@ const
   {The default name of debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
 
+{$IFDEF POSIX}
+  {POSIX constants for memory management}
+  PROT_NONE = 0;
+  PROT_READ = 1;
+  PROT_WRITE = 2;
+  PROT_EXEC = 4;
+  
+  MAP_PRIVATE = 2;
+  MAP_ANONYMOUS = $20;
+  MAP_FAILED = Pointer(-1);
+  
+  {File access constants}
+  O_RDONLY = 0;
+  O_WRONLY = 1;
+  O_RDWR = 2;
+  O_CREAT = $40;
+  O_APPEND = $400;
+  
+  {File permission constants}
+  S_IRUSR = $100;
+  S_IWUSR = $80;
+  S_IRGRP = $20;
+  S_IWGRP = $10;
+  S_IROTH = $4;
+  S_IWOTH = $2;
+
+
+
+  {POSIX constants for memory states}
+  MEM_FREE = 0;
+  MEM_COMMIT = 1;
+  MEM_RESERVE = 2;
+
+  {POSIX constants for memory protection}
+  PAGE_NOACCESS = 0;
+  PAGE_READWRITE = 1;
+  PAGE_READONLY = 2;
+  PAGE_EXECUTE = 4;
+  PAGE_EXECUTE_READ = 6;
+  PAGE_EXECUTE_READWRITE = 7;
+  PAGE_EXECUTE_WRITECOPY = 8;
+  PAGE_GUARD = $100;
+
+  {POSIX constants for memory allocation flags}
+  MEM_TOP_DOWN = $100000;
+
+  {POSIX constants for file operations}
+  INVALID_HANDLE_VALUE = -1;
+  FILE_SHARE_READ = 1;
+  OPEN_ALWAYS = 4;
+  FILE_ATTRIBUTE_NORMAL = $80;
+  FILE_END = 2;
+  GENERIC_READ = $80000000;
+  GENERIC_WRITE = $40000000;
+  
+  {POSIX constants for standard file descriptors}
+  STDERR_FILENO = 2;
+
+  {POSIX constants for message box}
+  MB_OK = 0;
+  MB_ICONERROR = $10;
+  MB_TASKMODAL = $2000;
+  MB_DEFAULT_DESKTOP_ONLY = $20000;
+  
+  {POSIX constants for signals}
+  SIGTRAP = 5;
+  
+  {POSIX function declarations}
+  function GetCurrentProcessId: Cardinal;
+{$ENDIF}
+
 type
+
+{$IFDEF POSIX}
+  {POSIX types for memory management}
+  size_t = NativeUInt;
+  ssize_t = NativeInt;
+  off_t = Int64;
+  mode_t = Cardinal;
+  pid_t = Integer;
+
+  {POSIX memory information structure}
+  TMemoryBasicInformation = record
+    BaseAddress: Pointer;
+    AllocationBase: Pointer;
+    AllocationProtect: Cardinal;
+    RegionSize: NativeUInt;
+    State: Cardinal;
+    Protect: Cardinal;
+    Type_: Cardinal;
+  end;
+
+  {POSIX system time structure}
+  TSystemTime = record
+    wYear: Word;
+    wMonth: Word;
+    wDayOfWeek: Word;
+    wDay: Word;
+    wHour: Word;
+    wMinute: Word;
+    wSecond: Word;
+    wMilliseconds: Word;
+  end;
+
+  {POSIX file time structure}
+  TFileTime = record
+    dwLowDateTime: Cardinal;
+    dwHighDateTime: Cardinal;
+  end;
+
+
+
+  {POSIX handle types}
+  THandle = Integer;
+  HMODULE = Pointer;
+{$ENDIF}
 
   {The optimization strategy for the memory manager.}
   TFastMM_MemoryManagerOptimizationStrategy = (mmosOptimizeForSpeed, mmosBalanced, mmosOptimizeForLowMemoryUsage);
@@ -960,6 +1098,30 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
 {$endif}
 
 implementation
+
+{$IFDEF POSIX}
+{External POSIX function declarations}
+function __write(fd: Integer; const buf; count: Integer): Integer; cdecl; external 'libc.so.6' name 'write';
+function __close(fd: Integer): Integer; cdecl; external 'libc.so.6' name 'close';
+function mmap(addr: Pointer; len: NativeInt; prot: Integer; flags: Integer; fd: Integer; offset: Integer): Pointer; cdecl; external 'libc.so.6' name 'mmap';
+function munmap(addr: Pointer; len: NativeInt): Integer; cdecl; external 'libc.so.6' name 'munmap';
+function sched_yield: Integer; cdecl; external 'libc.so.6' name 'sched_yield';
+function pthread_self: NativeUInt; cdecl; external 'libpthread.so.0' name 'pthread_self';
+function gettimeofday(tv: Pointer; tz: Pointer): Integer; cdecl; external 'libc.so.6' name 'gettimeofday';
+function localtime(timer: Pointer): Pointer; cdecl; external 'libc.so.6' name 'localtime';
+function dlerror: PAnsiChar; cdecl; external 'libc.so.6' name 'dlerror';
+function stat(path: PAnsiChar; buf: Pointer): Integer; cdecl; external 'libc.so.6' name 'stat';
+function unlink(path: PAnsiChar): Integer; cdecl; external 'libc.so.6' name 'unlink';
+function open(path: PAnsiChar; flags: Integer; mode: Integer): Integer; cdecl; external 'libc.so.6' name 'open';
+function raise_(sig: Integer): Integer; cdecl; external 'libc.so.6' name 'raise';
+function getpid: Integer; cdecl; external 'libc.so.6' name 'getpid';
+
+{Inline function implementations for POSIX}
+function GetCurrentProcessId: Cardinal;
+begin
+  Result := getpid;
+end;
+{$ENDIF}
 
 {All blocks are preceded by a block header.  The block header varies in size according to the block type.  The block
 type and state may be determined from the bits of the word preceding the block address, as follows:
@@ -2438,6 +2600,7 @@ function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 {Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
 function OS_FreeVirtualMemory(APointer: Pointer; ABlockSize: NativeInt): Integer;
 begin
+{$IFDEF MSWINDOWS}
   if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
   begin
     AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
@@ -2445,6 +2608,15 @@ begin
   end
   else
     Result := -1;
+{$ELSE}
+  if munmap(APointer, ABlockSize) = 0 then
+  begin
+    AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+    Result := 0;
+  end
+  else
+    Result := -1;
+{$ENDIF}
 end;
 
 {Allocates a block of memory from the operating system.  The block will be aligned to at least a 64 byte boundary, and
@@ -2452,7 +2624,9 @@ will be zero initialized.  Returns nil on error.}
 function OS_AllocateVirtualMemory(ABlockSize: NativeInt; AReserveOnlyNoReadWriteAccess: Boolean): Pointer;
 var
   LAllocationFlags: Cardinal;
+  LProtection: Integer;
 begin
+{$IFDEF MSWINDOWS}
   if AReserveOnlyNoReadWriteAccess then
   begin
     Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
@@ -2470,6 +2644,26 @@ begin
     if Result = nil then
       ReleaseEmergencyReserveAddressSpace;
   end;
+{$ELSE}
+  if AReserveOnlyNoReadWriteAccess then
+  begin
+    LProtection := PROT_NONE;
+  end
+  else
+  begin
+    LProtection := PROT_READ or PROT_WRITE;
+  end;
+  
+  Result := mmap(nil, ABlockSize, LProtection, MAP_PRIVATE or MAP_ANONYMOUS, -1, 0);
+  if Result = MAP_FAILED then
+  begin
+    Result := nil;
+    {The emergency address space reserve is released when address space runs out for the first time.  This allows some
+    subsequent memory allocation requests to succeed in order to allow the application to allocate some memory for error
+    handling, etc. in response to the EOutOfMemory exception.  This only applies to 32-bit applications.}
+    ReleaseEmergencyReserveAddressSpace;
+  end;
+{$ENDIF}
 
   if Result <> nil then
   begin
@@ -2490,7 +2684,10 @@ end;
 
 function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: NativeInt;
   AReserveOnlyNoReadWriteAccess: Boolean): Boolean;
+var
+  LProtection: Integer;
 begin
+{$IFDEF MSWINDOWS}
   if AReserveOnlyNoReadWriteAccess then
   begin
     Result := Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) <> nil;
@@ -2500,6 +2697,18 @@ begin
     Result := (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_READWRITE) <> nil)
       and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) <> nil);
   end;
+{$ELSE}
+  if AReserveOnlyNoReadWriteAccess then
+  begin
+    LProtection := PROT_NONE;
+  end
+  else
+  begin
+    LProtection := PROT_READ or PROT_WRITE;
+  end;
+  
+  Result := mmap(APAddress, ABlockSize, LProtection, MAP_PRIVATE or MAP_ANONYMOUS, -1, 0) <> MAP_FAILED;
+{$ENDIF}
 
   if Result then
   begin
@@ -2522,6 +2731,7 @@ procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegio
 var
   LMemInfo: TMemoryBasicInformation;
 begin
+{$IFDEF MSWINDOWS}
   if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
   begin
     AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
@@ -2552,26 +2762,45 @@ begin
     determined as addresses >= $ffff0000 under 32-bit, and addresses >= $7fffffff0000 under 64-bit.)}
     AMemoryRegionInfo := Default(TMemoryRegionInfo);
   end;
+{$ELSE}
+  {POSIX doesn't have a direct equivalent to VirtualQuery. For now, we'll assume the memory is allocated.}
+  AMemoryRegionInfo.RegionStartAddress := APRegionStart;
+  AMemoryRegionInfo.RegionSize := 0; {Unknown size}
+  AMemoryRegionInfo.RegionState := mrsAllocated;
+  AMemoryRegionInfo.AccessRights := [marRead, marWrite];
+{$ENDIF}
 end;
 
 {If another thread is ready to run on the current CPU, give it a chance to execute.  This is typically called if the
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun; inline;
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.SwitchToThread;
+{$ELSE}
+  sched_yield;
+{$ENDIF}
 end;
 
 {Returns the thread ID for the calling thread.}
 function OS_GetCurrentThreadID: Cardinal; inline;
 begin
+{$IFDEF MSWINDOWS}
   Result := Winapi.Windows.GetCurrentThreadID;
+{$ELSE}
+  Result := Cardinal(pthread_self);
+{$ENDIF}
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
 procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond, AMilliseconds: Word);
 var
   LSystemTime: TSystemTime;
+  LTimeVal: timeval;
+  LTime: time_t;
+  LLocalTime: tm;
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.GetLocalTime(LSystemTime);
   AYear := LSystemTime.wYear;
   AMonth := LSystemTime.wMonth;
@@ -2580,13 +2809,33 @@ begin
   AMinute := LSystemTime.wMinute;
   ASecond := LSystemTime.wSecond;
   AMilliseconds := LSystemTime.wMilliseconds;
+{$ELSE}
+      gettimeofday(@LTimeVal, nil);
+    LTime := LTimeVal.tv_sec;
+    LLocalTime := Ptm(localtime(@LTime))^;
+  
+  AYear := LLocalTime.tm_year + 1900;
+  AMonth := LLocalTime.tm_mon + 1;
+  ADay := LLocalTime.tm_mday;
+  AHour := LLocalTime.tm_hour;
+  AMinute := LLocalTime.tm_min;
+  ASecond := LLocalTime.tm_sec;
+  AMilliseconds := LTimeVal.tv_usec div 1000;
+{$ENDIF}
 end;
 
 {Returns the number of milliseconds that have elapsed since the system was started.  Note that this wraps back to 0
 after 49.7 days.}
 function OS_GetMillisecondsSinceStartup: Cardinal;
+var
+  LTimeVal: timeval;
 begin
+{$IFDEF MSWINDOWS}
   Result := Winapi.Windows.GetTickCount;
+{$ELSE}
+  gettimeofday(@LTimeVal, nil);
+  Result := Cardinal(LTimeVal.tv_sec * 1000 + LTimeVal.tv_usec div 1000);
+{$ENDIF}
 end;
 
 procedure OS_MillisecondsSinceStartupToDateTime(AMillisecondsSinceStartup: Cardinal;
@@ -2595,7 +2844,11 @@ var
   LSystemTime: TSystemTime;
   LFileTime: TFileTime;
   LTimeDelta: Cardinal;
+  LTimeVal: timeval;
+  LTime: time_t;
+  LLocalTime: tm;
 begin
+{$IFDEF MSWINDOWS}
   {Get the current time, as well as the delta between the current time and the required timestamp.}
   Winapi.Windows.GetLocalTime(LSystemTime);
   LTimeDelta := OS_GetMillisecondsSinceStartup - AMillisecondsSinceStartup;
@@ -2613,6 +2866,27 @@ begin
   AMinute := LSystemTime.wMinute;
   ASecond := LSystemTime.wSecond;
   AMilliseconds := LSystemTime.wMilliseconds;
+{$ELSE}
+  {Get the current time, as well as the delta between the current time and the required timestamp.}
+  LTimeDelta := OS_GetMillisecondsSinceStartup - AMillisecondsSinceStartup;
+  
+  gettimeofday(@LTimeVal, nil);
+  LTime := LTimeVal.tv_sec - (LTimeDelta div 1000);
+  LLocalTime := Ptm(localtime(@LTime))^;
+  
+  AYear := LLocalTime.tm_year + 1900;
+  AMonth := LLocalTime.tm_mon + 1;
+  ADay := LLocalTime.tm_mday;
+  AHour := LLocalTime.tm_hour;
+  AMinute := LLocalTime.tm_min;
+  ASecond := LLocalTime.tm_sec;
+  AMilliseconds := LTimeVal.tv_usec div 1000 - (LTimeDelta mod 1000);
+  if AMilliseconds < 0 then
+  begin
+    Inc(AMilliseconds, 1000);
+    Dec(ASecond);
+  end;
+{$ENDIF}
 end;
 
 {Fills a buffer with the full path and filename of the application.  If AReturnLibraryFilename = True and this is a
@@ -2621,50 +2895,88 @@ function OS_GetApplicationFilename(APFilenameBuffer, APBufferEnd: PWideChar; ARe
 var
   LModuleHandle: HMODULE;
   LNumChars: Cardinal;
+  LPath: string;
 begin
   Result := APFilenameBuffer;
 
+{$IFDEF MSWINDOWS}
   LModuleHandle := 0;
   if AReturnLibraryFilename and IsLibrary then
     LModuleHandle := HInstance;
 
   LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
   Inc(Result, LNumChars);
+{$ELSE}
+  if AReturnLibraryFilename and IsLibrary then
+    LPath := string(dlerror) {This is a workaround - dlerror returns the library path on some systems}
+  else
+    LPath := ParamStr(0);
+  
+  LNumChars := Min(Length(LPath), Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
+  Move(PChar(LPath)^, Result^, LNumChars * SizeOf(WideChar));
+  Inc(Result, LNumChars);
+{$ENDIF}
 end;
 
 function OS_GetEnvironmentVariableValue(APEnvironmentVariableName, APValueBuffer, APBufferEnd: PWideChar): PWideChar;
 var
   LNumChars, LBufferSize: Cardinal;
+  LEnvValue: string;
 begin
   Result := APValueBuffer;
 
   if Result >= APBufferEnd then
     Exit;
 
+{$IFDEF MSWINDOWS}
   LBufferSize := Cardinal((NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar));
   LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
+{$ELSE}
+  LEnvValue := GetEnvironmentVariable(string(APEnvironmentVariableName));
+  LNumChars := Min(Length(LEnvValue), Cardinal((NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar)));
+  if LNumChars > 0 then
+  begin
+    Move(PChar(LEnvValue)^, Result^, LNumChars * SizeOf(WideChar));
+    Inc(Result, LNumChars);
+  end;
+{$ENDIF}
 end;
 
 {Returns True if the given file exists.  APFileName must be a #0 terminated string.}
 function OS_FileExists(APFileName: PWideChar): Boolean;
+{$IFDEF POSIX}
+var
+  LStatBuf: Posix.SysStat._stat;
+{$ENDIF}
 begin
+{$IFDEF MSWINDOWS}
   {This will return True for folders and False for files that are locked by another process, but is "good enough" for
   the purpose for which it will be used.}
   Result := Winapi.Windows.GetFileAttributesW(APFileName) <> INVALID_FILE_ATTRIBUTES;
+{$ELSE}
+  {This will return True for folders and False for files that are locked by another process, but is "good enough" for
+  the purpose for which it will be used.}
+  Result := stat(PAnsiChar(UTF8String(APFileName)), @LStatBuf) = 0;
+{$ENDIF}
 end;
 
 {Attempts to delete the file.  Returns True if it was successfully deleted.}
 function OS_DeleteFile(APFileName: PWideChar): Boolean;
 begin
+{$IFDEF MSWINDOWS}
   Result := Winapi.Windows.DeleteFileW(APFileName);
+{$ELSE}
+  Result := unlink(PAnsiChar(UTF8String(APFileName))) = 0;
+{$ENDIF}
 end;
 
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
 pointer will be set to the current end of the file.}
 function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
 begin
+{$IFDEF MSWINDOWS}
   {Try to open/create the file in read/write mode.}
   AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
@@ -2675,37 +2987,76 @@ begin
   SetFilePointer(AFileHandle, 0, nil, FILE_END);
 
   Result := True;
+{$ELSE}
+  {Try to open/create the file in read/write mode.}
+  AFileHandle := open(PAnsiChar(UTF8String(APFileName)), O_RDWR or O_CREAT or O_APPEND, S_IRUSR or S_IWUSR);
+  if AFileHandle = -1 then
+    Exit(False);
+
+  Result := True;
+{$ENDIF}
 end;
 
 {Writes data to the given file handle, returning True on success}
 function OS_WriteFile(AFileHandle: THandle; APData: Pointer; ADataSizeInBytes: Integer): Boolean;
 var
   LBytesWritten: Cardinal;
+  LBytesWrittenPosix: ssize_t;
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
   Result := LBytesWritten = Cardinal(ADataSizeInBytes);
+{$ELSE}
+  LBytesWrittenPosix := __write(AFileHandle, APData^, ADataSizeInBytes);
+  Result := LBytesWrittenPosix = ADataSizeInBytes;
+{$ENDIF}
 end;
 
 {Closes the given file handle}
 procedure OS_CloseFile(AFileHandle: THandle);
 begin
+{$IFDEF MSWINDOWS}
   CloseHandle(AFileHandle);
+{$ELSE}
+  __close(AFileHandle);
+{$ENDIF}
 end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.OutputDebugString(APDebugMessage);
+{$ELSE}
+  {On POSIX systems, write to stderr instead}
+  var msg := PAnsiChar(AnsiString(APDebugMessage));
+  __write(STDERR_FILENO, msg, StrLen(msg));
+{$ENDIF}
 end;
 
 procedure OS_DebugBreak; inline;
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.DebugBreak;
+{$ELSE}
+  {On POSIX systems, raise a signal that can be caught by debuggers}
+  raise_(SIGTRAP);
+{$ENDIF}
 end;
 
 {Shows a message box if the program is not showing one already.}
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
+{$IFDEF MSWINDOWS}
   Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+{$ELSE}
+  {On POSIX systems, write to stderr instead}
+  var AAPCaption := PAnsiChar(AnsiString(APCaption)) ;
+  var LColon := PAnsiChar(': ');
+  var AAPText :=  PAnsiChar(AnsiString(APText));
+  __write(STDERR_FILENO, AAPCaption, StrLen(AAPCaption));
+  __write(STDERR_FILENO, LColon, StrLen(LColon));
+  __write(STDERR_FILENO, AAPText, StrLen(AAPText));
+{$ENDIF}
 end;
 
 
@@ -9430,6 +9781,7 @@ end;
 
 {Generates a string identifying the process}
 procedure FastMM_BuildFileMappingObjectName;
+{$IFDEF MSWINDOWS}
 var
   i, LProcessID: Cardinal;
 begin
@@ -9440,9 +9792,15 @@ begin
       AnsiChar(CHexDigits[((LProcessID shr (i * 4)) and $F)]);
   end;
 end;
+{$ELSE}
+begin
+  {Memory manager sharing not supported on POSIX systems}
+end;
+{$ENDIF}
 
 {Searches the current process for a shared memory manager}
 function FastMM_FindSharedMemoryManager: PMemoryManagerEx;
+{$IFDEF MSWINDOWS}
 var
   LPMapAddress: Pointer;
   LLocalMappingObjectHandle: NativeUInt;
@@ -9464,11 +9822,18 @@ begin
     CloseHandle(LLocalMappingObjectHandle);
   end;
 end;
+{$ELSE}
+begin
+  {Memory manager sharing not supported on POSIX systems}
+  Result := nil;
+end;
+{$ENDIF}
 
 {Searches the current process for a shared memory manager.  If no memory has been allocated using this memory manager
 it will switch to using the shared memory manager instead.  Returns True if another memory manager was found and it
 could be shared.  If this memory manager instance *is* the shared memory manager, it will do nothing and return True.}
 function FastMM_AttemptToUseSharedMemoryManager: Boolean;
+{$IFDEF MSWINDOWS}
 var
   LTokenValues: TEventLogTokenValues;
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
@@ -9524,10 +9889,17 @@ begin
     Result := False;
   end;
 end;
+{$ELSE}
+begin
+  {Memory manager sharing not supported on POSIX systems}
+  Result := False;
+end;
+{$ENDIF}
 
 {Starts sharing this memory manager with other modules in the current process.  Only one memory manager may be shared
 per process, so this function may fail.}
 function FastMM_ShareMemoryManager: Boolean;
+{$IFDEF MSWINDOWS}
 var
   LPMapAddress: Pointer;
 begin
@@ -9562,6 +9934,12 @@ begin
     Result := False;
   end;
 end;
+{$ELSE}
+begin
+  {Memory manager sharing not supported on POSIX systems}
+  Result := False;
+end;
+{$ENDIF}
 
 
 {--------------------------------------------------}
@@ -10496,11 +10874,13 @@ begin
 
   FastMM_FreeDebugSupportLibrary;
 
+{$IFDEF MSWINDOWS}
   if SharingFileMappingObjectHandle <> 0 then
   begin
     CloseHandle(SharingFileMappingObjectHandle);
     SharingFileMappingObjectHandle := 0;
   end;
+{$ENDIF}
 
 end;
 
@@ -10575,6 +10955,7 @@ begin
     Exit;
   end;
 
+{$IFDEF MSWINDOWS}
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
     LTokenValues := Default(TEventLogTokenValues);
@@ -10583,6 +10964,7 @@ begin
 
     Exit;
   end;
+{$ENDIF}
 
   if FastMM_SetNormalOrDebugMemoryManager then
   begin
@@ -10616,9 +10998,9 @@ begin
   DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
   begin
-    DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
-    DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
-    DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+    DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, ('GetRawStackTrace'));
+    DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, ('GetFrameBasedStackTrace'));
+    DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, ('LogStackTrace'));
 
     {Try to use the stack trace routines from the debug support library, if available.}
     if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
