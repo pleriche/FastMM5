@@ -291,7 +291,7 @@ const
   CFastMM_LargeBlockArenaCount = 8;
 {$endif}
 
-  {The default name of debug support library.}
+  {The default name of the debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
 
 type
@@ -2559,6 +2559,12 @@ current thread is unable to make any progress, because it is waiting for locked 
 procedure OS_AllowOtherThreadToRun; inline;
 begin
   Winapi.Windows.SwitchToThread;
+end;
+
+{Returns the current process ID.}
+function OS_GetCurrentProcessID: Cardinal; inline;
+begin
+  Result := Winapi.Windows.GetCurrentProcessId;
 end;
 
 {Returns the thread ID for the calling thread.}
@@ -9433,7 +9439,7 @@ procedure FastMM_BuildFileMappingObjectName;
 var
   i, LProcessID: Cardinal;
 begin
-  LProcessID := GetCurrentProcessId;
+  LProcessID := OS_GetCurrentProcessID;
   for i := 0 to 7 do
   begin
     SharingFileMappingObjectName[(High(SharingFileMappingObjectName) - 1) - i] :=
@@ -9448,7 +9454,7 @@ var
   LLocalMappingObjectHandle: NativeUInt;
 begin
   {Try to open the shared memory manager file mapping}
-  LLocalMappingObjectHandle := OpenFileMappingA(FILE_MAP_READ, False, SharingFileMappingObjectName);
+  LLocalMappingObjectHandle := Winapi.Windows.OpenFileMappingA(FILE_MAP_READ, False, @SharingFileMappingObjectName);
   {Is a memory manager in this process sharing its memory manager?}
   if LLocalMappingObjectHandle = 0 then
   begin
@@ -9458,10 +9464,10 @@ begin
   else
   begin
     {Map a view of the shared memory and get the address of the shared memory manager}
-    LPMapAddress := MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
+    LPMapAddress := Winapi.Windows.MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
     Result := PPointer(LPMapAddress)^;
-    UnmapViewOfFile(LPMapAddress);
-    CloseHandle(LLocalMappingObjectHandle);
+    Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+    Winapi.Windows.CloseHandle(LLocalMappingObjectHandle);
   end;
 end;
 
@@ -9502,7 +9508,6 @@ begin
       begin
         {Memory has already been allocated using this memory manager.  We cannot rip the memory manager out from under
         live pointers.}
-
         LTokenValues := Default(TEventLogTokenValues);
         AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
         LogEvent(mmetCannotSwitchToSharedMemoryManagerWithLivePointers, LTokenValues);
@@ -9539,14 +9544,14 @@ begin
     if FastMM_FindSharedMemoryManager = nil then
     begin
       {Create the memory mapped file}
-      SharingFileMappingObjectHandle := CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
+      SharingFileMappingObjectHandle := Winapi.Windows.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
         SizeOf(Pointer), SharingFileMappingObjectName);
       {Map a view of the memory}
-      LPMapAddress := MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0);
+      LPMapAddress := Winapi.Windows.MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0);
       {Set a pointer to the new memory manager}
       PPointer(LPMapAddress)^ := @InstalledMemoryManager;
       {Unmap the file}
-      UnmapViewOfFile(LPMapAddress);
+      Winapi.Windows.UnmapViewOfFile(LPMapAddress);
       {Sharing this MM}
       Result := True;
     end
@@ -10613,12 +10618,12 @@ begin
   if DebugSupportLibraryHandle <> 0 then
     Exit(True);
 
-  DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
+  DebugSupportLibraryHandle := Winapi.Windows.LoadLibrary(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
   begin
-    DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
-    DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
-    DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+    DebugLibrary_GetRawStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
+    DebugLibrary_GetFrameBasedStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
+    DebugLibrary_LogStackTrace_Legacy := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
 
     {Try to use the stack trace routines from the debug support library, if available.}
     if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
@@ -10668,7 +10673,7 @@ begin
   end;
 
 {$ifndef FastMM_DebugLibraryStaticDependency}
-  FreeLibrary(DebugSupportLibraryHandle);
+  Winapi.Windows.FreeLibrary(DebugSupportLibraryHandle);
   DebugSupportLibraryHandle := 0;
 
   DebugLibrary_GetRawStackTrace := nil;
