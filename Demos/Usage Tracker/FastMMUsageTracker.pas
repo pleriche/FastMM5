@@ -495,24 +495,26 @@ var
     LPrevAllocatedSize, LPrevTotalBlocks, LPrevTotalAllocated, LPrevTotalReserved: NativeUInt;
 
   procedure UpdateVMGraph(var AMemoryMap: TMemoryMapEx);
+  const
+    CRegionSize = 1 shl 16;
   var
-    LInd, LIndTop, I1: Integer;
+    LRegionStartIndex, LRegionEndIndex, i: Integer;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;
   begin
-    LInd := 0;
+    LRegionStartIndex := 0;
     repeat
       {If the chunk is not allocated by this MM, what is its status?}
-      if AMemoryMap[LInd] = csExSysAllocated then
+      if AMemoryMap[LRegionStartIndex] = csExSysAllocated then
       begin
         {Get all the reserved memory blocks and windows allocated memory blocks, etc.}
-        VirtualQuery(Pointer(LInd * 65536), LMBI, SizeOf(LMBI));
+        VirtualQuery(Pointer(NativeUInt(LRegionStartIndex) * CRegionSize), LMBI, SizeOf(LMBI));
         if LMBI.State = MEM_COMMIT then
         begin
-          if (GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+          if GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0 then
           begin
-            if DWord(LMBI.AllocationBase) = SysInit.HInstance then
+            if NativeUInt(LMBI.AllocationBase) = SysInit.HInstance then
               LChunkState := csExSysExe
             else
               LChunkState := csExSysDLL;
@@ -521,22 +523,14 @@ var
           begin
             LChunkState := csExSysAllocated;
           end;
-          if LMBI.RegionSize > 65536 then
-          begin
-            LIndTop := (Cardinal(LMBI.BaseAddress) + Cardinal(LMBI.RegionSize)) div 65536;
-            // Fill up multiple tables
-            for I1 := LInd to LIndTop do
-              AMemoryMap[I1] := LChunkState;
-            LInd := LIndTop;
-          end
-          else
-          begin
-            AMemoryMap[LInd] := LChunkState;
-          end;
+          LRegionEndIndex := (NativeUInt(LMBI.BaseAddress) + LMBI.RegionSize - 1) div CRegionSize;
+          for i := LRegionStartIndex to LRegionEndIndex do
+            AMemoryMap[i] := LChunkState;
+          LRegionStartIndex := LRegionEndIndex;
         end
       end;
-      Inc(LInd);
-    until LInd >= AddressSpacePageCount;
+      Inc(LRegionStartIndex);
+    until LRegionStartIndex >= AddressSpacePageCount;
   end;
 
   procedure UpdateVMDump;
