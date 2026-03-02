@@ -7,7 +7,7 @@ Description:
   cores, is not prone to memory fragmentation, and supports shared memory without the use of external .DLL files.
 
 Developed by:
-  Pierre le Riche, copyright 2004 - 2025, all rights reserved
+  Pierre le Riche, copyright 2004 - 2026, all rights reserved
 
 Sponsored by:
   gs-soft AG
@@ -2709,30 +2709,31 @@ end;
 function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: NativeInt;
   AReserveOnlyNoReadWriteAccess: Boolean): Boolean;
 begin
-  if AReserveOnlyNoReadWriteAccess then
+  {Try to reserve the memory at the given address.  This will fail if the memory at that address is not free.}
+  if Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) = nil then
+    Exit(False);
+
+  {Attempt to commit the memory if it must not be reserved only.}
+  if (not AReserveOnlyNoReadWriteAccess)
+    and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) = nil) then
   begin
-    Result := Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) <> nil;
-  end
-  else
-  begin
-    Result := (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_READWRITE) <> nil)
-      and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) <> nil);
+    Winapi.Windows.VirtualFree(APAddress, 0, MEM_RELEASE);
+    Exit(False);
   end;
 
-  if Result then
+  {Update the memory usage, and check whether MemoryUsageLimit has been reached.}
+  AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+  if (MemoryUsageLimit > 0)
+    and (MemoryUsageCurrent > MemoryUsageLimit) then
   begin
-    AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
+    Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
+    MemoryUsageLimitGraceAmount := 0;
 
-    if (MemoryUsageLimit > 0)
-      and (MemoryUsageCurrent > MemoryUsageLimit) then
-    begin
-      Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
-      MemoryUsageLimitGraceAmount := 0;
-
-      OS_FreeVirtualMemory(APAddress, ABlockSize);
-      Result := False;
-    end;
+    OS_FreeVirtualMemory(APAddress, ABlockSize);
+    Exit(False);
   end;
+
+  Result := True;
 end;
 
 {Determines the size and state of the virtual memory region starting at APRegionStart.}
@@ -2888,6 +2889,8 @@ end;
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
 pointer will be set to the current end of the file.}
 function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
+var
+  LNewPos: Int64;
 begin
   {Try to open/create the file in read/write mode.}
   AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
@@ -2896,7 +2899,12 @@ begin
     Exit(False);
 
   {Move the file pointer to the end of the file}
-  SetFilePointer(AFileHandle, 0, nil, FILE_END);
+  if not Winapi.Windows.SetFilePointerEx(AFileHandle, 0, @LNewPos, FILE_END) then
+  begin
+    Winapi.Windows.CloseHandle(AFileHandle);
+    AFileHandle := INVALID_HANDLE_VALUE;
+    Exit(False);
+  end;
 
   Result := True;
 end;
@@ -2906,14 +2914,14 @@ function OS_WriteFile(AFileHandle: THandle; APData: Pointer; ADataSizeInBytes: I
 var
   LBytesWritten: Cardinal;
 begin
-  Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil);
-  Result := LBytesWritten = Cardinal(ADataSizeInBytes);
+  Result := Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil)
+    and (LBytesWritten = Cardinal(ADataSizeInBytes));
 end;
 
 {Closes the given file handle}
 procedure OS_CloseFile(AFileHandle: THandle);
 begin
-  CloseHandle(AFileHandle);
+  Winapi.Windows.CloseHandle(AFileHandle);
 end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
@@ -9671,20 +9679,22 @@ var
   LPMapAddress: Pointer;
   LLocalMappingObjectHandle: NativeUInt;
 begin
+  {Until proven otherwise, assume there is no shared memory manager.}
+  Result := nil;
+
   {Try to open the shared memory manager file mapping}
   LLocalMappingObjectHandle := Winapi.Windows.OpenFileMappingA(FILE_MAP_READ, False, @SharingFileMappingObjectName);
+
   {Is a memory manager in this process sharing its memory manager?}
-  if LLocalMappingObjectHandle = 0 then
-  begin
-    {There is no shared memory manager in the process.}
-    Result := nil;
-  end
-  else
+  if LLocalMappingObjectHandle <> 0 then
   begin
     {Map a view of the shared memory and get the address of the shared memory manager}
     LPMapAddress := Winapi.Windows.MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
-    Result := PPointer(LPMapAddress)^;
-    Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+    if LPMapAddress <> nil then
+    begin
+      Result := PPointer(LPMapAddress)^;
+      Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+    end;
     Winapi.Windows.CloseHandle(LLocalMappingObjectHandle);
   end;
 end;
@@ -9754,36 +9764,45 @@ function FastMM_ShareMemoryManager: Boolean;
 var
   LPMapAddress: Pointer;
 begin
-  if (CurrentInstallationState = mmisInstalled)
-    and (not FastMM_InstalledMemoryManagerChangedExternally)
-    and (SharingFileMappingObjectHandle = 0) then
+  {We cannot share this memory manager if it is not installed, an external memory manager has been set, or it is already
+  being shared.}
+  if (CurrentInstallationState <> mmisInstalled)
+    or FastMM_InstalledMemoryManagerChangedExternally
+    or (SharingFileMappingObjectHandle <> 0) then
   begin
-    {Is any other module already sharing its MM?}
-    if FastMM_FindSharedMemoryManager = nil then
-    begin
-      {Create the memory mapped file}
-      SharingFileMappingObjectHandle := Winapi.Windows.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
-        SizeOf(Pointer), SharingFileMappingObjectName);
-      {Map a view of the memory}
-      LPMapAddress := Winapi.Windows.MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0);
-      {Set a pointer to the new memory manager}
-      PPointer(LPMapAddress)^ := @InstalledMemoryManager;
-      {Unmap the file}
-      Winapi.Windows.UnmapViewOfFile(LPMapAddress);
-      {Sharing this MM}
-      Result := True;
-    end
-    else
-    begin
-      {Another module is already sharing its memory manager}
-      Result := False;
-    end;
-  end
-  else
-  begin
-    {Either another memory manager has been set or this memory manager is already being shared}
-    Result := False;
+    Exit(False);
   end;
+
+  {Check whether another module is already sharing its memory manager}
+  if FastMM_FindSharedMemoryManager <> nil then
+    Exit(False);
+
+  {Create the memory mapped file.}
+  SharingFileMappingObjectHandle := Winapi.Windows.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
+    SizeOf(Pointer), SharingFileMappingObjectName);
+  if SharingFileMappingObjectHandle = 0 then
+    Exit(False);
+
+  {Map a view of the memory.}
+  if GetLastError <> ERROR_ALREADY_EXISTS then
+    LPMapAddress := Winapi.Windows.MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0)
+  else
+    LPMapAddress := nil;
+  {The file mapping should not already exist, and MapViewOfFile should never fail either, but handle potential errors
+  regardless.}
+  if LPMapAddress = nil then
+  begin
+    CloseHandle(SharingFileMappingObjectHandle);
+    SharingFileMappingObjectHandle := 0;
+    Exit(False);
+  end;
+
+  {Set a pointer to this memory manager and unmap the file.}
+  PPointer(LPMapAddress)^ := @InstalledMemoryManager;
+  Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+
+  {Successfully sharing this MM}
+  Result := True;
 end;
 
 
@@ -11169,7 +11188,7 @@ end;
 
 function FastMM_Initialize: Boolean;
 begin
-  {Ignore attemts to initialize twice.}
+  {Ignore attempts to initialize twice.}
   if UnitCurrentlyInitialized then
     Exit(False);
   UnitCurrentlyInitialized := True;
