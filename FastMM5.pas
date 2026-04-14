@@ -9981,6 +9981,7 @@ end;
 procedure FastMM_PerformMemoryLeakCheck_LogLeakSummary(var ALeakSummary: TMemoryLeakSummary);
 const
   CLeakTextMaxSize = 32768;
+  CTokenValueBufferSize = CLeakTextMaxSize + 1024; //Need space for the general tokens + the leak text
   CLifeFeed = #13#10;
   CLeakSizeSuffix = ': ';
   CLeakSeparator = ', ';
@@ -9988,7 +9989,8 @@ const
 var
   LCurrentLeakSize: NativeInt;
   LLeakIndex: Integer;
-  LLeakEntriesText, LTokenValueBuffer: array[0..CLeakTextMaxSize] of WideChar;
+  LLeakEntriesText: array[0..CLeakTextMaxSize] of WideChar;
+  LTokenValueBuffer: array[0..CTokenValueBufferSize] of WideChar;
   LPBufferPos, LPBufferEnd, LPTokenBufferPos: PWideChar;
   LTokenValues: TEventLogTokenValues;
 begin
