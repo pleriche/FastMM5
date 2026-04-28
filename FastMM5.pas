@@ -9832,13 +9832,21 @@ function FastMM_GetRegisteredMemoryLeaks: TFastMM_RegisteredMemoryLeaks;
 
 begin
   SetLength(Result, 0);
-  if (ExpectedMemoryLeaks <> nil) and LockExpectedMemoryLeaksList then
-  begin
-    {Add all entries}
-    AddEntries(ExpectedMemoryLeaks.FirstEntryByAddress);
-    AddEntries(ExpectedMemoryLeaks.FirstEntryByClass);
-    AddEntries(ExpectedMemoryLeaks.FirstEntryBySizeOnly);
-    {Unlock the list}
+
+  {If there are no expected memory leaks then there's nothing to do.}
+  if ExpectedMemoryLeaks = nil then
+    Exit;
+
+  try
+    if LockExpectedMemoryLeaksList then
+    begin
+      {Add all registered leak entries to the array}
+      AddEntries(ExpectedMemoryLeaks.FirstEntryByAddress);
+      AddEntries(ExpectedMemoryLeaks.FirstEntryByClass);
+      AddEntries(ExpectedMemoryLeaks.FirstEntryBySizeOnly);
+    end;
+  finally
+    {This must be protected by a try...finally since the array allocations above may fail in a low memory scenario.}
     ExpectedMemoryLeaksListLocked := 0;
   end;
 end;
