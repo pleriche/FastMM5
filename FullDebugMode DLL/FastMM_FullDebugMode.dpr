@@ -520,12 +520,14 @@ begin
           Result := True;
           Exit;
         end;
+{$ifndef CPUX64} //The 9A cp opcode is not valid in 64-bit mode
         {7 bytes, CALL FAR $1234:12345678}
         if (LCode8Back and $0000FF00) = $00009A00 then
         begin
           Result := True;
           Exit;
         end;
+{$endif}
         {Not a valid call site}
         Result := False;
       except
