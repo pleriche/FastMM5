@@ -8144,14 +8144,21 @@ begin
 end;
 
 function FastMM_DebugAllocMem(ASize: NativeInt): Pointer;
+var
+  LPDebugHeader: PFastMM_DebugBlockHeader;
 begin
   if FastMM_DebugMode_ScanForCorruptionBeforeEveryOperation then
     FastMM_ScanDebugBlocksForCorruption;
 
   Result := FastMM_DebugGetMem_GetDebugBlock(ASize, False);
+  if Result = nil then
+    Exit;
+
+  LPDebugHeader := PFastMM_DebugBlockHeader(PByte(Result) - CDebugBlockHeaderSize);
+
   {Large blocks are already zero filled}
-  if (Result <> nil)
-    and (ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize - CalculateDebugBlockFooterSize(PFastMM_DebugBlockHeader(Result).StackTraceEntryCount))) then
+  if ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize
+    - CalculateDebugBlockFooterSize(LPDebugHeader.StackTraceEntryCount)) then
   begin
     FillChar(Result^, ASize, 0);
   end;
