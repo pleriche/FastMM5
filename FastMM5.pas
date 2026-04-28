@@ -2791,7 +2791,7 @@ begin
           {It is a surrogate pair (4 byte) encoding:  Surrogate pairs are encoded in four bytes, with the high word
           first}
           LCode := ((LCode and $3ff) shl 10) + ((LCode shr 16) and $3ff) + $10000;
-          Result[0] := Byte((LCode shr 18) and $07) or $e0;
+          Result[0] := Byte((LCode shr 18) and $07) or $f0;
           Result[1] := Byte((LCode shr 12) and $3f) or $80;
           Result[2] := Byte((LCode shr 6) and $3f) or $80;
           Result[3] := Byte(LCode and $3f) or $80;
