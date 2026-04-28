@@ -4489,7 +4489,7 @@ begin
   {Can the block be resized in-place?}
   LAvailableSpace := FastMM_BlockMaximumUserBytes(LPActualBlock);
   LDebugFooterSize := CalculateDebugBlockFooterSize(LPActualBlock.StackTraceEntryCount);
-  if LAvailableSpace >= (ANewSize + CDebugBlockHeaderSize + LDebugFooterSize) then
+  if (LAvailableSpace - CDebugBlockHeaderSize - LDebugFooterSize) >= ANewSize then
   begin
 
     {Avoid a potential race condition here:  While the debug header and footer is being updated the block must be flagged
