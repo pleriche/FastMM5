@@ -8151,7 +8151,7 @@ begin
   Result := FastMM_DebugGetMem_GetDebugBlock(ASize, False);
   {Large blocks are already zero filled}
   if (Result <> nil)
-    and (ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize - CalculateDebugBlockFooterSize(PFastMM_DebugBlockHeader(Result).StackTraceEntryCount))) then
+    and (ASize <= (CMaximumMediumBlockSize - CMediumBlockHeaderSize - CDebugBlockHeaderSize - CalculateDebugBlockFooterSize(PFastMM_DebugBlockHeader(Result)[-1].StackTraceEntryCount))) then
   begin
     FillChar(Result^, ASize, 0);
   end;
