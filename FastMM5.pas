@@ -8518,20 +8518,24 @@ begin
         Continue;
       end;
 
-      LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
-      while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
-      begin
-        LBlockInfo.BlockAddress := @PByte(LPLargeBlockHeader)[CLargeBlockHeaderSize];
-        LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
-        LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
+      {The large block manager is now locked:  Use a try..finally to unlock it in case the callback raises an
+      exception.}
+      try
+        LPLargeBlockHeader := LPLargeBlockManager.FirstLargeBlockHeader;
+        while NativeUInt(LPLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) do
+        begin
+          LBlockInfo.BlockAddress := @PByte(LPLargeBlockHeader)[CLargeBlockHeaderSize];
+          LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
+          LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
 
-        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
-          ACallBack(LBlockInfo);
+          if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+            ACallBack(LBlockInfo);
 
-        LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
+          LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
+        end;
+      finally
+        LPLargeBlockManager.LargeBlockManagerLocked := 0;
       end;
-
-      LPLargeBlockManager.LargeBlockManagerLocked := 0;
     end;
 
   end;
@@ -8559,214 +8563,222 @@ begin
         Continue;
       end;
 
-      LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
-      while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
-      begin
-
-        if LPMediumBlockManager.SequentialFeedMediumBlockSpan = LPMediumBlockSpan then
+      {The medium block manager is now locked:  Use a try..finally to unlock it in case the callback raises an
+      exception.}
+      try
+        LPMediumBlockSpan := LPMediumBlockManager.FirstMediumBlockSpanHeader;
+        while NativeUInt(LPMediumBlockSpan) <> NativeUInt(LPMediumBlockManager) do
         begin
-          LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
-          if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
-            LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
 
-          {It is possible that a new medium block is in the process of being split off from the sequential feed span by
-          another thread, in which case the block size may not yet be set properly.  In this case we need to wait for
-          the other thread to complete allocation of the block.}
-          LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
-          LLockWaitTimeMilliseconds := 0;
-          while (GetMediumBlockSize(LPMediumBlock) = 0)
-            and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+          if LPMediumBlockManager.SequentialFeedMediumBlockSpan = LPMediumBlockSpan then
           begin
-            OS_AllowOtherThreadToRun;
-          end;
+            LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
+            if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
+              LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
 
-          {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
-          if GetMediumBlockSize(LPMediumBlock) = 0 then
-          begin
-            {If there was a reasonable wait time then raise an error, otherwise skip the entire span since it is not
-            possible to walk the blocks in the span without knowing the size of the first block.}
-            if ALockTimeoutMilliseconds >= 1000 then
-              System.Error(reInvalidPtr)
-            else
-              LBlockOffsetFromMediumSpanStart := LPMediumBlockSpan.SpanSize;
-          end;
+            {It is possible that a new medium block is in the process of being split off from the sequential feed span by
+            another thread, in which case the block size may not yet be set properly.  In this case we need to wait for
+            the other thread to complete allocation of the block.}
+            LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
+            LLockWaitTimeMilliseconds := 0;
+            while (GetMediumBlockSize(LPMediumBlock) = 0)
+              and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+            begin
+              OS_AllowOtherThreadToRun;
+            end;
 
-        end
-        else
-          LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
+            {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
+            if GetMediumBlockSize(LPMediumBlock) = 0 then
+            begin
+              {If there was a reasonable wait time then raise an error, otherwise skip the entire span since it is not
+              possible to walk the blocks in the span without knowing the size of the first block.}
+              if ALockTimeoutMilliseconds >= 1000 then
+                System.Error(reInvalidPtr)
+              else
+                LBlockOffsetFromMediumSpanStart := LPMediumBlockSpan.SpanSize;
+            end;
 
-        if btMediumBlockSpan in AWalkBlockTypes then
-        begin
-          LBlockInfo.BlockAddress := LPMediumBlockSpan;
-          LBlockInfo.BlockSize := LPMediumBlockSpan.SpanSize;
-          LBlockInfo.UsableSize := LPMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize;
-          LBlockInfo.BlockType := btMediumBlockSpan;
-          LBlockInfo.BlockIsFree := False;
-          LBlockInfo.ArenaIndex := Byte(LArenaIndex);
-          if LBlockOffsetFromMediumSpanStart > CMediumBlockSpanHeaderSize then
-          begin
-            LBlockInfo.IsSequentialFeedMediumBlockSpan := True;
-            LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := LBlockOffsetFromMediumSpanStart - CMediumBlockSpanHeaderSize;
           end
           else
+            LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
+
+          if btMediumBlockSpan in AWalkBlockTypes then
           begin
-            LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
-            LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-          end;
-          LBlockInfo.SmallBlockSpanBlockSize := 0;
-          LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
-          LBlockInfo.DebugInformation := nil;
-
-          ACallBack(LBlockInfo);
-        end;
-
-        {Walk all the medium blocks in the medium block span.}
-        if AWalkBlockTypes * [btMediumBlock, btSmallBlockSpan, btSmallBlock] <> [] then
-        begin
-          while LBlockOffsetFromMediumSpanStart < LPMediumBlockSpan.SpanSize do
-          begin
-            LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
-            LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
-
-            LBlockInfo.BlockIsFree := BlockIsFree(LPMediumBlock);
-            if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
+            LBlockInfo.BlockAddress := LPMediumBlockSpan;
+            LBlockInfo.BlockSize := LPMediumBlockSpan.SpanSize;
+            LBlockInfo.UsableSize := LPMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize;
+            LBlockInfo.BlockType := btMediumBlockSpan;
+            LBlockInfo.BlockIsFree := False;
+            LBlockInfo.ArenaIndex := Byte(LArenaIndex);
+            if LBlockOffsetFromMediumSpanStart > CMediumBlockSpanHeaderSize then
             begin
-              {Read the pointer to the small block manager in case this is a small block span.}
-              if (AWalkBlockTypes * [btSmallBlockSpan, btSmallBlock] <> [])
-                and PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
+              LBlockInfo.IsSequentialFeedMediumBlockSpan := True;
+              LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := LBlockOffsetFromMediumSpanStart - CMediumBlockSpanHeaderSize;
+            end
+            else
+            begin
+              LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
+              LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
+            end;
+            LBlockInfo.SmallBlockSpanBlockSize := 0;
+            LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
+            LBlockInfo.DebugInformation := nil;
+
+            ACallBack(LBlockInfo);
+          end;
+
+          {Walk all the medium blocks in the medium block span.}
+          if AWalkBlockTypes * [btMediumBlock, btSmallBlockSpan, btSmallBlock] <> [] then
+          begin
+            while LBlockOffsetFromMediumSpanStart < LPMediumBlockSpan.SpanSize do
+            begin
+              LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
+              LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
+
+              LBlockInfo.BlockIsFree := BlockIsFree(LPMediumBlock);
+              if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
               begin
-                LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
-
-                LLockWaitTimeMilliseconds := 0;
-                while (AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) <> 0)
-                  and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
+                {Read the pointer to the small block manager in case this is a small block span.}
+                if (AWalkBlockTypes * [btSmallBlockSpan, btSmallBlock] <> [])
+                  and PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
                 begin
-                  OS_AllowOtherThreadToRun;
-                end;
+                  LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
-                if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
-                begin
-                  Result := False;
-                  LPSmallBlockManager := nil;
-                  LSmallBlockOffset := 0;
-                end
-                else
-                begin
-
-                  {Memory fence required for ARM}
-
-                  {The last block may have been released before the manager was locked, so we need to check whether it is
-                  still a small block span.}
-                  if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
+                  LLockWaitTimeMilliseconds := 0;
+                  while (AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) <> 0)
+                    and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
                   begin
-                    if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
-                    begin
-                      LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
-                      if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
-                        LSmallBlockOffset := CSmallBlockSpanHeaderSize;
-                    end
-                    else
-                      LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                    OS_AllowOtherThreadToRun;
+                  end;
+
+                  if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+                  begin
+                    Result := False;
+                    LPSmallBlockManager := nil;
+                    LSmallBlockOffset := 0;
                   end
                   else
                   begin
-                    LSmallBlockOffset := 0;
-                    LPSmallBlockManager.SmallBlockManagerLocked := 0;
-                    LPSmallBlockManager := nil;
-                  end;
-                end;
-              end
-              else
-              begin
-                LPSmallBlockManager := nil;
-                LSmallBlockOffset := 0;
-              end;
 
-              if AWalkBlockTypes * [btMediumBlock, btSmallBlockSpan] <> [] then
-              begin
-                LBlockInfo.BlockAddress := LPMediumBlock;
-                LBlockInfo.BlockSize := LMediumBlockSize;
-                LBlockInfo.ArenaIndex := Byte(LArenaIndex);
-                LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
+                    {Memory fence required for ARM}
 
-                if LPSmallBlockManager <> nil then
-                begin
-                  if btSmallBlockSpan in AWalkBlockTypes then
-                  begin
-                    LBlockInfo.BlockType := btSmallBlockSpan;
-                    LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize * PSmallBlockSpanHeader(LPMediumBlock).TotalBlocksInSpan;
-                    LBlockInfo.SmallBlockSpanBlockSize := LPSmallBlockManager.BlockSize;
-                    LBlockInfo.IsSequentialFeedSmallBlockSpan := LSmallBlockOffset > CSmallBlockSpanHeaderSize;
-                    if LBlockInfo.IsSequentialFeedSmallBlockSpan then
-                      LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := LSmallBlockOffset - CSmallBlockSpanHeaderSize
+                    {The last block may have been released before the manager was locked, so we need to check whether it
+                    is still a small block span.}
+                    if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
+                    begin
+                      if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
+                      begin
+                        LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
+                        if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
+                          LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                      end
+                      else
+                        LSmallBlockOffset := CSmallBlockSpanHeaderSize;
+                    end
                     else
-                      LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-                    LBlockInfo.DebugInformation := nil;
-                    ACallBack(LBlockInfo);
+                    begin
+                      LSmallBlockOffset := 0;
+                      LPSmallBlockManager.SmallBlockManagerLocked := 0;
+                      LPSmallBlockManager := nil;
+                    end;
                   end;
                 end
                 else
                 begin
-                  if btMediumBlock in AWalkBlockTypes then
-                  begin
-                    LBlockInfo.BlockType := btMediumBlock;
-                    LBlockInfo.UsableSize := LMediumBlockSize - CMediumBlockHeaderSize;
-                    LBlockInfo.SmallBlockSpanBlockSize := 0;
-                    LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
-                    LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-                    if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
-                      ACallBack(LBlockInfo);
-                  end;
+                  LPSmallBlockManager := nil;
+                  LSmallBlockOffset := 0;
                 end;
 
-              end;
-
-              {If small blocks need to be walked then LPSmallBlockManager will be <> nil.}
-              if LPSmallBlockManager <> nil then
-              begin
-
-                if btSmallBlock in AWalkBlockTypes then
-                begin
-                  LLastBlockOffset := CSmallBlockSpanHeaderSize
-                    + LPSmallBlockManager.BlockSize * (PSmallBlockSpanHeader(LPMediumBlock).TotalBlocksInSpan - 1);
-                  while LSmallBlockOffset <= LLastBlockOffset do
+                {If this is a small block span then the small block manager will now be locked:  Use a try..finally to
+                unlock it in case the callback raises an exception.}
+                try
+                  if AWalkBlockTypes * [btMediumBlock, btSmallBlockSpan] <> [] then
                   begin
-                    LBlockInfo.BlockAddress := PByte(LPMediumBlock) + LSmallBlockOffset;
+                    LBlockInfo.BlockAddress := LPMediumBlock;
+                    LBlockInfo.BlockSize := LMediumBlockSize;
+                    LBlockInfo.ArenaIndex := Byte(LArenaIndex);
+                    LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
 
-                    LBlockInfo.BlockIsFree := BlockIsFree(LBlockInfo.BlockAddress);
-                    if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
+                    if LPSmallBlockManager <> nil then
                     begin
-                      LBlockInfo.BlockSize := LPSmallBlockManager.BlockSize;
-                      LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize - CSmallBlockHeaderSize;
-                      LBlockInfo.ArenaIndex := Byte((NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena));
-                      LBlockInfo.BlockType := btSmallBlock;
-                      LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
-                      LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-                      LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
-                      LBlockInfo.SmallBlockSpanBlockSize := 0;
-                      LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-
-                      if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                      if btSmallBlockSpan in AWalkBlockTypes then
+                      begin
+                        LBlockInfo.BlockType := btSmallBlockSpan;
+                        LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize * PSmallBlockSpanHeader(LPMediumBlock).TotalBlocksInSpan;
+                        LBlockInfo.SmallBlockSpanBlockSize := LPSmallBlockManager.BlockSize;
+                        LBlockInfo.IsSequentialFeedSmallBlockSpan := LSmallBlockOffset > CSmallBlockSpanHeaderSize;
+                        if LBlockInfo.IsSequentialFeedSmallBlockSpan then
+                          LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := LSmallBlockOffset - CSmallBlockSpanHeaderSize
+                        else
+                          LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
+                        LBlockInfo.DebugInformation := nil;
                         ACallBack(LBlockInfo);
+                      end;
+                    end
+                    else
+                    begin
+                      if btMediumBlock in AWalkBlockTypes then
+                      begin
+                        LBlockInfo.BlockType := btMediumBlock;
+                        LBlockInfo.UsableSize := LMediumBlockSize - CMediumBlockHeaderSize;
+                        LBlockInfo.SmallBlockSpanBlockSize := 0;
+                        LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
+                        LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                          ACallBack(LBlockInfo);
+                      end;
                     end;
 
-                    Inc(LSmallBlockOffset, LPSmallBlockManager.BlockSize);
                   end;
+
+                  {If small blocks must be walked then LPSmallBlockManager will be <> nil.}
+                  if (btSmallBlock in AWalkBlockTypes)
+                    and (LPSmallBlockManager <> nil) then
+                  begin
+                    LLastBlockOffset := CSmallBlockSpanHeaderSize
+                      + LPSmallBlockManager.BlockSize * (PSmallBlockSpanHeader(LPMediumBlock).TotalBlocksInSpan - 1);
+                    while LSmallBlockOffset <= LLastBlockOffset do
+                    begin
+                      LBlockInfo.BlockAddress := PByte(LPMediumBlock) + LSmallBlockOffset;
+
+                      LBlockInfo.BlockIsFree := BlockIsFree(LBlockInfo.BlockAddress);
+                      if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
+                      begin
+                        LBlockInfo.BlockSize := LPSmallBlockManager.BlockSize;
+                        LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize - CSmallBlockHeaderSize;
+                        LBlockInfo.ArenaIndex := Byte((NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena));
+                        LBlockInfo.BlockType := btSmallBlock;
+                        LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
+                        LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
+                        LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
+                        LBlockInfo.SmallBlockSpanBlockSize := 0;
+                        LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
+
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                          ACallBack(LBlockInfo);
+                      end;
+
+                      Inc(LSmallBlockOffset, LPSmallBlockManager.BlockSize);
+                    end;
+                  end;
+
+                finally
+                  if LPSmallBlockManager <> nil then
+                    LPSmallBlockManager.SmallBlockManagerLocked := 0;
                 end;
 
-                LPSmallBlockManager.SmallBlockManagerLocked := 0;
               end;
 
+              Inc(LBlockOffsetFromMediumSpanStart, LMediumBlockSize);
             end;
-
-            Inc(LBlockOffsetFromMediumSpanStart, LMediumBlockSize);
           end;
+
+          LPMediumBlockSpan := LPMediumBlockSpan.NextMediumBlockSpanHeader;
         end;
 
-        LPMediumBlockSpan := LPMediumBlockSpan.NextMediumBlockSpanHeader;
+      finally
+        LPMediumBlockManager.MediumBlockManagerLocked := 0;
       end;
-
-      LPMediumBlockManager.MediumBlockManagerLocked := 0;
     end;
 
   end;
