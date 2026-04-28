@@ -1773,6 +1773,7 @@ var
   EventLogFilename: array[0..CFilenameMaxLength] of WideChar;
   {The file handle for the event log while it is open.}
   EventLogFileHandle: THandle;
+  EventLogLocked: Integer; //1 = Locked
 
   {The expected memory leaks list}
   ExpectedMemoryLeaks: PExpectedMemoryLeaks;
@@ -3707,6 +3708,17 @@ begin
   end;
 end;
 
+procedure LockEventLog;
+begin
+  while AtomicCmpExchange(EventLogLocked, 1, 0) <> 0 do
+    OS_AllowOtherThreadToRun;
+end;
+
+procedure UnlockEventLog;
+begin
+  EventLogLocked := 0;
+end;
+
 function EventLogFileIsOpen: Boolean;
 begin
   Result := EventLogFileHandle <> INVALID_HANDLE_VALUE;
@@ -3838,13 +3850,18 @@ begin
   {Log the message to file, if needed.}
   if AEventType in FastMM_LogToFileEvents then
   begin
-    LEventLogFileWasOpen := EventLogFileIsOpen;
+    LockEventLog;
+    try
+      LEventLogFileWasOpen := EventLogFileIsOpen;
 
-    if LEventLogFileWasOpen or OpenEventLogFile then
-      AppendTextFile(EventLogFileHandle, LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
+      if LEventLogFileWasOpen or OpenEventLogFile then
+        AppendTextFile(EventLogFileHandle, LPLogHeaderStart, CharCount(LPBuffer, @LTextBuffer));
 
-    if not LEventLogFileWasOpen then
-      CloseEventLogFile;
+      if not LEventLogFileWasOpen then
+        CloseEventLogFile;
+    finally
+      UnlockEventLog;
+    end;
   end;
 
   if AEventType in FastMM_OutputDebugStringEvents then
@@ -3856,7 +3873,12 @@ begin
   begin
     {Ensure that the event log file is closed before showing any dialogs, so the user can access it while the dialog is
     displayed.}
-    CloseEventLogFile;
+    LockEventLog;
+    try
+      CloseEventLogFile;
+    finally
+      UnlockEventLog;
+    end;
 
     OS_ShowMessageBox(LPBodyStart, LPMessageBoxCaption);
   end;
@@ -10896,63 +10918,73 @@ var
   LModuleFilename: array[0..CFilenameMaxLength] of WideChar;
   LPModuleFilenamePos, LPModuleFilenameStart, LPModuleFilenameEnd, LPBufferPos, LPBufferEnd: PWideChar;
 begin
-  CloseEventLogFile;
+  LockEventLog;
+  try
+    CloseEventLogFile;
 
-  {Get the module filename into a buffer.}
-  LPModuleFilenameEnd := OS_GetApplicationFilename(@LModuleFilename, @LModuleFilename[High(LModuleFilename)], False);
+    {Get the module filename into a buffer.}
+    LPModuleFilenameEnd := OS_GetApplicationFilename(@LModuleFilename, @LModuleFilename[High(LModuleFilename)], False);
 
-  {Drop the file extension from the module filename.}
-  LPModuleFilenamePos := LPModuleFilenameEnd;
-  while NativeUInt(LPModuleFilenamePos) > NativeUInt(@LModuleFilename) do
-  begin
-    if LPModuleFilenamePos^ = '.' then
+    {Drop the file extension from the module filename.}
+    LPModuleFilenamePos := LPModuleFilenameEnd;
+    while NativeUInt(LPModuleFilenamePos) > NativeUInt(@LModuleFilename) do
     begin
-      LPModuleFilenameEnd := LPModuleFilenamePos;
-      Break;
-    end;
-    Dec(LPModuleFilenamePos);
-  end;
-  LPModuleFilenameEnd^ := #0;
-
-  {Try to get the path override from the environment variable.  If there is a path override then that is used instead
-  of the application path.}
-  LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
-  LPBufferPos := OS_GetEnvironmentVariableValue(CLogFilePathEnvironmentVariable, @EventLogFilename, LPBufferEnd);
-  if LPBufferPos <> @EventLogFilename then
-  begin
-    {Strip the trailing path separator from the path override.}
-    Dec(LPBufferPos);
-    if (LPBufferPos^ <> '\') and (LPBufferPos^ <> '/') then
-      Inc(LPBufferPos);
-
-    {Strip the path from the module filename.}
-    LPModuleFilenameStart := LPModuleFilenameEnd;
-    while NativeUInt(LPModuleFilenameStart) > NativeUInt(@LModuleFilename) do
-    begin
-      if (LPModuleFilenameStart^ = '\') or (LPModuleFilenameStart^ = '/') then
+      if LPModuleFilenamePos^ = '.' then
+      begin
+        LPModuleFilenameEnd := LPModuleFilenamePos;
         Break;
-      Dec(LPModuleFilenameStart);
+      end;
+      Dec(LPModuleFilenamePos);
     end;
-  end
-  else
-    LPModuleFilenameStart := @LModuleFilename;
+    LPModuleFilenameEnd^ := #0;
 
-  LPBufferPos := AppendTextToBuffer(LPModuleFilenameStart, LPBufferPos, LPBufferEnd);
-  LPBufferPos := AppendTextToBuffer(CLogFileExtension, LPBufferPos, LPBufferEnd);
-  LPBufferPos^ := #0;
+    {Try to get the path override from the environment variable.  If there is a path override then that is used instead
+    of the application path.}
+    LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
+    LPBufferPos := OS_GetEnvironmentVariableValue(CLogFilePathEnvironmentVariable, @EventLogFilename, LPBufferEnd);
+    if LPBufferPos <> @EventLogFilename then
+    begin
+      {Strip the trailing path separator from the path override.}
+      Dec(LPBufferPos);
+      if (LPBufferPos^ <> '\') and (LPBufferPos^ <> '/') then
+        Inc(LPBufferPos);
+
+      {Strip the path from the module filename.}
+      LPModuleFilenameStart := LPModuleFilenameEnd;
+      while NativeUInt(LPModuleFilenameStart) > NativeUInt(@LModuleFilename) do
+      begin
+        if (LPModuleFilenameStart^ = '\') or (LPModuleFilenameStart^ = '/') then
+          Break;
+        Dec(LPModuleFilenameStart);
+      end;
+    end
+    else
+      LPModuleFilenameStart := @LModuleFilename;
+
+    LPBufferPos := AppendTextToBuffer(LPModuleFilenameStart, LPBufferPos, LPBufferEnd);
+    LPBufferPos := AppendTextToBuffer(CLogFileExtension, LPBufferPos, LPBufferEnd);
+    LPBufferPos^ := #0;
+  finally
+    UnlockEventLog;
+  end;
 end;
 
 procedure FastMM_SetEventLogFilename(APEventLogFilename: PWideChar);
 var
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
-  CloseEventLogFile;
-
   if APEventLogFilename <> nil then
   begin
-    LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
-    LPBufferPos := AppendTextToBuffer(APEventLogFilename, @EventLogFilename, LPBufferEnd);
-    LPBufferPos^ := #0;
+    LockEventLog;
+    try
+      CloseEventLogFile;
+
+      LPBufferEnd := @EventLogFilename[High(EventLogFilename)];
+      LPBufferPos := AppendTextToBuffer(APEventLogFilename, @EventLogFilename, LPBufferEnd);
+      LPBufferPos^ := #0;
+    finally
+      UnlockEventLog;
+    end;
   end
   else
     FastMM_SetDefaultEventLogFilename;
@@ -10965,9 +10997,14 @@ end;
 
 function FastMM_DeleteEventLogFile: Boolean;
 begin
-  CloseEventLogFile;
+  LockEventLog;
+  try
+    CloseEventLogFile;
 
-  Result := OS_DeleteFile(@EventLogFilename);
+    Result := OS_DeleteFile(@EventLogFilename);
+  finally
+    UnlockEventLog;
+  end;
 end;
 
 function FastMM_Initialize: Boolean;
