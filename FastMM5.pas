@@ -4097,6 +4097,26 @@ begin
   Result := CDebugBlockFooterCheckSumSize + AStackTraceDepth * (2 * SizeOf(Pointer));
 end;
 
+{Calculates the actual allocation size of a debug block, including the header and footer.  Returns false if the user
+size is negative or if the actual size calculation would overflow.}
+function TryCalculateDebugBlockSize(AUserSize: NativeInt; AStackTraceDepth: Byte;
+  out ADebugBlockSize: NativeInt): Boolean; inline;
+var
+  LDebugBlockOverhead: NativeInt;
+begin
+  Result := False;
+
+  if AUserSize < 0 then
+    Exit;
+
+  LDebugBlockOverhead := CDebugBlockHeaderSize + CalculateDebugBlockFooterSize(AStackTraceDepth);
+  if AUserSize > High(NativeInt) - LDebugBlockOverhead then
+    Exit;
+
+  ADebugBlockSize := AUserSize + LDebugBlockOverhead;
+  Result := True;
+end;
+
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
 var
   LTokenValues: TEventLogTokenValues;
@@ -4477,7 +4497,7 @@ end;
 function FastMM_ReallocMem_ReallocDebugBlock(APointer: Pointer; ANewSize: NativeInt): Pointer;
 var
   LPActualBlock: PFastMM_DebugBlockHeader;
-  LAvailableSpace, LDebugFooterSize: NativeInt;
+  LAvailableSpace, LDebugBlockSize, LDebugFooterSize: NativeInt;
   LPOldFooter, LPNewFooter: Pointer;
 begin
   LPActualBlock := @PFastMM_DebugBlockHeader(APointer)[-1];
@@ -4489,7 +4509,10 @@ begin
   {Can the block be resized in-place?}
   LAvailableSpace := FastMM_BlockMaximumUserBytes(LPActualBlock);
   LDebugFooterSize := CalculateDebugBlockFooterSize(LPActualBlock.StackTraceEntryCount);
-  if LAvailableSpace >= (ANewSize + CDebugBlockHeaderSize + LDebugFooterSize) then
+  if not TryCalculateDebugBlockSize(ANewSize, LPActualBlock.StackTraceEntryCount, LDebugBlockSize) then
+    Exit(nil);
+
+  if LAvailableSpace >= LDebugBlockSize then
   begin
 
     {Avoid a potential race condition here:  While the debug header and footer is being updated the block must be flagged
@@ -4515,7 +4538,7 @@ begin
   else
   begin
     {The new size cannot fit in the existing block:  We need to allocate a new block.}
-    Result := FastMM_GetMem(ANewSize + CDebugBlockHeaderSize + LDebugFooterSize);
+    Result := FastMM_GetMem(LDebugBlockSize);
 
     if Result <> nil then
     begin
@@ -8029,12 +8052,16 @@ end;
 
 function FastMM_DebugGetMem_GetDebugBlock(ASize: NativeInt; AFillBlockWithDebugPattern: Boolean): Pointer;
 var
+  LDebugBlockSize: NativeInt;
   LStackTraceDepth: Byte;
 begin
   LStackTraceDepth := DebugMode_StackTrace_EntryCount;
 
   {Add the size of the debug header, footer checksum and two stack traces to the allocation size.}
-  Result := FastMM_GetMem(ASize + CDebugBlockHeaderSize + CalculateDebugBlockFooterSize(LStackTraceDepth));
+  if not TryCalculateDebugBlockSize(ASize, LStackTraceDepth, LDebugBlockSize) then
+    Exit(nil);
+
+  Result := FastMM_GetMem(LDebugBlockSize);
   if Result = nil then
     Exit;
 
