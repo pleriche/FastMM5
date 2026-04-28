@@ -1720,6 +1720,7 @@ var
   {Counts the number of time FastMM_EnterMinimumAddressAlignment less the number of times
   FastMM_ExitMinimumAddressAlignment has been called for each alignment type.}
   AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
+  AlignmentRequestCountersLocked: Integer; //1 = Locked
 
   {The current optimization stategy in effect.}
   OptimizationStrategy: TFastMM_MemoryManagerOptimizationStrategy;
@@ -10177,28 +10178,49 @@ begin
   end;
 end;
 
+procedure LockAlignmentRequestCounters;
+begin
+  while AtomicCmpExchange(AlignmentRequestCountersLocked, 1, 0) <> 0 do
+    OS_AllowOtherThreadToRun;
+end;
+
+procedure UnlockAlignmentRequestCounters;
+begin
+  AlignmentRequestCountersLocked := 0;
+end;
+
 procedure FastMM_EnterMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
 var
   LOldMinimumAlignment: TFastMM_MinimumAddressAlignment;
 begin
-  LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
-  AtomicIncrement(AlignmentRequestCounters[AMinimumAddressAlignment]);
+  LockAlignmentRequestCounters;
+  try
+    LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
+    Inc(AlignmentRequestCounters[AMinimumAddressAlignment]);
 
-  {Rebuild the small block type lookup table if the minimum alignment changed.}
-  if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
-    FastMM_BuildSmallBlockTypeLookupTable;
+    {Rebuild the small block type lookup table if the minimum alignment changed.}
+    if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
+      FastMM_BuildSmallBlockTypeLookupTable;
+  finally
+    UnlockAlignmentRequestCounters;
+  end;
 end;
 
 procedure FastMM_ExitMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
 var
   LOldMinimumAlignment: TFastMM_MinimumAddressAlignment;
 begin
-  LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
-  AtomicDecrement(AlignmentRequestCounters[AMinimumAddressAlignment]);
+  LockAlignmentRequestCounters;
+  try
+    LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
+    Dec(AlignmentRequestCounters[AMinimumAddressAlignment]);
 
-  {Rebuild the small block type lookup table if the minimum alignment changed.}
-  if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
-    FastMM_BuildSmallBlockTypeLookupTable;
+    {Rebuild the small block type lookup table if the minimum alignment changed.}
+    if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
+      FastMM_BuildSmallBlockTypeLookupTable;
+  finally
+    UnlockAlignmentRequestCounters;
+  end;
 end;
 
 {Returns the current minimum address alignment in effect.}
