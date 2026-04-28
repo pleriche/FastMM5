@@ -7935,8 +7935,11 @@ end;
 
 function FastMM_FreeMem_EraseBeforeFree(APointer: Pointer): Integer;
 begin
-  {Fill the user area of the block with the debug fill pattern before passing the block to the regular FreeMem handler.}
-  FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillByteFreedBlock);
+  {Fill the user area of the block with the debug fill pattern before passing the block to the regular FreeMem handler.
+  We first check whether it is not perhaps a double free, and if so then we let FastMM_FreeMem handle the error. (We do
+  want to risk potentially corrupting the linked list of free blocks.)}
+  if PBlockStatusFlags(APointer)[-1] and CBlockIsFreeFlag = 0 then
+    FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillByteFreedBlock);
 
   Result := FastMM_FreeMem(APointer);
 end;
