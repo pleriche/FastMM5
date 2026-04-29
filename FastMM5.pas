@@ -1566,6 +1566,18 @@ type
     procedure VirtualMethod72; virtual; procedure VirtualMethod73; virtual; procedure VirtualMethod74; virtual;
   end;
 
+  {-------Simple lock for shared resources--------}
+
+  {A simple lock mechanism that will spin in the Lock call until it is able to acquire the lock.  Not intended for use
+  in performance critical code.}
+  TSimpleLock = record
+  private
+    FLock: Integer;
+  public
+    procedure Lock;
+    procedure Unlock;
+  end;
+
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -1720,7 +1732,7 @@ var
   {Counts the number of time FastMM_EnterMinimumAddressAlignment less the number of times
   FastMM_ExitMinimumAddressAlignment has been called for each alignment type.}
   AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
-  AlignmentRequestCountersLocked: Integer; //1 = Locked
+  AlignmentRequestCountersLock: TSimpleLock;
 
   {The current optimization stategy in effect.}
   OptimizationStrategy: TFastMM_MemoryManagerOptimizationStrategy;
@@ -1756,8 +1768,8 @@ var
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
 
-  {A lock that allows switching between debug and normal mode to be thread safe.}
-  SettingMemoryManager: Integer; //0 = False, 1 = True;
+  {A lock that allows switching the memory manager methods between e.g. debug and normal mode in a thread safe manager.}
+  SetMemoryManagerLock: TSimpleLock;
 
   {The memory manager that was in place before this memory manager was installed.}
   PreviousMemoryManager: TMemoryManagerEx;
@@ -1774,11 +1786,11 @@ var
   EventLogFilename: array[0..CFilenameMaxLength] of WideChar;
   {The file handle for the event log while it is open.}
   EventLogFileHandle: THandle;
-  EventLogLocked: Integer; //1 = Locked
+  EventLogLock: TSimpleLock;
 
   {The expected memory leaks list}
   ExpectedMemoryLeaks: PExpectedMemoryLeaks;
-  ExpectedMemoryLeaksListLocked: Integer; //1 = Locked
+  ExpectedMemoryLeaksListLock: TSimpleLock;
 
 {$ifdef MSWindows}
   {A string uniquely identifying the current process (for sharing the memory manager between DLLs and the main
@@ -2722,6 +2734,24 @@ end;
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
   Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+end;
+
+
+{------------------------------------------}
+{--------TSimpleLock implementation--------}
+{------------------------------------------}
+
+procedure TSimpleLock.Lock;
+begin
+  {If it is unable to acquire the lock it will release the thread's timeslice and then try again until it succeeds.}
+  while AtomicCmpExchange(FLock, 1, 0) <> 0 do
+    OS_AllowOtherThreadToRun;
+end;
+
+procedure TSimpleLock.Unlock;
+begin
+  {Need a memory fence for ARM here.}
+  FLock := 0;
 end;
 
 
@@ -3709,17 +3739,6 @@ begin
   end;
 end;
 
-procedure LockEventLog;
-begin
-  while AtomicCmpExchange(EventLogLocked, 1, 0) <> 0 do
-    OS_AllowOtherThreadToRun;
-end;
-
-procedure UnlockEventLog;
-begin
-  EventLogLocked := 0;
-end;
-
 function EventLogFileIsOpen: Boolean;
 begin
   Result := EventLogFileHandle <> INVALID_HANDLE_VALUE;
@@ -3851,7 +3870,7 @@ begin
   {Log the message to file, if needed.}
   if AEventType in FastMM_LogToFileEvents then
   begin
-    LockEventLog;
+    EventLogLock.Lock;
     try
       LEventLogFileWasOpen := EventLogFileIsOpen;
 
@@ -3861,7 +3880,7 @@ begin
       if not LEventLogFileWasOpen then
         CloseEventLogFile;
     finally
-      UnlockEventLog;
+      EventLogLock.Unlock;
     end;
   end;
 
@@ -3874,11 +3893,11 @@ begin
   begin
     {Ensure that the event log file is closed before showing any dialogs, so the user can access it while the dialog is
     displayed.}
-    LockEventLog;
+    EventLogLock.Lock;
     try
       CloseEventLogFile;
     finally
-      UnlockEventLog;
+      EventLogLock.Unlock;
     end;
 
     OS_ShowMessageBox(LPBodyStart, LPMessageBoxCaption);
@@ -9736,12 +9755,12 @@ begin
   end;
 end;
 
-{Locks the expected leaks.  Returns False if the list could not be allocated.}
-function LockExpectedMemoryLeaksList: Boolean;
+{Locks the expected leaks and then allocates the list if it has not already been allocated.  Returns False if the
+ExpectedMemoryLeaks list could not be allocated, True otherwise.}
+function LockAndAllocateExpectedMemoryLeaksList: Boolean;
 begin
   {Lock the expected leaks list}
-  while AtomicCmpExchange(ExpectedMemoryLeaksListLocked, 1, 0) <> 0 do
-    OS_AllowOtherThreadToRun;
+  ExpectedMemoryLeaksListLock.Lock;
 
   {Allocate the list if it does not exist}
   if ExpectedMemoryLeaks = nil then
@@ -9762,9 +9781,9 @@ begin
   LNewEntry.LeakSize := 0;
   LNewEntry.LeakCount := 1;
   {Add it to the correct list}
-  Result := LockExpectedMemoryLeaksList
+  Result := LockAndAllocateExpectedMemoryLeaksList
     and UpdateExpectedLeakList(@ExpectedMemoryLeaks.FirstEntryByAddress, @LNewEntry);
-  ExpectedMemoryLeaksListLocked := 0;
+  ExpectedMemoryLeaksListLock.Unlock;
 end;
 
 function FastMM_RegisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean;
@@ -9777,9 +9796,9 @@ begin
   LNewEntry.LeakSize := ALeakedObjectClass.InstanceSize;
   LNewEntry.LeakCount := ACount;
   {Add it to the correct list}
-  Result := LockExpectedMemoryLeaksList
+  Result := LockAndAllocateExpectedMemoryLeaksList
     and UpdateExpectedLeakList(@ExpectedMemoryLeaks.FirstEntryByClass, @LNewEntry);
-  ExpectedMemoryLeaksListLocked := 0;
+  ExpectedMemoryLeaksListLock.Unlock;
 end;
 
 function FastMM_RegisterExpectedMemoryLeak(ALeakedBlockSize: NativeInt; ACount: Integer = 1): Boolean;
@@ -9792,9 +9811,9 @@ begin
   LNewEntry.LeakSize := ALeakedBlockSize;
   LNewEntry.LeakCount := ACount;
   {Add it to the correct list}
-  Result := LockExpectedMemoryLeaksList
+  Result := LockAndAllocateExpectedMemoryLeaksList
     and UpdateExpectedLeakList(@ExpectedMemoryLeaks.FirstEntryBySizeOnly, @LNewEntry);
-  ExpectedMemoryLeaksListLocked := 0;
+  ExpectedMemoryLeaksListLock.Unlock;
 end;
 
 function FastMM_UnregisterExpectedMemoryLeak(ALeakedPointer: Pointer): Boolean;
@@ -9807,9 +9826,9 @@ begin
   LNewEntry.LeakSize := 0;
   LNewEntry.LeakCount := -1;
   {Remove it from the list}
-  Result := LockExpectedMemoryLeaksList
+  Result := LockAndAllocateExpectedMemoryLeaksList
     and UpdateExpectedLeakList(@ExpectedMemoryLeaks.FirstEntryByAddress, @LNewEntry);
-  ExpectedMemoryLeaksListLocked := 0;
+  ExpectedMemoryLeaksListLock.Unlock;
 end;
 
 function FastMM_UnregisterExpectedMemoryLeak(ALeakedObjectClass: TClass; ACount: Integer = 1): Boolean;
@@ -9851,7 +9870,7 @@ begin
     Exit;
 
   try
-    if LockExpectedMemoryLeaksList then
+    if LockAndAllocateExpectedMemoryLeaksList then
     begin
       {Add all registered leak entries to the array}
       AddEntries(ExpectedMemoryLeaks.FirstEntryByAddress);
@@ -9860,7 +9879,7 @@ begin
     end;
   finally
     {This must be protected by a try...finally since the array allocations above may fail in a low memory scenario.}
-    ExpectedMemoryLeaksListLocked := 0;
+    ExpectedMemoryLeaksListLock.Unlock;
   end;
 end;
 
@@ -10190,22 +10209,11 @@ begin
   end;
 end;
 
-procedure LockAlignmentRequestCounters;
-begin
-  while AtomicCmpExchange(AlignmentRequestCountersLocked, 1, 0) <> 0 do
-    OS_AllowOtherThreadToRun;
-end;
-
-procedure UnlockAlignmentRequestCounters;
-begin
-  AlignmentRequestCountersLocked := 0;
-end;
-
 procedure FastMM_EnterMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_MinimumAddressAlignment);
 var
   LOldMinimumAlignment: TFastMM_MinimumAddressAlignment;
 begin
-  LockAlignmentRequestCounters;
+  AlignmentRequestCountersLock.Lock;
   try
     LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
     Inc(AlignmentRequestCounters[AMinimumAddressAlignment]);
@@ -10214,7 +10222,7 @@ begin
     if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
       FastMM_BuildSmallBlockTypeLookupTable;
   finally
-    UnlockAlignmentRequestCounters;
+    AlignmentRequestCountersLock.Unlock;
   end;
 end;
 
@@ -10222,7 +10230,7 @@ procedure FastMM_ExitMinimumAddressAlignment(AMinimumAddressAlignment: TFastMM_M
 var
   LOldMinimumAlignment: TFastMM_MinimumAddressAlignment;
 begin
-  LockAlignmentRequestCounters;
+  AlignmentRequestCountersLock.Lock;
   try
     LOldMinimumAlignment := FastMM_GetCurrentMinimumAddressAlignment;
     Dec(AlignmentRequestCounters[AMinimumAddressAlignment]);
@@ -10231,7 +10239,7 @@ begin
     if LOldMinimumAlignment <> FastMM_GetCurrentMinimumAddressAlignment then
       FastMM_BuildSmallBlockTypeLookupTable;
   finally
-    UnlockAlignmentRequestCounters;
+    AlignmentRequestCountersLock.Unlock;
   end;
 end;
 
@@ -10609,20 +10617,15 @@ begin
   Result := CurrentInstallationState;
 end;
 
-function FastMM_SetNormalOrDebugMemoryManager: Boolean;
+{Configures the appropriate entry points for each of the memory manager functions according to the current settings,
+e.g. whether debug or normal mode is in effect.}
+function FastMM_SetMemoryManagerEntryPoints: Boolean;
 var
   LNewMemoryManager: TMemoryManagerEx;
 begin
-  {SetMemoryManager is not thread safe.}
-  while AtomicCmpExchange(SettingMemoryManager, 1, 0) <> 0 do
-    OS_AllowOtherThreadToRun;
-
   {Check that the memory manager has not been changed since the last time it was set.}
   if FastMM_InstalledMemoryManagerChangedExternally then
-  begin
-    SettingMemoryManager := 0;
     Exit(False);
-  end;
 
   {Debug mode or normal memory manager?}
   if DebugModeCounter <= 0 then
@@ -10653,8 +10656,6 @@ begin
   SetMemoryManager(LNewMemoryManager);
   InstalledMemoryManager := LNewMemoryManager;
 
-  SettingMemoryManager := 0;
-
   Result := True;
 end;
 
@@ -10683,7 +10684,7 @@ begin
     Exit;
   end;
 
-  if FastMM_SetNormalOrDebugMemoryManager then
+  if FastMM_SetMemoryManagerEntryPoints then
   begin
     CurrentInstallationState := mmisInstalled;
 
@@ -10792,33 +10793,45 @@ end;
 
 function FastMM_EnterDebugMode: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicIncrement(DebugModeCounter) = 1 then
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
     begin
-      if not DebugSupportConfigured then
-        FastMM_ConfigureDebugMode;
+      Inc(DebugModeCounter);
+      if DebugModeCounter = 1 then
+      begin
+        if not DebugSupportConfigured then
+          FastMM_ConfigureDebugMode;
 
-      Result := FastMM_SetNormalOrDebugMemoryManager;
+        Result := FastMM_SetMemoryManagerEntryPoints;
+      end
+      else
+        Result := True;
     end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_ExitDebugMode: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicDecrement(DebugModeCounter) = 0 then
-      Result := FastMM_SetNormalOrDebugMemoryManager
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
+    begin
+      Dec(DebugModeCounter);
+      if DebugModeCounter = 0 then
+        Result := FastMM_SetMemoryManagerEntryPoints
+      else
+        Result := True;
+    end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_DebugModeActive: Boolean;
@@ -10841,28 +10854,40 @@ end;
 
 function FastMM_BeginEraseAllocatedBlockContent: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicIncrement(EraseAllocatedBlockContentCounter) = 1 then
-      Result := FastMM_SetNormalOrDebugMemoryManager
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
+    begin
+      Inc(EraseAllocatedBlockContentCounter);
+      if EraseAllocatedBlockContentCounter = 1 then
+        Result := FastMM_SetMemoryManagerEntryPoints
+      else
+        Result := True;
+    end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_EndEraseAllocatedBlockContent: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicDecrement(EraseAllocatedBlockContentCounter) = 0 then
-      Result := FastMM_SetNormalOrDebugMemoryManager
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
+    begin
+      Dec(EraseAllocatedBlockContentCounter);
+      if EraseAllocatedBlockContentCounter = 0 then
+        Result := FastMM_SetMemoryManagerEntryPoints
+      else
+        Result := True;
+    end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_EraseAllocatedBlockContentActive: Boolean;
@@ -10872,28 +10897,40 @@ end;
 
 function FastMM_BeginEraseFreedBlockContent: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicIncrement(EraseFreedBlockContentCounter) = 1 then
-      Result := FastMM_SetNormalOrDebugMemoryManager
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
+    begin
+      Inc(EraseFreedBlockContentCounter);
+      if EraseFreedBlockContentCounter = 1 then
+        Result := FastMM_SetMemoryManagerEntryPoints
+      else
+        Result := True;
+    end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_EndEraseFreedBlockContent: Boolean;
 begin
-  if CurrentInstallationState = mmisInstalled then
-  begin
-    if AtomicDecrement(EraseFreedBlockContentCounter) = 0 then
-      Result := FastMM_SetNormalOrDebugMemoryManager
+  SetMemoryManagerLock.Lock;
+  try
+    if CurrentInstallationState = mmisInstalled then
+    begin
+      Dec(EraseFreedBlockContentCounter);
+      if EraseFreedBlockContentCounter = 0 then
+        Result := FastMM_SetMemoryManagerEntryPoints
+      else
+        Result := True;
+    end
     else
-      Result := True;
-  end
-  else
-    Result := False;
+      Result := False;
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
 end;
 
 function FastMM_EraseFreedBlockContentActive: Boolean;
@@ -10969,7 +11006,7 @@ var
   LModuleFilename: array[0..CFilenameMaxLength] of WideChar;
   LPModuleFilenamePos, LPModuleFilenameStart, LPModuleFilenameEnd, LPBufferPos, LPBufferEnd: PWideChar;
 begin
-  LockEventLog;
+  EventLogLock.Lock;
   try
     CloseEventLogFile;
 
@@ -11016,7 +11053,7 @@ begin
     LPBufferPos := AppendTextToBuffer(CLogFileExtension, LPBufferPos, LPBufferEnd);
     LPBufferPos^ := #0;
   finally
-    UnlockEventLog;
+    EventLogLock.Unlock;
   end;
 end;
 
@@ -11026,7 +11063,7 @@ var
 begin
   if APEventLogFilename <> nil then
   begin
-    LockEventLog;
+    EventLogLock.Lock;
     try
       CloseEventLogFile;
 
@@ -11034,7 +11071,7 @@ begin
       LPBufferPos := AppendTextToBuffer(APEventLogFilename, @EventLogFilename, LPBufferEnd);
       LPBufferPos^ := #0;
     finally
-      UnlockEventLog;
+      EventLogLock.Unlock;
     end;
   end
   else
@@ -11048,13 +11085,13 @@ end;
 
 function FastMM_DeleteEventLogFile: Boolean;
 begin
-  LockEventLog;
+  EventLogLock.Lock;
   try
     CloseEventLogFile;
 
     Result := OS_DeleteFile(@EventLogFilename);
   finally
-    UnlockEventLog;
+    EventLogLock.Unlock;
   end;
 end;
 
