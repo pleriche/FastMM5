@@ -53,6 +53,9 @@ Change log:
   - Made LogStackTrace thread safe.
  Version 1.70 (19 July 2025)
   - Invalidate the memory map cache when a library is loaded or unloaded.
+ Version 1.71 (29 April 2026)
+  - Reduce the number of false positives in the 64-bit stack tracing code by skipping opcodes that are only valid in
+    32-bit mode.
 
 }
 
@@ -520,12 +523,14 @@ begin
           Result := True;
           Exit;
         end;
+{$ifndef CPUX64} //The 9A cp opcode is not valid in 64-bit mode
         {7 bytes, CALL FAR $1234:12345678}
         if (LCode8Back and $0000FF00) = $00009A00 then
         begin
           Result := True;
           Exit;
         end;
+{$endif}
         {Not a valid call site}
         Result := False;
       except
