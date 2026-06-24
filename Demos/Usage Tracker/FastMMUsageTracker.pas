@@ -512,7 +512,7 @@ var
         VirtualQuery(Pointer(NativeUInt(LRegionStartIndex) * CRegionSize), LMBI, SizeOf(LMBI));
         if LMBI.State = MEM_COMMIT then
         begin
-          if GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0 then
+          if GetModuleFileName(NativeUInt(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0 then
           begin
             if NativeUInt(LMBI.AllocationBase) = SysInit.HInstance then
               LChunkState := csExSysExe
@@ -548,7 +548,7 @@ var
     begin
       with sgVMDump do
       begin
-        Cells[0, LI_I] := IntToHex(Integer(LR_Info.BaseAddress), 8);
+        Cells[0, LI_I] := IntToHex(NativeInt(LR_Info.BaseAddress), 8);
         Cells[1, LI_I] := IntToStr(LR_Info.RegionSize);
         Cells[3, LI_I] := IntToHex(Integer(LR_Info.Protect), 8);
         case LR_Info.State of
@@ -556,9 +556,9 @@ var
           MEM_Commit:
             begin
               LU_MEM_COMMIT := LU_MEM_COMMIT + LR_Info.RegionSize;
-              if (GetModuleFileName(dword(LR_Info.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+              if (GetModuleFileName(NativeUInt(LR_Info.AllocationBase), LA_Char, MAX_PATH) <> 0) then
               begin
-                if DWord(LR_Info.AllocationBase) = SysInit.HInstance then
+                if NativeUInt(LR_Info.AllocationBase) = SysInit.HInstance then
                   Cells[2, LI_I] := 'Exe'
                 else
                   Cells[2, LI_I] := 'DLL';
@@ -1029,7 +1029,7 @@ begin
       begin
         eState.Text := 'System Exe';
         VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+        if (GetModuleFileName(NativeUInt(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
         begin
           eDLLName.Text := LA_Char;
         end;
@@ -1039,7 +1039,7 @@ begin
       begin
         eState.Text := 'System/User DLL';
         VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+        if (GetModuleFileName(NativeUInt(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
         begin
           eDLLName.Text := LA_Char;
         end;
