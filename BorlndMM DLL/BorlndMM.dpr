@@ -114,6 +114,7 @@ exports
   HeapAddRef name '@Borlndmm@HeapAddRef$qqrv',
   {Export additional calls in order to make FastMM specific functionality available to the application and/or library.}
   FastMM_WalkBlocks,
+  FastMM_ProcessAllPendingFrees,
   FastMM_ScanDebugBlocksForCorruption,
   FastMM_GetUsageSummary,
   FastMM_LogStateToFile,
