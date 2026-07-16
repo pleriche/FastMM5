@@ -5201,6 +5201,60 @@ begin
 
 end;
 
+{In debug mode free medium blocks are not coalesced, so the size of a free block can never equal the size of the span
+and an explicit scan of all the blocks in the span is required in order to determine whether the entire span is free.
+Returns True if every block in the span is flagged as free.  The medium block manager must be locked.}
+function MediumBlockSpanAllBlocksFree(APMediumBlockManager: PMediumBlockManager;
+  APMediumBlockSpan: PMediumBlockSpanHeader): Boolean;
+var
+  LPBlock: Pointer;
+  LBlockSize, LOffset: Integer;
+begin
+  {The current sequential feed span contains an unfed region without valid block headers, so it cannot be considered
+  fully free until it has been fed to the end.}
+  if (APMediumBlockManager.SequentialFeedMediumBlockSpan = APMediumBlockSpan)
+    and (APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue > CMediumBlockSpanHeaderSize) then
+    Exit(False);
+
+  LOffset := CMediumBlockSpanHeaderSize;
+  while LOffset < APMediumBlockSpan.SpanSize do
+  begin
+    LPBlock := Pointer(PByte(APMediumBlockSpan) + LOffset);
+    if not BlockIsFree(LPBlock) then
+      Exit(False);
+    LBlockSize := GetMediumBlockSize(LPBlock);
+    {Guard against a corrupted block header causing an endless loop.}
+    if LBlockSize <= 0 then
+      Exit(False);
+    Inc(LOffset, LBlockSize);
+  end;
+
+  Result := True;
+end;
+
+{Removes all the binned free blocks of the span from their bins, in preparation for releasing the span back to the
+operating system.  All blocks in the span must be free (see MediumBlockSpanAllBlocksFree).  Free blocks smaller than
+CMinimumMediumBlockSize are never binned, and APSkipBlock (the block currently being freed) has not been binned yet.
+The medium block manager must be locked.}
+procedure RemoveMediumBlockSpanBlocksFromBins(APMediumBlockManager: PMediumBlockManager;
+  APMediumBlockSpan: PMediumBlockSpanHeader; APSkipBlock: Pointer);
+var
+  LPBlock: Pointer;
+  LBlockSize, LOffset: Integer;
+begin
+  LOffset := CMediumBlockSpanHeaderSize;
+  while LOffset < APMediumBlockSpan.SpanSize do
+  begin
+    LPBlock := Pointer(PByte(APMediumBlockSpan) + LOffset);
+    LBlockSize := GetMediumBlockSize(LPBlock);
+    if LBlockSize <= 0 then
+      Break;
+    if (LPBlock <> APSkipBlock) and (LBlockSize >= CMinimumMediumBlockSize) then
+      RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPBlock);
+    Inc(LOffset, LBlockSize);
+  end;
+end;
+
 {Subroutine for FastMM_FreeMem_FreeMediumBlock.  The medium block manager must already be locked.  Optionally unlocks the
 medium block manager before exit.  Returns 0 on success, -1 on failure.}
 function FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(APMediumBlockManager: PMediumBlockManager;
@@ -5209,10 +5263,15 @@ var
   LPPreviousMediumBlockSpan, LPNextMediumBlockSpan: PMediumBlockSpanHeader;
   LBlockSize, LNextBlockSize, LPreviousBlockSize: Integer;
   LPNextMediumBlock: Pointer;
+  LDebugModeActive, LEntireSpanFree: Boolean;
 begin
   LBlockSize := GetMediumBlockSize(APMediumBlock);
 
-  if DebugModeCounter <= 0 then
+  {Snapshot the debug mode state:  Another thread may toggle debug mode while this call is in progress, and the
+  bin management below has to be consistent with the choice made here.}
+  LDebugModeActive := DebugModeCounter > 0;
+
+  if not LDebugModeActive then
   begin
     {Combine with the next block, if it is free.}
     LPNextMediumBlock := Pointer(PByte(APMediumBlock) + LBlockSize);
@@ -5239,17 +5298,25 @@ begin
     {Outside of debug mode medium blocks are combined, so debug info will be lost.}
     SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock, LBlockSize, True, False);
 
+    {With coalescing the entire span is free when the combined block spans it completely.}
+    LEntireSpanFree := LBlockSize = (APMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize);
+
   end
   else
   begin
     {Medium blocks are not coalesced in debug mode, so just flag the block as free and leave the debug info flag as-is.}
     SetBlockIsFreeFlag(APMediumBlock, True);
+
+    {Without coalescing the block size can never span the entire span, so all the blocks in the span have to be
+    checked explicitly.  Without this check spans would never be released back to the operating system in debug mode,
+    causing unbounded growth of the committed address space under multithreaded churn.}
+    LEntireSpanFree := MediumBlockSpanAllBlocksFree(APMediumBlockManager, APMediumBlockSpan);
   end;
 
   {Is the entire medium block span free?  Normally the span will be freed, but if there is not a lot of space left in
   the sequential feed span and the largest free block bin is empty then the block is binned instead (if allowed by the
   optimization strategy).}
-  if (LBlockSize <> (APMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize))
+  if (not LEntireSpanFree)
     or ((OptimizationStrategy <> mmosOptimizeForLowMemoryUsage)
       and (APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue < CMaximumMediumBlockSize)
       and (APMediumBlockManager.MediumBlockBinBitmaps[CMediumBlockBinGroupCount - 1] and (1 shl 31) = 0)) then
@@ -5264,6 +5331,11 @@ begin
   end
   else
   begin
+    {In debug mode the other free blocks in the span are still in the bins and must be removed before the span may be
+    released.  (The block being freed in this call has not been binned.)}
+    if LDebugModeActive then
+      RemoveMediumBlockSpanBlocksFromBins(APMediumBlockManager, APMediumBlockSpan, APMediumBlock);
+
     {Remove this medium block span from the linked list}
     LPPreviousMediumBlockSpan := APMediumBlockSpan.PreviousMediumBlockSpanHeader;
     LPNextMediumBlockSpan := APMediumBlockSpan.NextMediumBlockSpanHeader;
