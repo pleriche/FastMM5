@@ -5163,7 +5163,7 @@ begin
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
     change the sequential feed span.}
-    if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, 0,
+    if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, CMediumBlockSpanHeaderSize,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
       LSequentialFeedFreeSize := LPreviousLastSequentialFeedBlockOffset - CMediumBlockSpanHeaderSize;
@@ -8593,32 +8593,8 @@ begin
 
           if LPMediumBlockManager.SequentialFeedMediumBlockSpan = LPMediumBlockSpan then
           begin
+            {If the sequential feed span is set then the sequential feed offset can also be assumed to be valid.}
             LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
-            if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
-              LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
-
-            {It is possible that a new medium block is in the process of being split off from the sequential feed span by
-            another thread, in which case the block size may not yet be set properly.  In this case we need to wait for
-            the other thread to complete allocation of the block.}
-            LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
-            LLockWaitTimeMilliseconds := 0;
-            while (GetMediumBlockSize(LPMediumBlock) = 0)
-              and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
-            begin
-              OS_AllowOtherThreadToRun;
-            end;
-
-            {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
-            if GetMediumBlockSize(LPMediumBlock) = 0 then
-            begin
-              {If there was a reasonable wait time then raise an error, otherwise skip the entire span since it is not
-              possible to walk the blocks in the span without knowing the size of the first block.}
-              if ALockTimeoutMilliseconds >= 1000 then
-                System.Error(reInvalidPtr)
-              else
-                LBlockOffsetFromMediumSpanStart := LPMediumBlockSpan.SpanSize;
-            end;
-
           end
           else
             LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
@@ -8654,7 +8630,29 @@ begin
             while LBlockOffsetFromMediumSpanStart < LPMediumBlockSpan.SpanSize do
             begin
               LPMediumBlock := PByte(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart;
-              LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
+
+              {It is possible that a new medium block is in the process of being split off from the sequential feed span
+              by another thread, in which case the block size may not yet be set properly.  In this case we need to wait
+              for the other thread to complete allocation of the block.}
+              LLockWaitTimeMilliseconds := 0;
+              while True do
+              begin
+                LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
+                if LMediumBlockSize <> 0 then
+                  Break;
+
+                if not FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) then
+                  Break;
+
+                OS_AllowOtherThreadToRun;
+              end;
+
+              {Skip the rest of the span if the timeout has expired.}
+              if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+              begin
+                Result := False;
+                Break;
+              end;
 
               LBlockInfo.BlockIsFree := BlockIsFree(LPMediumBlock);
               if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
@@ -8689,9 +8687,8 @@ begin
                     begin
                       if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
                       begin
+                        {If the sequential feed span is set then the offset can be assumed to be valid.}
                         LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
-                        if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
-                          LSmallBlockOffset := CSmallBlockSpanHeaderSize;
                       end
                       else
                         LSmallBlockOffset := CSmallBlockSpanHeaderSize;
@@ -10460,7 +10457,7 @@ begin
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
 
-      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := CSmallBlockSpanHeaderSize;
       LPSmallBlockManager.BlockSize := Word(LSmallBlockSize);
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
@@ -10479,6 +10476,7 @@ begin
     {The circular list of spans is empty initially.}
     LPMediumBlockManager.FirstMediumBlockSpanHeader := PMediumBlockSpanHeader(LPMediumBlockManager);
     LPMediumBlockManager.LastMediumBlockSpanHeader := PMediumBlockSpanHeader(LPMediumBlockManager);
+    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := CMediumBlockSpanHeaderSize;
 
     {All the free block bins are empty.}
     for LBinInd := 0 to CMediumBlockBinCount - 1 do
@@ -10553,7 +10551,7 @@ begin
     FilLChar(LPMediumBlockManager.MediumBlockBinBitmaps, SizeOf(LPMediumBlockManager.MediumBlockBinBitmaps), 0);
     for LBinIndex := 0 to CMediumBlockBinCount - 1 do
       LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex] := @LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex];
-    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := 0;
+    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := CMediumBlockSpanHeaderSize;
     LPMediumBlockManager.SequentialFeedMediumBlockSpan := nil;
     LPMediumBlockManager.PendingFreeList := nil;
   end;
@@ -10568,7 +10566,7 @@ begin
       LPSmallBlockManager := @LPSmallBlockArena[LBlockTypeIndex];
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
-      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := 0;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := CSmallBlockSpanHeaderSize;
       LPSmallBlockManager.SequentialFeedSmallBlockSpan := nil;
       LPSmallBlockManager.PendingFreeList := nil;
     end;
