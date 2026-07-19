@@ -369,8 +369,10 @@ type
     AllocatedByThread: Cardinal;
     {The ID of the thread that freed the block}
     FreedByThread: Cardinal;
-    {Reserved space for future use.}
-    ReservedSpace2: Byte;
+    {Flags indicating which optional debug features (CDebugBlockFeature* bitmask) were applied to this block.  These
+    are tracked per block so that FastMM_SetDebugModeOptions may be called while debug mode is active without
+    invalidating blocks that were allocated under different settings.}
+    DebugFeatureFlags: Byte;
     {The number of entries in the allocation and free call stacks in the debug footer.}
     StackTraceEntryCount: Byte;
     {The debug block signature.  This will be CIsDebugBlockFlag if the debug block is in use, and (CIsDebugBlockFlag or
@@ -441,8 +443,12 @@ type
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
 
-  {Options that may be enabled in debug mode.}
-  TFastMM_DebugModeOption = (dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks);
+  {Options that may be enabled in debug mode.  The dmoNo* options enable a lightweight "profiling" debug mode:  Debug
+  headers (allocation numbers, thread IDs, timestamps and stack traces) are still maintained, but the expensive fill
+  patterns and/or checksum calculations are skipped.  This makes debug mode cheap enough for use in allocation
+  profiling scenarios, at the cost of reduced corruption and use-after-free detection.}
+  TFastMM_DebugModeOption = (dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks, dmoNoBlockFillPatterns,
+    dmoNoBlockCheckSums);
   TFastMM_DebugModeOptions = set of TFastMM_DebugModeOption;
 
   {The formats in which text files (e.g. the event log) may be written.  Controlled via the FastMM_TextFileEncoding
@@ -710,7 +716,14 @@ function FastMM_DebugModeActive: Boolean;
 {Gets and sets the options that should apply when debug mode is active, i.e. FastMM_DebugModeActive = True.  The initial
 default is [dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks].  If memory usage is excessive when debug mode
 is enabled consider removing the dmoNeverMergeFreeMediumBlocks option, and if that is not sufficient to reduce memory
-pressure then the dmoNeverFreeSmallBlockSpans option as well.}
+pressure then the dmoNeverFreeSmallBlockSpans option as well.
+For a lightweight "profiling" debug mode add dmoNoBlockFillPatterns and dmoNoBlockCheckSums:  Debug headers and stack
+traces are still maintained (so allocation profiling tools keep working), but the fill patterns and checksums are
+skipped, greatly reducing the per-operation overhead.  The trade-offs: without fill patterns there is no
+use-after-free/uninitialized-memory detection (and FastMM_Begin/EndEraseAllocatedBlockContent/EraseFreedBlockContent
+take precedence - blocks are still erased while those are active); without checksums header/footer corruption is no
+longer detected.  The options are tracked per block, so they may be changed while debug mode is active - existing
+blocks retain the features they were allocated with.}
 function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
 procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
 
@@ -1610,6 +1623,13 @@ const
   CDebugBlockFooterCheckSumSize = SizeOf(Cardinal);
   CDebugBlockFooterReservedSpaceForFreeMediumBlock = SizeOf(Integer);
 
+  {TFastMM_DebugBlockHeader.DebugFeatureFlags bitmask values.}
+  {The block carries valid header and footer checksums.}
+  CDebugBlockFeatureCheckSums = 1;
+  {The user area of the block has been filled with the debug pattern.  (Only ever consulted for freed blocks, where an
+  intact fill pattern is used to detect writes to the block after it was freed.)}
+  CDebugBlockFeatureFillPattern = 2;
+
   CSmallBlockSpanHeaderSize = SizeOf(TSmallBlockSpanHeader);
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
 
@@ -1797,6 +1817,12 @@ var
   ApplyDebugModeOptions call.}
   MayFreeSmallBlockSpans: Boolean = True;
   MayMergeFreeMediumBlocks: Boolean = True;
+  {Whether newly allocated/freed debug blocks get the debug fill patterns and header/footer checksums.  Disabled via
+  the dmoNoBlockFillPatterns and dmoNoBlockCheckSums debug mode options ("profiling mode").  These flags only apply to
+  new operations - the features actually applied to each block are recorded in its TFastMM_DebugBlockHeader.
+  DebugFeatureFlags, which is what all verification code consults.}
+  UseDebugBlockFillPatterns: Boolean = True;
+  UseDebugBlockCheckSums: Boolean = True;
 
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
@@ -4225,6 +4251,10 @@ end;
 (optionally) logs and/or displays the error and returns False.}
 function CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
 begin
+  {Blocks allocated with the dmoNoBlockCheckSums option do not carry checksums, so there is nothing to verify.}
+  if APDebugBlockHeader.DebugFeatureFlags and CDebugBlockFeatureCheckSums = 0 then
+    Exit(True);
+
   if APDebugBlockHeader.CalculateHeaderCheckSum <> APDebugBlockHeader.HeaderCheckSum then
   begin
     LogDebugBlockHeaderInvalid(APDebugBlockHeader);
@@ -4512,7 +4542,8 @@ end;
 function CheckFreeDebugBlockIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
 begin
   Result := CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader)
-    and CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader);
+    and ((APDebugBlockHeader.DebugFeatureFlags and CDebugBlockFeatureFillPattern = 0)
+      or CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader));
 end;
 
 procedure EnsureEmergencyReserveAddressSpaceAllocated;
@@ -4579,14 +4610,23 @@ begin
     FastMM_GetStackTrace(LPActualBlock.DebugFooter_FreeStackTracePtr, LPActualBlock.StackTraceEntryCount, CFastMM_StackTrace_SkipFrames_FreeMem);
   LPActualBlock.PreviouslyUsedByClass := PPointer(APointer)^;
 
-  {Fill the user area of the block with the debug pattern.}
-  FillFreedDebugBlockWithDebugPattern(LPActualBlock);
+  {Fill the user area of the block with the debug pattern, recording in the header whether that was done so that the
+  fill pattern is only verified on reuse if it was actually applied.  While FastMM_BeginEraseFreedBlockContent is
+  active the block is always filled, even if the dmoNoBlockFillPatterns option is enabled.}
+  if UseDebugBlockFillPatterns or EraseFreedBlockContentActive then
+  begin
+    FillFreedDebugBlockWithDebugPattern(LPActualBlock);
+    LPActualBlock.DebugFeatureFlags := LPActualBlock.DebugFeatureFlags or CDebugBlockFeatureFillPattern;
+  end
+  else
+    LPActualBlock.DebugFeatureFlags := LPActualBlock.DebugFeatureFlags and (not CDebugBlockFeatureFillPattern);
 
   {The block is now free.}
   LPActualBlock.DebugBlockFlags := CIsDebugBlockFlag or CBlockIsFreeFlag;
 
-  {Update the header and footer checksums}
-  LPActualBlock.CalculateAndSetHeaderAndFooterCheckSums;
+  {Update the header and footer checksums, if the block carries checksums.}
+  if LPActualBlock.DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
+    LPActualBlock.CalculateAndSetHeaderAndFooterCheckSums;
 
   {Restore the debug information flag.}
   SetBlockHasDebugInfo(LPActualBlock, True);
@@ -4623,7 +4663,8 @@ begin
 
     {Update the user block size and set the new header checksum.  The footer checksum should be unchanged.}
     LPActualBlock.UserSize := ANewSize;
-    LPActualBlock.HeaderCheckSum := LPActualBlock.CalculateHeaderCheckSum;
+    if LPActualBlock.DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
+      LPActualBlock.HeaderCheckSum := LPActualBlock.CalculateHeaderCheckSum;
 
     {Move the debug footer just beyond the new user size.}
     LPNewFooter := LPActualBlock.DebugFooterPtr;
@@ -4646,7 +4687,8 @@ begin
 
       {Set the user size in the header for the new block and calculate the new header checksum.}
       PFastMM_DebugBlockHeader(Result).UserSize := ANewSize;
-      PFastMM_DebugBlockHeader(Result).HeaderCheckSum := PFastMM_DebugBlockHeader(Result).CalculateHeaderCheckSum;
+      if PFastMM_DebugBlockHeader(Result).DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
+        PFastMM_DebugBlockHeader(Result).HeaderCheckSum := PFastMM_DebugBlockHeader(Result).CalculateHeaderCheckSum;
 
       {Move the debug footer over to the end of the user data.}
       LPOldFooter := LPActualBlock.DebugFooterPtr;
@@ -4686,11 +4728,15 @@ begin
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
     Exit;
 
-  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
+  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.  (Blocks without
+  checksums cannot be validated, but the block status flags above already matched a freed debug block.)}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
-  LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
-  if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit;
+  if LPDebugBlockHeader.DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
+  begin
+    LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
+    if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
+      Exit;
+  end;
 
   LTokenValues := Default(TEventLogTokenValues);
 
@@ -8262,10 +8308,19 @@ begin
   PFastMM_DebugBlockHeader(Result).AllocatedByThread := OS_GetCurrentThreadID;
   PFastMM_DebugBlockHeader(Result).FreedByThread := 0;
   PFastMM_DebugBlockHeader(Result).DebugBlockFlags := CIsDebugBlockFlag;
-  PFastMM_DebugBlockHeader(Result).CalculateAndSetHeaderAndFooterCheckSums;
+  {Record the debug features applied to this block (must be set before the header checksum is calculated).  The fill
+  pattern feature flag is only relevant for freed blocks and is set when the block is freed.}
+  if UseDebugBlockCheckSums then
+  begin
+    PFastMM_DebugBlockHeader(Result).DebugFeatureFlags := CDebugBlockFeatureCheckSums;
+    PFastMM_DebugBlockHeader(Result).CalculateAndSetHeaderAndFooterCheckSums;
+  end
+  else
+    PFastMM_DebugBlockHeader(Result).DebugFeatureFlags := 0;
 
-  {Fill the block with the debug pattern}
-  if AFillBlockWithDebugPattern then
+  {Fill the block with the debug pattern.  While FastMM_BeginEraseAllocatedBlockContent is active the block is always
+  filled, even if the dmoNoBlockFillPatterns option is enabled.}
+  if AFillBlockWithDebugPattern and (UseDebugBlockFillPatterns or EraseAllocatedBlockContentActive) then
     FillAllocatedDebugBlockWithDebugPattern(Result);
 
   {Set the flag in the actual block header to indicate that the block contains debug information.}
@@ -8990,6 +9045,10 @@ begin
   if ABlockInfo.DebugInformation = nil then
     Exit;
 
+  {Blocks without checksums (dmoNoBlockCheckSums) cannot be checked for corruption.}
+  if ABlockInfo.DebugInformation.DebugFeatureFlags and CDebugBlockFeatureCheckSums = 0 then
+    Exit;
+
   {When a debug block is freed or reallocated the debug information header and footer is updated without locking the
   arena that owns the block.  While it is busy updating the debug information it temporarily clears the flag to indicate
   that the block contains debug information, but a race condition remains:  The user size (and consequently the header
@@ -9032,9 +9091,12 @@ begin
 
   end;
 
-  {If it is a free block, check whether it has been modified after being freed.  A free debug block should never be
-  modified while the arena is locked, so we do not have to retry this check.}
-  if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
+  {If it is a free block that was filled with the debug pattern when it was freed, check whether it has been modified
+  after being freed.  A free debug block should never be modified while the arena is locked, so we do not have to retry
+  this check.}
+  if ABlockInfo.BlockIsFree
+    and (ABlockInfo.DebugInformation.DebugFeatureFlags and CDebugBlockFeatureFillPattern <> 0)
+    and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
     System.Error(reInvalidPtr);
 end;
 
@@ -10844,6 +10906,8 @@ begin
     MayFreeSmallBlockSpans := True;
     MayMergeFreeMediumBlocks := True;
   end;
+  UseDebugBlockFillPatterns := not (dmoNoBlockFillPatterns in DebugModeOptions);
+  UseDebugBlockCheckSums := not (dmoNoBlockCheckSums in DebugModeOptions);
 end;
 
 {Configures the appropriate entry points for each of the memory manager functions according to the current settings,
