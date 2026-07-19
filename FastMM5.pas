@@ -8971,8 +8971,11 @@ begin
 
     btSmallBlock:
     begin
-      LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.BlockSize) - 1) shr CSmallBlockGranularityBits];
-      Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].AllocatedBlockCount);
+      if not ABlockInfo.BlockIsFree then
+      begin
+        LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.BlockSize) - 1) shr CSmallBlockGranularityBits];
+        Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].AllocatedBlockCount);
+      end;
     end;
 
   end;
