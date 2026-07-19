@@ -1578,6 +1578,11 @@ type
     procedure Unlock;
   end;
 
+  {-------OpenOrCreateTextFile options--------}
+
+  {What to do if the text file already exists.}
+  TTextFileAlreadyExistsAction = (faeDoNothing, faeAddLineBreak, faeTruncateFile);
+
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -2684,14 +2689,20 @@ begin
 end;
 
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
-pointer will be set to the current end of the file.}
-function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
+pointer will be set to the current end of the file.  If ATruncateExistingFile = True then the file will be truncated if
+it already existed.}
+function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle; ATruncateExistingFile: Boolean): Boolean;
 var
+  LCreationDisposition: Cardinal;
   LNewPos: Int64;
 begin
   {Try to open/create the file in read/write mode.}
-  AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
-    FILE_ATTRIBUTE_NORMAL, 0);
+  if ATruncateExistingFile then
+    LCreationDisposition := CREATE_ALWAYS
+  else
+    LCreationDisposition := OPEN_ALWAYS;
+  AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil,
+    LCreationDisposition, FILE_ATTRIBUTE_NORMAL, 0);
   if AFileHandle = INVALID_HANDLE_VALUE then
     Exit(False);
 
@@ -2839,7 +2850,7 @@ begin
     Dec(Result);
 end;
 
-function OpenOrCreateTextFile(APFileName: PWideChar; AAddLineBreakToExistingFile: Boolean;
+function OpenOrCreateTextFile(APFileName: PWideChar; AExistingFileAction: TTextFileAlreadyExistsAction;
   var AFileHandle: THandle): Boolean;
 const
   CUTF8_BOM: Cardinal = $BFBBEF;
@@ -2847,15 +2858,15 @@ const
   CLineBreakUTF8: Word = $0A0D;
   CLineBreakUTF16: Cardinal = $000A000D;
 var
-  LFileExisted: Boolean;
+  LFileHasExistingContent: Boolean;
 begin
-  LFileExisted := OS_FileExists(APFileName);
+  LFileHasExistingContent := (AExistingFileAction <> faeTruncateFile) and OS_FileExists(APFileName);
 
-  if OS_OpenOrCreateFile(APFileName, AFileHandle) then
+  if OS_OpenOrCreateFile(APFileName, AFileHandle, AExistingFileAction = faeTruncateFile) then
   begin
-    if LFileExisted then
+    if LFileHasExistingContent then
     begin
-      if AAddLineBreakToExistingFile then
+      if AExistingFileAction = faeAddLineBreak then
       begin
         if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
           OS_WriteFile(AFileHandle, @CLineBreakUTF8, SizeOf(CLineBreakUTF8))
@@ -3752,7 +3763,7 @@ end;
 
 function OpenEventLogFile: Boolean;
 begin
-  Result := EventLogFileIsOpen or OpenOrCreateTextFile(@EventLogFilename, True, EventLogFileHandle);
+  Result := EventLogFileIsOpen or OpenOrCreateTextFile(@EventLogFilename, faeAddLineBreak, EventLogFileHandle);
 end;
 
 procedure CloseEventLogFile;
@@ -9395,6 +9406,7 @@ var
   LPNode: PMemoryLogNode;
   LFileHandle: THandle;
   LSortCompare: TMemoryLogNode_SortCompare;
+  LExistingFileAction: TTextFileAlreadyExistsAction;
 begin
   {Get the current memory manager usage summary.}
   LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
@@ -9489,10 +9501,12 @@ begin
         LPStateLogPos := AppendTextToBuffer(APAdditionalDetails, LPStateLogPos, LPBufferEnd);
       end;
 
-      {Delete the old file and write the new one.}
+      {Write the log file, optionally truncating it first.}
       if ATruncateFile then
-        OS_DeleteFile(APFilename);
-      if OpenOrCreateTextFile(APFilename, True, LFileHandle) then
+        LExistingFileAction := faeTruncateFile
+      else
+        LExistingFileAction := faeAddLineBreak;
+      if OpenOrCreateTextFile(APFilename, LExistingFileAction, LFileHandle) then
       begin
         Result := AppendTextFile(LFileHandle, LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
         OS_CloseFile(LFileHandle);
