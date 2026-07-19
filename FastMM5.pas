@@ -1587,6 +1587,7 @@ const
   CLargeBlockHeaderSize = SizeOf(TLargeBlockHeader);
   CDebugBlockHeaderSize = SizeOf(TFastMM_DebugBlockHeader);
   CDebugBlockFooterCheckSumSize = SizeOf(Cardinal);
+  CDebugBlockFooterReservedSpaceForFreeMediumBlock = SizeOf(Integer);
 
   CSmallBlockSpanHeaderSize = SizeOf(TSmallBlockSpanHeader);
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
@@ -4135,8 +4136,11 @@ end;
 {Calculates the size of a debug block footer, given the number of stack trace entries.}
 function CalculateDebugBlockFooterSize(AStackTraceDepth: Byte): NativeInt; inline;
 begin
-  {The debug footer consists of a dword checksum, followed by the allocation and free stack traces.}
-  Result := CDebugBlockFooterCheckSumSize + AStackTraceDepth * (2 * SizeOf(Pointer));
+  {The debug footer consists of a dword checksum, followed by the allocation and free stack traces and finally a
+  reserved dword to ensure there is enough space for free medium blocks to store their size immediately before the
+  header of the next block.}
+  Result := AStackTraceDepth * (2 * SizeOf(Pointer))
+    + (CDebugBlockFooterCheckSumSize + CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 end;
 
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
@@ -4547,7 +4551,7 @@ begin
 
     {Move the debug footer just beyond the new user size.}
     LPNewFooter := LPActualBlock.DebugFooterPtr;
-    System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+    System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize - CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 
     {Restore the debug information flag.}
     SetBlockHasDebugInfo(LPActualBlock, True);
@@ -4571,7 +4575,7 @@ begin
       {Move the debug footer over to the end of the user data.}
       LPOldFooter := LPActualBlock.DebugFooterPtr;
       LPNewFooter := PFastMM_DebugBlockHeader(Result).DebugFooterPtr;
-      System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+      System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize - CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 
       {Free the old block.}
       FastMM_FreeMem_FreeDebugBlock(APointer);
@@ -5027,10 +5031,8 @@ begin
   if ABlockIsFree then
   begin
 
-    if ABlockHasDebugInfo then
-      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CHasDebugInfoFlag + CBlockIsFreeFlag + CIsMediumBlockFlag
-    else
-      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CBlockIsFreeFlag + CIsMediumBlockFlag;
+    PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := Ord(ABlockHasDebugInfo) * CHasDebugInfoFlag
+      + (CBlockIsFreeFlag + CIsMediumBlockFlag);
 
     LPNextBlock := @PByte(APMediumBlock)[ABlockSize];
     {If the block is free then the size must also be stored just before the header of the next block.}
@@ -5043,10 +5045,8 @@ begin
   else
   begin
 
-    if ABlockHasDebugInfo then
-      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CHasDebugInfoFlag + CIsMediumBlockFlag
-    else
-      PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := CIsMediumBlockFlag;
+    PMediumBlockHeader(APMediumBlock)[-1].BlockStatusFlags := Ord(ABlockHasDebugInfo) * CHasDebugInfoFlag
+      + CIsMediumBlockFlag;
 
     LPNextBlock := @PByte(APMediumBlock)[ABlockSize];
     {Update the flag in the next block to indicate that this block is in use.  The block size is not stored before
@@ -5212,39 +5212,41 @@ var
 begin
   LBlockSize := GetMediumBlockSize(APMediumBlock);
 
-  if DebugModeCounter <= 0 then
+  {Combine with the next block, if it is free.}
+  LPNextMediumBlock := Pointer(PByte(APMediumBlock) + LBlockSize);
+  if BlockIsFree(LPNextMediumBlock) then
   begin
-    {Combine with the next block, if it is free.}
-    LPNextMediumBlock := Pointer(PByte(APMediumBlock) + LBlockSize);
-    if BlockIsFree(LPNextMediumBlock) then
+    LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
+
+    {In debug mode medium blocks are normally not merged with adjacent free blocks, but there is one exception:  If the
+    next block is below the binnable size then we need to reclaim it since (a) otherwise the application will never be
+    able to use that space again, and (b) it was split off from the end of a block (this one or a prior superblock of
+    it) so it cannot contain debug information.}
+    if (DebugModeCounter <= 0) or (LNextBlockSize < CMinimumMediumBlockSize) then
     begin
-      LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
+      {Merge the next block into this one.}
       Inc(LBlockSize, LNextBlockSize);
       if LNextBlockSize >= CMinimumMediumBlockSize then
         RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPNextMediumBlock);
     end;
-
-    {Combine with the previous block, if it is free.}
-    if PMediumBlockHeader(APMediumBlock)[-1].PreviousBlockIsFree then
-    begin
-      LPreviousBlockSize := PMediumFreeBlockFooter(APMediumBlock)[-1].MediumFreeBlockSize;
-      {This is the new current block}
-      APMediumBlock := Pointer(PByte(APMediumBlock) - LPreviousBlockSize);
-
-      Inc(LBlockSize, LPreviousBlockSize);
-      if LPreviousBlockSize >= CMinimumMediumBlockSize then
-        RemoveMediumFreeBlockFromBin(APMediumBlockManager, APMediumBlock);
-    end;
-
-    {Outside of debug mode medium blocks are combined, so debug info will be lost.}
-    SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock, LBlockSize, True, False);
-
-  end
-  else
-  begin
-    {Medium blocks are not coalesced in debug mode, so just flag the block as free and leave the debug info flag as-is.}
-    SetBlockIsFreeFlag(APMediumBlock, True);
   end;
+
+  {Combine with the previous block, if it is free and we're outside debug mode.  In debug mode we never do not merge
+  with the previous block.}
+  if PMediumBlockHeader(APMediumBlock)[-1].PreviousBlockIsFree
+    and (DebugModeCounter <= 0) then
+  begin
+    LPreviousBlockSize := PMediumFreeBlockFooter(APMediumBlock)[-1].MediumFreeBlockSize;
+
+    {Merge this block into the previous one.  The previous block becomes the new current block.}
+    APMediumBlock := Pointer(PByte(APMediumBlock) - LPreviousBlockSize);
+    Inc(LBlockSize, LPreviousBlockSize);
+    if LPreviousBlockSize >= CMinimumMediumBlockSize then
+      RemoveMediumFreeBlockFromBin(APMediumBlockManager, APMediumBlock);
+  end;
+
+  {Flag this block as free, keeping the debug info (if there is any).}
+  SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock, LBlockSize, True, BlockHasDebugInfo(APMediumBlock));
 
   {Is the entire medium block span free?  Normally the span will be freed, but if there is not a lot of space left in
   the sequential feed span and the largest free block bin is empty then the block is binned instead (if allowed by the
