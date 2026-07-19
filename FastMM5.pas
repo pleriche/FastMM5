@@ -1762,14 +1762,17 @@ var
   {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
 
-  {The difference between the number of times FastMM_EnterDebugMode has been called vs FastMM_ExitDebugMode.}
-  DebugModeCounter: Integer;
+  {Mode switch counters:  Used to keep track of the difference in the number of Enter/Exit or Begin/End calls for each
+  mode.}
+  DebugModeCounter: Integer; //FastMM_EnterDebugMode less FastMM_ExitDebugMode calls
+  EraseAllocatedBlockContentCounter: Integer; //FastMM_BeginEraseAllocatedBlockContent less FastMM_EndEraseAllocatedBlockContent calls
+  EraseFreedBlockContentCounter: Integer; //FastMM_BeginEraseFreedBlockContent less FastMM_EndEraseFreedBlockContent calls
 
-  {The difference between the number of times FastMM_BeginEraseAllocatedBlockContent has been called vs FastMM_EndEraseAllocatedBlockContent.}
-  EraseAllocatedBlockContentCounter: Integer;
-
-  {The difference between the number of times FastMM_BeginEraseFreedBlockContent has been called vs FastMM_EndEraseFreedBlockContent.}
-  EraseFreedBlockContentCounter: Integer;
+  {Boolean flags indicating which modes are currently enabled.  A transition from 0->1 or 1->0 in the counters above
+  will toggle the corresponding variables if the memory manager could be switched successfully.}
+  DebugModeActive: Boolean;
+  EraseAllocatedBlockContentActive: Boolean;
+  EraseFreedBlockContentActive: Boolean;
 
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
@@ -5238,7 +5241,7 @@ begin
     next block is below the binnable size then we need to reclaim it since (a) otherwise the application will never be
     able to use that space again, and (b) it was split off from the end of a block (this one or a prior superblock of
     it) so it cannot contain debug information.}
-    if (DebugModeCounter <= 0) or (LNextBlockSize < CMinimumMediumBlockSize) then
+    if (not DebugModeActive) or (LNextBlockSize < CMinimumMediumBlockSize) then
     begin
       {Merge the next block into this one.}
       Inc(LBlockSize, LNextBlockSize);
@@ -5247,10 +5250,9 @@ begin
     end;
   end;
 
-  {Combine with the previous block, if it is free and we're outside debug mode.  In debug mode we never do not merge
-  with the previous block.}
+  {Combine with the previous block, if it is free and we're outside debug mode.}
   if PMediumBlockHeader(APMediumBlock)[-1].PreviousBlockIsFree
-    and (DebugModeCounter <= 0) then
+    and (not DebugModeActive) then
   begin
     LPreviousBlockSize := PMediumFreeBlockFooter(APMediumBlock)[-1].MediumFreeBlockSize;
 
@@ -6657,8 +6659,8 @@ asm
 
 @SpanIsEmpty:
   {In debug mode spans are never freed.}
-  cmp DebugModeCounter, 0
-  jg @DoNotFreeSpan
+  cmp DebugModeActive, 1
+  je @DoNotFreeSpan
   {Remove this span from the circular linked list of partially free spans for the block type.}
   mov edx, TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan
   mov ebx, TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan
@@ -6690,7 +6692,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse <> 0) or (DebugModeCounter > 0) then
+  if (APSmallBlockSpan.BlocksInUse <> 0) or DebugModeActive then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
@@ -10678,6 +10680,11 @@ begin
   SetMemoryManager(LNewMemoryManager);
   InstalledMemoryManager := LNewMemoryManager;
 
+  {The new memory manager entry points have been set, so update the flags to indicate which modes are active.}
+  DebugModeActive := DebugModeCounter > 0;
+  EraseAllocatedBlockContentActive := EraseAllocatedBlockContentCounter > 0;
+  EraseFreedBlockContentActive := EraseFreedBlockContentCounter > 0;
+
   Result := True;
 end;
 
@@ -10813,52 +10820,114 @@ begin
   DebugSupportConfigured := True;
 end;
 
-function FastMM_EnterDebugMode: Boolean;
+function AdjustDebugModeCounter(ACounterAdjustment: Integer): Boolean;
 begin
   SetMemoryManagerLock.Lock;
   try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(DebugModeCounter);
-      if DebugModeCounter = 1 then
-      begin
-        if not DebugSupportConfigured then
-          FastMM_ConfigureDebugMode;
+    Inc(DebugModeCounter, ACounterAdjustment);
 
-        Result := FastMM_SetMemoryManagerEntryPoints;
-      end
-      else
-        Result := True;
+    if CurrentInstallationState <> mmisInstalled then
+      Exit(False);
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (DebugModeCounter > 0) <> DebugModeActive then
+    begin
+      if (not DebugSupportConfigured) and (DebugModeCounter > 0) then
+        FastMM_ConfigureDebugMode;
+
+      Result := FastMM_SetMemoryManagerEntryPoints;
     end
     else
-      Result := False;
+      Result := True;
+
   finally
     SetMemoryManagerLock.Unlock;
   end;
+end;
+
+function FastMM_EnterDebugMode: Boolean;
+begin
+  Result := AdjustDebugModeCounter(1);
 end;
 
 function FastMM_ExitDebugMode: Boolean;
 begin
+  Result := AdjustDebugModeCounter(-1);
+end;
+
+function FastMM_DebugModeActive: Boolean;
+begin
+  Result := DebugModeActive;
+end;
+
+function AdjustEraseAllocatedBlockContentCounter(ACounterAdjustment: Integer): Boolean;
+begin
   SetMemoryManagerLock.Lock;
   try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Dec(DebugModeCounter);
-      if DebugModeCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
+    Inc(EraseAllocatedBlockContentCounter, ACounterAdjustment);
+
+    if CurrentInstallationState <> mmisInstalled then
+      Exit(False);
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (EraseAllocatedBlockContentCounter > 0) <> EraseAllocatedBlockContentActive then
+      Result := FastMM_SetMemoryManagerEntryPoints
     else
-      Result := False;
+      Result := True;
+
   finally
     SetMemoryManagerLock.Unlock;
   end;
 end;
 
-function FastMM_DebugModeActive: Boolean;
+function FastMM_BeginEraseAllocatedBlockContent: Boolean;
 begin
-  Result := DebugModeCounter > 0;
+  Result := AdjustEraseAllocatedBlockContentCounter(1);
+end;
+
+function FastMM_EndEraseAllocatedBlockContent: Boolean;
+begin
+  Result := AdjustEraseAllocatedBlockContentCounter(-1);
+end;
+
+function FastMM_EraseAllocatedBlockContentActive: Boolean;
+begin
+  Result := EraseAllocatedBlockContentActive;
+end;
+
+function AdjustEraseFreedBlockContentCounter(ACounterAdjustment: Integer): Boolean;
+begin
+  SetMemoryManagerLock.Lock;
+  try
+    Inc(EraseFreedBlockContentCounter, ACounterAdjustment);
+
+    if CurrentInstallationState <> mmisInstalled then
+      Exit(False);
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (EraseFreedBlockContentCounter > 0) <> EraseFreedBlockContentActive then
+      Result := FastMM_SetMemoryManagerEntryPoints
+    else
+      Result := True;
+
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
+end;
+
+function FastMM_BeginEraseFreedBlockContent: Boolean;
+begin
+  Result := AdjustEraseFreedBlockContentCounter(1);
+end;
+
+function FastMM_EndEraseFreedBlockContent: Boolean;
+begin
+  Result := AdjustEraseFreedBlockContentCounter(-1);
+end;
+
+function FastMM_EraseFreedBlockContentActive: Boolean;
+begin
+  Result := EraseFreedBlockContentActive;
 end;
 
 function FastMM_GetDebugModeStackTraceEntryCount: Byte;
@@ -10872,92 +10941,6 @@ begin
     AStackTraceEntryCount := CFastMM_StackTrace_MaximumEntryCount;
 
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
-end;
-
-function FastMM_BeginEraseAllocatedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(EraseAllocatedBlockContentCounter);
-      if EraseAllocatedBlockContentCounter = 1 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EndEraseAllocatedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Dec(EraseAllocatedBlockContentCounter);
-      if EraseAllocatedBlockContentCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EraseAllocatedBlockContentActive: Boolean;
-begin
-  Result := EraseAllocatedBlockContentCounter > 0;
-end;
-
-function FastMM_BeginEraseFreedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(EraseFreedBlockContentCounter);
-      if EraseFreedBlockContentCounter = 1 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EndEraseFreedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Dec(EraseFreedBlockContentCounter);
-      if EraseFreedBlockContentCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EraseFreedBlockContentActive: Boolean;
-begin
-  Result := EraseFreedBlockContentCounter > 0;
 end;
 
 procedure FastMM_ApplyConditionalDefines;
