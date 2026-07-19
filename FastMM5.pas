@@ -9024,9 +9024,9 @@ begin
 
   if not ABlockInfo.BlockIsFree then
   begin
-    LStartChunkIndex := NativeUInt(ABlockInfo.UserData) shr 16;
+    LStartChunkIndex := NativeUInt(ABlockInfo.BlockAddress) shr 16;
 
-    LEndChunkIndex := LStartChunkIndex + NativeUInt(ABlockInfo.BlockSize shr 16);
+    LEndChunkIndex := LStartChunkIndex + NativeUInt(ABlockInfo.BlockSize - 1) shr 16;
     if LEndChunkIndex > High(TMemoryMap) then
       LEndChunkIndex := High(TMemoryMap);
 
