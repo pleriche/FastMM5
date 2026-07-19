@@ -441,6 +441,10 @@ type
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
 
+  {Options that may be enabled in debug mode.}
+  TFastMM_DebugModeOption = (dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks);
+  TFastMM_DebugModeOptions = set of TFastMM_DebugModeOption;
+
   {The formats in which text files (e.g. the event log) may be written.  Controlled via the FastMM_TextFileEncoding
   variable.}
   TFastMM_TextFileEncoding = (
@@ -698,6 +702,13 @@ function FastMM_ExitDebugMode: Boolean;
 {Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
 FastMM_ExitDebugMode.}
 function FastMM_DebugModeActive: Boolean;
+
+{Gets and sets the options that should apply when debug mode is active, i.e. FastMM_DebugModeActive = True.  The initial
+default is [dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks].  If memory usage is excessive when debug mode
+is enabled consider removing the dmoNeverMergeFreeMediumBlocks option, and if that is not sufficient to reduce memory
+pressure then the dmoNeverFreeSmallBlockSpans option as well.}
+function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
+procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
 
 {Enables/disables the erasure of the content of newly allocated blocks.  Calls may be nested, in which case erasure is
 only disabled when the number of FastMM_EndEraseAllocatedBlockContent calls equal the number of
@@ -1773,6 +1784,14 @@ var
   DebugModeActive: Boolean;
   EraseAllocatedBlockContentActive: Boolean;
   EraseFreedBlockContentActive: Boolean;
+
+  {The options that will be enabled while debug mode is active (DebugModeActive = True).}
+  DebugModeOptions: TFastMM_DebugModeOptions = [dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks];
+
+  {Runtime configuration options that are derived from DebugModeActive and DebugModeOptions.  These are set by the
+  ApplyDebugModeOptions call.}
+  MayFreeSmallBlockSpans: Boolean = True;
+  MayMergeFreeMediumBlocks: Boolean = True;
 
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
@@ -5241,7 +5260,7 @@ begin
     next block is below the binnable size then we need to reclaim it since (a) otherwise the application will never be
     able to use that space again, and (b) it was split off from the end of a block (this one or a prior superblock of
     it) so it cannot contain debug information.}
-    if (not DebugModeActive) or (LNextBlockSize < CMinimumMediumBlockSize) then
+    if MayMergeFreeMediumBlocks or (LNextBlockSize < CMinimumMediumBlockSize) then
     begin
       {Merge the next block into this one.}
       Inc(LBlockSize, LNextBlockSize);
@@ -5252,7 +5271,7 @@ begin
 
   {Combine with the previous block, if it is free and we're outside debug mode.}
   if PMediumBlockHeader(APMediumBlock)[-1].PreviousBlockIsFree
-    and (not DebugModeActive) then
+    and MayMergeFreeMediumBlocks then
   begin
     LPreviousBlockSize := PMediumFreeBlockFooter(APMediumBlock)[-1].MediumFreeBlockSize;
 
@@ -6659,8 +6678,8 @@ asm
 
 @SpanIsEmpty:
   {In debug mode spans are never freed.}
-  cmp DebugModeActive, 1
-  je @DoNotFreeSpan
+  cmp MayFreeSmallBlockSpans, 1
+  jne @DoNotFreeSpan
   {Remove this span from the circular linked list of partially free spans for the block type.}
   mov edx, TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan
   mov ebx, TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan
@@ -6692,7 +6711,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse <> 0) or DebugModeActive then
+  if (APSmallBlockSpan.BlocksInUse <> 0) or MayFreeSmallBlockSpans then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
@@ -10641,6 +10660,22 @@ begin
   Result := CurrentInstallationState;
 end;
 
+{Sets various configuration options based on whether debug mode is enabled and the options that are enabled for debug
+mode.}
+procedure ApplyDebugModeOptions;
+begin
+  if DebugModeActive then
+  begin
+    MayFreeSmallBlockSpans := not (dmoNeverFreeSmallBlockSpans in DebugModeOptions);
+    MayMergeFreeMediumBlocks := not (dmoNeverMergeFreeMediumBlocks in DebugModeOptions);
+  end
+  else
+  begin
+    MayFreeSmallBlockSpans := True;
+    MayMergeFreeMediumBlocks := True;
+  end;
+end;
+
 {Configures the appropriate entry points for each of the memory manager functions according to the current settings,
 e.g. whether debug or normal mode is in effect.}
 function FastMM_SetMemoryManagerEntryPoints: Boolean;
@@ -10684,6 +10719,10 @@ begin
   DebugModeActive := DebugModeCounter > 0;
   EraseAllocatedBlockContentActive := EraseAllocatedBlockContentCounter > 0;
   EraseFreedBlockContentActive := EraseFreedBlockContentCounter > 0;
+
+  {Update some configuration options based on whether debug mode is enabled or not, and if enabled the options that are
+  set for debug mode.}
+  ApplyDebugModeOptions;
 
   Result := True;
 end;
@@ -10858,6 +10897,18 @@ end;
 function FastMM_DebugModeActive: Boolean;
 begin
   Result := DebugModeActive;
+end;
+
+function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
+begin
+  Result := DebugModeOptions;
+end;
+
+procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
+begin
+  DebugModeOptions := ADebugModeOptions;
+
+  ApplyDebugModeOptions;
 end;
 
 function AdjustEraseAllocatedBlockContentCounter(ACounterAdjustment: Integer): Boolean;
