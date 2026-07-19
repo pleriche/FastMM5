@@ -3027,6 +3027,11 @@ var
   LPAnsiString: PAnsiChar;
   LPUnicodeString: PWideChar;
 begin
+  {The block must have space for at least the string header and an additional two bytes (minimum of one character and
+  the trailing #0).}
+  if AAvailableSpaceInBlock < (SizeOf(StrRec) + 2) then
+    Exit(sdtNotAString);
+
   {Check that the reference count is within a reasonable range}
   if PStrRec(APMemoryBlock).refCnt > CMaxRefCount then
     Exit(sdtNotAString);
