@@ -4891,8 +4891,19 @@ begin
     begin
       LOldPendingFreeList := LPLargeBlockManager.PendingFreeList;
       PPointer(APLargeBlock)^ := LOldPendingFreeList;
-      if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LOldPendingFreeList <> APLargeBlock then
+      begin
+        if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //Optimization - the compiler does not know that System.Error does not return
+      end;
     end;
 
     Result := 0;
@@ -5381,8 +5392,20 @@ begin
     begin
       LFirstPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
       PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
-      if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LFirstPendingFreeBlock <> APMediumBlock then
+      begin
+        if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //Optimization - the compiler does not know that System.Error does not return
+      end;
+
     end;
 
     Result := 0;
@@ -6829,8 +6852,20 @@ begin
     begin
       LOldFirstFreeBlock := LPSmallBlockManager.PendingFreeList;
       PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
-      if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LOldFirstFreeBlock <> APSmallBlock then
+      begin
+        if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //The compiler does not know that System.Error does not return
+      end;
+
     end;
     Result := 0;
   end;
@@ -7841,6 +7876,15 @@ asm
 @ManagerCurrentlyLocked:
   mov eax, TSmallBlockManager(esi).PendingFreeList
   mov [edx], eax
+
+  {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+  list will still not be caught, but this may help and it is cheap.}
+  cmp eax, edx
+  jne @NotDoubleFreeAttempt
+  mov al, reInvalidPtr
+  call System.Error
+@NotDoubleFreeAttempt:
+
   lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
   jne @ManagerCurrentlyLocked
 
@@ -7926,6 +7970,15 @@ asm
 @ManagerCurrentlyLocked:
   mov rax, TSmallBlockManager(rsi).PendingFreeList
   mov [rdx], rax
+
+  {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+  list will still not be caught, but this may help and it is cheap.}
+  cmp rax, rdx
+  jne @NotDoubleFreeAttempt
+  mov cl, reInvalidPtr
+  call System.Error
+@NotDoubleFreeAttempt:
+
   lock cmpxchg TSmallBlockManager(rsi).PendingFreeList, rdx
   jne @ManagerCurrentlyLocked
 
