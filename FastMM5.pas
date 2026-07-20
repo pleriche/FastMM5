@@ -721,9 +721,10 @@ For a lightweight "profiling" debug mode add dmoNoBlockFillPatterns and dmoNoBlo
 traces are still maintained (so allocation profiling tools keep working), but the fill patterns and checksums are
 skipped, greatly reducing the per-operation overhead.  The trade-offs: without fill patterns there is no
 use-after-free/uninitialized-memory detection (and FastMM_Begin/EndEraseAllocatedBlockContent/EraseFreedBlockContent
-take precedence - blocks are still erased while those are active); without checksums header/footer corruption is no
-longer detected.  The options are tracked per block, so they may be changed while debug mode is active - existing
-blocks retain the features they were allocated with.}
+take precedence - blocks are still erased while those are active); without checksums, corruption of the debug header
+fields and stack traces is no longer detected - fixed guard values in the checksum slots still catch buffer overruns
+into the header/footer and protect the per-block feature flags themselves.  The options are tracked per block, so they
+may be changed while debug mode is active - existing blocks retain the features they were allocated with.}
 function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
 procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
 
@@ -1629,6 +1630,13 @@ const
   {The user area of the block has been filled with the debug pattern.  (Only ever consulted for freed blocks, where an
   intact fill pattern is used to detect writes to the block after it was freed.)}
   CDebugBlockFeatureFillPattern = 2;
+
+  {The value stored in the header and footer checksum slots of blocks allocated with the dmoNoBlockCheckSums option.
+  The guard values still catch buffer overruns into the debug header or footer, and they also cross-check the
+  DebugFeatureFlags byte itself:  If a corruption flips the checksums feature flag in either direction, the checksum
+  slot content no longer matches what the flag promises (a real checksum practically never equals the guard value, and
+  vice versa), so the corruption is still reported.}
+  CDebugBlockNoCheckSumsGuardValue = Cardinal($FA57B10C);
 
   CSmallBlockSpanHeaderSize = SizeOf(TSmallBlockSpanHeader);
   CMediumBlockSpanHeaderSize = SizeOf(TMediumBlockSpanHeader);
@@ -4251,9 +4259,22 @@ end;
 (optionally) logs and/or displays the error and returns False.}
 function CheckDebugBlockHeaderAndFooterCheckSumsValid(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
 begin
-  {Blocks allocated with the dmoNoBlockCheckSums option do not carry checksums, so there is nothing to verify.}
+  {Blocks allocated with the dmoNoBlockCheckSums option do not carry checksums, but their checksum slots hold fixed
+  guard values that are verified instead.}
   if APDebugBlockHeader.DebugFeatureFlags and CDebugBlockFeatureCheckSums = 0 then
+  begin
+    if APDebugBlockHeader.HeaderCheckSum <> CDebugBlockNoCheckSumsGuardValue then
+    begin
+      LogDebugBlockHeaderInvalid(APDebugBlockHeader);
+      Exit(False);
+    end;
+    if APDebugBlockHeader.DebugFooterPtr^ <> CDebugBlockNoCheckSumsGuardValue then
+    begin
+      LogDebugBlockFooterInvalid(APDebugBlockHeader);
+      Exit(False);
+    end;
     Exit(True);
+  end;
 
   if APDebugBlockHeader.CalculateHeaderCheckSum <> APDebugBlockHeader.HeaderCheckSum then
   begin
@@ -4728,13 +4749,18 @@ begin
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
     Exit;
 
-  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.  (Blocks without
-  checksums cannot be validated, but the block status flags above already matched a freed debug block.)}
+  {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.  For blocks
+  allocated with dmoNoBlockCheckSums the header guard value is verified instead of the checksum.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   if LPDebugBlockHeader.DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
   begin
     LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
     if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
+      Exit;
+  end
+  else
+  begin
+    if LPDebugBlockHeader.HeaderCheckSum <> CDebugBlockNoCheckSumsGuardValue then
       Exit;
   end;
 
@@ -8316,7 +8342,13 @@ begin
     PFastMM_DebugBlockHeader(Result).CalculateAndSetHeaderAndFooterCheckSums;
   end
   else
+  begin
+    {Without checksums the checksum slots are filled with fixed guard values:  They still catch buffer overruns into
+    the header/footer and cross-check the DebugFeatureFlags byte (see CDebugBlockNoCheckSumsGuardValue).}
     PFastMM_DebugBlockHeader(Result).DebugFeatureFlags := 0;
+    PFastMM_DebugBlockHeader(Result).HeaderCheckSum := CDebugBlockNoCheckSumsGuardValue;
+    PFastMM_DebugBlockHeader(Result).DebugFooterPtr^ := CDebugBlockNoCheckSumsGuardValue;
+  end;
 
   {Fill the block with the debug pattern.  While FastMM_BeginEraseAllocatedBlockContent is active the block is always
   filled, even if the dmoNoBlockFillPatterns option is enabled.}
@@ -9040,13 +9072,10 @@ const
   CMaxCorruptionCheckAttempts = 100; //Excessively high, but insignificant relative to the cost of a false positive
 var
   LRemainingAttempts: Integer;
+  LCheckSumsOrGuardsValid: Boolean;
 begin
   {If it is not a debug mode block then there's nothing to check.}
   if ABlockInfo.DebugInformation = nil then
-    Exit;
-
-  {Blocks without checksums (dmoNoBlockCheckSums) cannot be checked for corruption.}
-  if ABlockInfo.DebugInformation.DebugFeatureFlags and CDebugBlockFeatureCheckSums = 0 then
     Exit;
 
   {When a debug block is freed or reallocated the debug information header and footer is updated without locking the
@@ -9066,9 +9095,21 @@ begin
   LRemainingAttempts := CMaxCorruptionCheckAttempts;
   while True do
   begin
-    {Check whether the header and footers checksums are currently valid.  If they are then break out of the loop.}
-    if (ABlockInfo.DebugInformation.CalculateHeaderCheckSum = ABlockInfo.DebugInformation.HeaderCheckSum)
-      and (ABlockInfo.DebugInformation.CalculateFooterCheckSum = ABlockInfo.DebugInformation.DebugFooterPtr^) then
+    {Check whether the block header and footer are currently intact:  Blocks with checksums are verified against the
+    calculated checksums, blocks allocated with dmoNoBlockCheckSums are verified against the fixed guard values in the
+    checksum slots.  If they are intact then break out of the loop.}
+    if ABlockInfo.DebugInformation.DebugFeatureFlags and CDebugBlockFeatureCheckSums <> 0 then
+    begin
+      LCheckSumsOrGuardsValid := (ABlockInfo.DebugInformation.CalculateHeaderCheckSum = ABlockInfo.DebugInformation.HeaderCheckSum)
+        and (ABlockInfo.DebugInformation.CalculateFooterCheckSum = ABlockInfo.DebugInformation.DebugFooterPtr^);
+    end
+    else
+    begin
+      LCheckSumsOrGuardsValid := (ABlockInfo.DebugInformation.HeaderCheckSum = CDebugBlockNoCheckSumsGuardValue)
+        and (ABlockInfo.DebugInformation.DebugFooterPtr^ = CDebugBlockNoCheckSumsGuardValue);
+    end;
+
+    if LCheckSumsOrGuardsValid then
     begin
       Break;
     end;
