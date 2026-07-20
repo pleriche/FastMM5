@@ -5261,23 +5261,21 @@ var
 begin
   LBlockSize := GetMediumBlockSize(APMediumBlock);
 
-  {Combine with the next block, if it is free.}
+  {Potentially combine this block with the next block, if it is free.  In debug mode medium blocks are normally not
+  merged with adjacent free blocks, except if the next block does not contain any debug info:  Not containing debug info
+  suggests that the application was probably never handed a pointer to the block, so corruption is less likely.
+  Additionally, the block could also be below the binnable size, and if it is not reclaimed the address space may never
+  be reused.}
   LPNextMediumBlock := Pointer(PByte(APMediumBlock) + LBlockSize);
-  if BlockIsFree(LPNextMediumBlock) then
+  if BlockIsFree(LPNextMediumBlock)
+    and (MayMergeFreeMediumBlocks or (not BlockHasDebugInfo(LPNextMediumBlock))) then
   begin
     LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
 
-    {In debug mode medium blocks are normally not merged with adjacent free blocks, but there is one exception:  If the
-    next block is below the binnable size then we need to reclaim it since (a) otherwise the application will never be
-    able to use that space again, and (b) it was split off from the end of a block (this one or a prior superblock of
-    it) so it cannot contain debug information.}
-    if MayMergeFreeMediumBlocks or (LNextBlockSize < CMinimumMediumBlockSize) then
-    begin
-      {Merge the next block into this one.}
-      Inc(LBlockSize, LNextBlockSize);
-      if LNextBlockSize >= CMinimumMediumBlockSize then
-        RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPNextMediumBlock);
-    end;
+    {Merge the next block into this one.}
+    Inc(LBlockSize, LNextBlockSize);
+    if LNextBlockSize >= CMinimumMediumBlockSize then
+      RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPNextMediumBlock);
   end;
 
   {Combine with the previous block, if it is free and we're outside debug mode.}
@@ -6248,7 +6246,6 @@ begin
       1.1) The pending free list
       1.2) From the medium block free lists}
 
-
     LPMediumBlockManager := @MediumBlockManagers[0];
     while True do
     begin
@@ -6328,7 +6325,6 @@ begin
       3.2) From the existing sequential feed span
       3.3) From the pending free list
       3.4) From a new sequential feed span.}
-
 
     LPMediumBlockManager := @MediumBlockManagers[0];
     while True do
