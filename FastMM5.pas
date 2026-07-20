@@ -694,13 +694,17 @@ function FastMM_FreeDebugSupportLibrary: Boolean;
 {Enters/exits debug mode.  Calls may be nested, in which case debug mode is only exited when the number of
 FastMM_ExitDebugMode calls equal the number of FastMM_EnterDebugMode calls.  In debug mode extra metadata is logged
 before and after the user data in the block, and extra checks are performed in order to catch common programming
-errors.  Returns True on success, False if this memory manager instance is not currently installed or the installed
-memory manager has changed.  Note that debug mode comes with a severe performance penalty, and due to the extra
-metadata all blocks that are allocated while debug mode is active will use significantly more address space.}
+errors.  Returns True if the mode was changed successfully, False if this memory manager instance is not currently
+installed or the installed memory manager has changed.  Important notes:
+  1) The internal counter is updated regardless of the return value of FastMM_EnterDebugMode and FastMM_ExitDebugMode,
+  so always match the number of FastMM_EnterDebugMode and FastMM_ExitDebugMode calls inside a block of code to ensure
+  that the mode is restored to the previous state on exit.  (This also means it is safe to ignore the return value.)
+  2) Debug mode comes with a severe performance penalty, and due to the extra metadata all blocks that are allocated
+  while debug mode is active will use significantly more address space.}
 function FastMM_EnterDebugMode: Boolean;
 function FastMM_ExitDebugMode: Boolean;
 {Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
-FastMM_ExitDebugMode.}
+FastMM_ExitDebugMode and the last Enter/Exit call was successful (i.e. returned True).}
 function FastMM_DebugModeActive: Boolean;
 
 {Gets and sets the options that should apply when debug mode is active, i.e. FastMM_DebugModeActive = True.  The initial
@@ -712,26 +716,27 @@ procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions
 
 {Enables/disables the erasure of the content of newly allocated blocks.  Calls may be nested, in which case erasure is
 only disabled when the number of FastMM_EndEraseAllocatedBlockContent calls equal the number of
-FastMM_BeginEraseAllocatedBlockContent calls.  When enabled the content of all newly allocated blocks is filled with the
-debug pattern $90909090 before being passed to the application.  This may help catch application bugs involving the use
-of uninitialized memory.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
-in debug mode.}
+FastMM_BeginEraseAllocatedBlockContent calls.  Note that the internal nested call counter is updated even if these
+functions return False.  When enabled the content of all newly allocated blocks is filled with the debug pattern
+$90909090 before being passed to the application.  This may help catch application bugs involving the use of
+uninitialized memory.  It is a subset of the debug mode functionality, and is implicitly enabled in debug mode.}
 function FastMM_BeginEraseAllocatedBlockContent: Boolean;
 function FastMM_EndEraseAllocatedBlockContent: Boolean;
 {Returns True if newly allocated blocks are currently erased, i.e. FastMM_BeginEraseAllocatedBlockContent has been
-called more times than FastMM_EndEraseAllocatedBlockContent.}
+called more times than FastMM_EndEraseAllocatedBlockContent and the last Begin/End call was successful (i.e. returned
+True).}
 function FastMM_EraseAllocatedBlockContentActive: Boolean;
 
 {Enables/disables the erasure of the content of freed blocks.  Calls may be nested, in which case erasure is only
 disabled when the number of FastMM_EndEraseFreedBlockContent calls equal the number of
-FastMM_BeginEraseFreedBlockContent calls.  When enabled the content of all freed blocks is filled with the debug pattern
-$80808080 before being returned to the memory pool.  This is useful for security purposes, and may also help catch "use
-after free" programming errors.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
-in debug mode.}
+FastMM_BeginEraseFreedBlockContent calls.  Note that the internal nested call counter is updated even if these functions
+return False.  When enabled the content of all freed blocks is filled with the debug pattern $80808080 before being
+returned to the memory pool.  This is useful for security purposes, and may also help catch "use after free" programming
+errors.  It is a subset of the debug mode functionality, and is implicitly enabled in debug mode.}
 function FastMM_BeginEraseFreedBlockContent: Boolean;
 function FastMM_EndEraseFreedBlockContent: Boolean;
 {Returns True if free blocks are currently erased on free, i.e. FastMM_BeginEraseFreedBlockContent has been called more
-times than FastMM_EndEraseFreedBlockContent.}
+times than FastMM_EndEraseFreedBlockContent and the last Begin/End call was successful (i.e. returned True).}
 function FastMM_EraseFreedBlockContentActive: Boolean;
 
 {Gets/sets the depth of allocation and free stack traces in debug mode.  The minimum stack trace depth is 0, and the
