@@ -7276,10 +7276,7 @@ begin
   if BlockHasDebugInfo(Result) then
   begin
     if not CheckFreeDebugBlockIntact(Result) then
-    begin
-      APSmallBlockManager.SmallBlockManagerLocked := 0;
       System.Error(reInvalidPtr);
-    end;
 
     {Reset the debug info flag in the block.}
     SetBlockHasDebugInfo(Result, False);
