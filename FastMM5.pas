@@ -6907,16 +6907,18 @@ asm
   movzx ecx, TSmallBlockManager(esi).BlockSize
   div ecx
 
-  {Update the medium block header to indicate that this medium block serves as a small block span.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
-
   {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
   mov TSmallBlockSpanHeader(ebx).SmallBlockManager, esi
   mov TSmallBlockSpanHeader(ebx).FirstFreeBlock, 0
   mov TSmallBlockSpanHeader(ebx).TotalBlocksInSpan, eax
   mov TSmallBlockSpanHeader(ebx).BlocksInUse, eax
 
-  {This is the new sequential feed span.  This must be set before the offset is set.}
+  {Update the medium block header to indicate that this medium block serves as a small block span.  This flag must be
+  set after the small block manager pointer in the header is set in case FastMM_WalkBlocks is scanning this medium
+  block concurrently.}
+  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
+
+  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
   mov TSmallBlockManager(esi).SequentialFeedSmallBlockSpan, ebx
 
   {Get the offset of the last block in eax}
@@ -6924,7 +6926,7 @@ asm
   mul ecx
   add eax, CSmallBlockSpanHeaderSize
 
-  {Set the span up for sequential block serving}
+  {Set it up for sequential block serving.  The sequential feed span must be set before the sequential feed offset.}
   mov TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue, eax
   mov TSmallBlockManager(esi).SmallBlockManagerLocked, 0
 
@@ -6960,33 +6962,40 @@ begin
     Exit(nil);
   end;
 
-  {Update the medium block header to indicate that this medium block serves as a small block span.}
-  SetMediumBlockHeader_SetIsSmallBlockSpan(LPSmallBlockSpan, True);
-
   LSpanSize := GetMediumBlockSize(LPSmallBlockSpan);
 
-  {Set up the block span}
-  LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
-  LPSmallBlockSpan.FirstFreeBlock := nil;
-  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
-  APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
   {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header, as well
   as the difference in the medium and small block header sizes for the last block.  All the sequential feed blocks are
   initially marked as used.  This implies that the sequential feed span can never be freed until all blocks have been
   fed sequentially.}
   LTotalBlocksInSpan := (LSpanSize - (CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize))
     div APSmallBlockManager.BlockSize;
+
+  {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
+  LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
+  LPSmallBlockSpan.FirstFreeBlock := nil;
   LPSmallBlockSpan.TotalBlocksInSpan := LTotalBlocksInSpan;
   LPSmallBlockSpan.BlocksInUse := LTotalBlocksInSpan;
 
   {Memory fence required for ARM here.}
 
-  {Set it up for sequential block serving}
+  {Update the medium block header to indicate that this medium block serves as a small block span.  This flag must be
+  set after the small block manager pointer in the header is set in case FastMM_WalkBlocks is scanning this medium
+  block concurrently.}
+  SetMediumBlockHeader_SetIsSmallBlockSpan(LPSmallBlockSpan, True);
+
+  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
+  APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
+
+  {Memory fence required for ARM here.}
+
+  {Set it up for sequential block serving.  The sequential feed span must be set before the sequential feed offset.}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
   APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := LLastBlockOffset;
 
   APSmallBlockManager.SmallBlockManagerLocked := 0;
 
+  {Return the last block in the span}
   Result := PByte(LPSmallBlockSpan) + LLastBlockOffset;
 
   {Set the header for the returned block.}
