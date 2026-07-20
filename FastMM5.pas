@@ -6730,7 +6730,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse <> 0) or MayFreeSmallBlockSpans then
+  if (APSmallBlockSpan.BlocksInUse <> 0) or (not MayFreeSmallBlockSpans) then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
