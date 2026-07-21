@@ -4451,9 +4451,24 @@ begin
       LFillPatternIntact := False;
   end;
 
-  {Loop over the remaining 8 byte chunks using a negative offset.}
+  {Loop over the remaining 32 byte chunks using a negative offset.}
   Inc(LPUserArea, LByteOffset);
   LByteOffset := - LByteOffset;
+  while LByteOffset <= -32 do
+  begin
+    if (PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock)
+      or (PUInt64(@LPUserArea[LByteOffset + 8])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock)
+      or (PUInt64(@LPUserArea[LByteOffset + 16])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock)
+      or (PUInt64(@LPUserArea[LByteOffset + 24])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock) then
+    begin
+      LFillPatternIntact := False;
+      Break;
+    end;
+
+    Inc(LByteOffset, 32);
+  end;
+
+  {Loop over the remaining 8 byte chunks.}
   while LByteOffset < 0 do
   begin
     if PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock then
