@@ -4639,8 +4639,8 @@ end;
 {------------Invalid Free/realloc handling-----------}
 {----------------------------------------------------}
 
-{Always returns - 1.}
-function HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean): Integer;
+{Logs an invalid FreeMem or ReallocMem attempt, if possible.}
+procedure LogInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
 var
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
   LHeaderChecksum: NativeUInt;
@@ -4651,13 +4651,13 @@ begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
   not much that can be done to provide additional error information.}
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
-    Exit(-1);
+    Exit;
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit(-1);
+    Exit;
 
   LTokenValues := Default(TEventLogTokenValues);
 
@@ -4669,10 +4669,23 @@ begin
     LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
   else
     LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
+end;
+
+{Called by FastMM_FreeMem if APointer does not point to a block that can be freed.  Always returns -1}
+function HandleInvalidFreeMem(APointer: Pointer): Integer;
+begin
+  LogInvalidFreeMemOrReallocMem(APointer, False);
 
   Result := -1;
 end;
 
+{Called by FastMM_ReallocMem if APointer does not point to a block that can be freed.  Always returns nil.}
+function HandleInvalidReallocMem(APointer: Pointer): Pointer;
+begin
+  LogInvalidFreeMemOrReallocMem(APointer, True);
+
+  Result := nil;
+end;
 
 {-----------------------------------------}
 {--------Large block management-----------}
@@ -7912,8 +7925,7 @@ asm
   cmp edx, CIsDebugBlockFlag
   je FastMM_FreeMem_FreeDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidFreeMem
 {$else}
 
   {--------x64 Assembly language codepath---------}
@@ -8005,10 +8017,11 @@ asm
 
   cmp edx, CIsLargeBlockFlag
   je FastMM_FreeMem_FreeLargeBlock
+
   cmp eax, CIsDebugBlockFlag
   je FastMM_FreeMem_FreeDebugBlock
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+
+  jmp HandleInvalidFreeMem
 @Done:
 
 {$endif}
@@ -8044,7 +8057,7 @@ begin
         end
         else
         begin
-          Result := HandleInvalidFreeMemOrReallocMem(APointer, False);
+          Result := HandleInvalidFreeMem(APointer);
         end;
       end;
     end;
@@ -8092,8 +8105,7 @@ asm
   cmp word ptr [eax - CBlockStatusFlagsSize], CIsDebugBlockFlag
   je FastMM_ReallocMem_ReallocDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidReallocMem
 {$else}
   {--------x64 Assembly language codepath---------}
   .noframe
@@ -8117,8 +8129,7 @@ asm
   cmp r8d, CIsDebugBlockFlag
   je FastMM_ReallocMem_ReallocDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidReallocMem
 
 {$endif}
 {$else}
@@ -8154,8 +8165,7 @@ begin
         end
         else
         begin
-          HandleInvalidFreeMemOrReallocMem(APointer, True);
-          Result := nil;
+          Result := HandleInvalidReallocMem(APointer);
         end;
       end;
 
@@ -8271,8 +8281,8 @@ begin
     {Catch an attempt to reallocate a freed block.}
     if LBlockHeader and CBlockIsFreeFlag <> 0 then
     begin
-      HandleInvalidFreeMemOrReallocMem(APointer, True);
-      Exit(nil);
+      Result := HandleInvalidReallocMem(APointer);
+      Exit;
     end;
 
     {The old block is not a debug block, so we need to allocate a new debug block and copy the data across.}
