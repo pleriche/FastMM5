@@ -9529,7 +9529,7 @@ var
   LExistingFileAction: TTextFileAlreadyExistsAction;
 begin
   {Get the current memory manager usage summary.}
-  LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
+  LMemoryManagerUsageSummary := FastMM_GetUsageSummary(ALockTimeoutMilliseconds);
 
   {Allocate the memory required to store the token buffer, log text, as well as the detailed allocation information.}
   LBufferSize := SizeOf(TMemoryLogInfo) + (CTokenBufferMaxWideChars + CStateLogMaxChars) * SizeOf(Char);
