@@ -8779,6 +8779,9 @@ begin
 
                   if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
                   begin
+                    {A timeout while attempting to lock the small block manager will cause the span to be reported as a
+                    medium block instead.  This should happen very infrequently, and since small block spans are
+                    relatively small it should not skew results materially.}
                     Result := False;
                     LPSmallBlockManager := nil;
                     LSmallBlockOffset := 0;
