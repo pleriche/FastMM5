@@ -5242,8 +5242,10 @@ begin
       {Point to the remainder}
       LPRemainderBlock := Pointer(PByte(APMediumBlockManager.SequentialFeedMediumBlockSpan) + CMediumBlockSpanHeaderSize);
 
-      {Can the next block be combined with the remainder?}
-      if BlockIsFree(LPNextMediumBlock) then
+      {Potentially combine the remainder with the next block, if it is free.  In debug mode medium blocks are normally
+      not merged with adjacent free blocks, except if the next block does not contain any debug info.}
+      if BlockIsFree(LPNextMediumBlock)
+        and (MayMergeFreeMediumBlocks or (not BlockHasDebugInfo(LPNextMediumBlock))) then
       begin
         LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
         {Increase the size of this block}
