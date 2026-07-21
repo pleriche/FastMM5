@@ -2565,7 +2565,8 @@ begin
   Result := True;
 end;
 
-{Determines the size and state of the virtual memory region starting at APRegionStart.}
+{Determines the size and state of the virtual memory region starting at APRegionStart.  Returns a zero-filled structure
+on error.}
 procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegionInfo: TMemoryRegionInfo);
 var
   LMemInfo: TMemoryBasicInformation;
@@ -8615,6 +8616,7 @@ begin
 
   LTimestampMilliseconds := 0;
 
+  LBlockInfo := Default(TFastMM_WalkAllocatedBlocks_BlockInfo);
   LBlockInfo.UserData := AUserData;
 
   if AWalkBlockTypes = [] then
@@ -8629,13 +8631,6 @@ begin
   if btLargeBlock in AWalkBlockTypes then
   begin
     LBlockInfo.BlockType := btLargeBlock;
-    LBlockInfo.BlockIsFree := False;
-
-    {Clear the fields that are not applicable to large blocks.}
-    LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
-    LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-    LBlockInfo.SmallBlockSpanBlockSize := 0;
-    LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
 
     for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
     begin
@@ -8838,6 +8833,7 @@ begin
                     LBlockInfo.BlockAddress := LPMediumBlock;
                     LBlockInfo.BlockSize := LMediumBlockSize;
                     LBlockInfo.ArenaIndex := Byte(LArenaIndex);
+                    LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                     LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
 
                     if LPSmallBlockManager <> nil then
@@ -8853,6 +8849,7 @@ begin
                         else
                           LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
                         LBlockInfo.DebugInformation := nil;
+
                         ACallBack(LBlockInfo);
                       end;
                     end
@@ -8865,6 +8862,7 @@ begin
                         LBlockInfo.SmallBlockSpanBlockSize := 0;
                         LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                         LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
+
                         if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
                           AMaximumAllocationGroup, True) then
                         begin
