@@ -4243,6 +4243,14 @@ begin
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
 
+  {Use FillChar above the measured crossover and retain the scalar path for smaller blocks.}
+  if LByteOffset >= 40 then
+  begin
+    FillChar(LPUserArea^, LByteOffset, CDebugFillByteFreedBlock);
+    PPointerArray(LPUserArea)[0] := TFastMM_FreedObject;
+    Exit;
+  end;
+
   {Store a pointer to the freed object class if the block is large enough.}
   if LByteOffset >= CTObjectInstanceSize then
   begin
@@ -4289,6 +4297,13 @@ var
 begin
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+
+  {Use FillChar above the measured crossover and retain the scalar path for smaller blocks.}
+  if LByteOffset >= 40 then
+  begin
+    FillChar(LPUserArea^, LByteOffset, CDebugFillByteAllocatedBlock);
+    Exit;
+  end;
 
   if LByteOffset and 1 <> 0 then
   begin
