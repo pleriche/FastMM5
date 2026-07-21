@@ -8941,36 +8941,52 @@ begin
 end;
 
 procedure FastMM_ScanDebugBlocksForCorruption_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+const
+  CMaxCorruptionCheckAttempts = 100; //Excessively high, but insignificant relative to the cost of a false positive
+var
+  LRemainingAttempts: Integer;
 begin
   {If it is not a debug mode block then there's nothing to check.}
   if ABlockInfo.DebugInformation = nil then
     Exit;
 
-  {Check the block header and footer for corruption.}
-  if (ABlockInfo.DebugInformation.CalculateHeaderCheckSum <> ABlockInfo.DebugInformation.HeaderCheckSum)
-    or (ABlockInfo.DebugInformation.CalculateFooterCheckSum <> ABlockInfo.DebugInformation.DebugFooterPtr^) then
+  {When a debug block is freed or reallocated the debug information header and footer is updated without locking the
+  arena that owns the block.  While it is busy updating the debug information it temporarily clears the flag to indicate
+  that the block contains debug information, but a race condition remains:  The user size (and consequently the header
+  and footer checksums) may be changed several times due to successive FastMM_ReallocMem calls while inside this
+  callback.  In order to have a high degree of certainty that the block is actually corrupted we need run the check
+  multiple times:  If at any time the block is flagged as not having debug information or the checksums are valid then
+  we assume there is no corruption.}
+
+  LRemainingAttempts := CMaxCorruptionCheckAttempts;
+  while True do
   begin
-    {The header and/or footer checksums are not currently correct, but that may just be due to a race condition:  When a
-    debug block is freed the debug header and footer are updated while the block manager is not yet locked, so we need
-    to check again whether the block is still flagged as having debug information, and if so, check its contents a
-    second time.}
-    if BlockHasDebugInfo(ABlockInfo.DebugInformation) then
+    {Check whether the header and footers checksums are currently valid.  If they are then break out of the loop.}
+    if (ABlockInfo.DebugInformation.CalculateHeaderCheckSum = ABlockInfo.DebugInformation.HeaderCheckSum)
+      and (ABlockInfo.DebugInformation.CalculateFooterCheckSum = ABlockInfo.DebugInformation.DebugFooterPtr^) then
     begin
-      {The block is still flagged as containing debug information, so one of two scenarios are possible:
-      1) The block header or footer has been corrupted
-      2) The block is being freed, and FastMM_FreeMem_FreeDebugBlock has completed updating the headers and footers}
+      Break;
+    end;
+
+    {Is the block still flagged as containing debug info?  If not then another thread is busy manipulating its debug
+    information, and we assume that it is intact.}
+    if not BlockHasDebugInfo(ABlockInfo.DebugInformation) then
+      Break;
+
+    {If the retry attempts have been exhausted then we accept that the block has been corrupted.}
+    Dec(LRemainingAttempts);
+    if LRemainingAttempts = 0 then
+    begin
+      {Check one last time and log the block corruption, if present.}
       if not CheckDebugBlockHeaderAndFooterCheckSumsValid(ABlockInfo.DebugInformation) then
         System.Error(reInvalidPtr);
-    end
-    else
-    begin
-      {The "debug info" flag in the block header is not currently set.  This means that the debug header and footer are
-      currently being updated inside FastMM_FreeMem_FreeDebugBlock before the block is actually freed.}
-      Exit;
+      Break;
     end;
+
   end;
 
-  {If it is a free block, check whether it has been modified after being freed.}
+  {If it is a free block, check whether it has been modified after being freed.  A free debug block should never be
+  modified while the arena is locked, so we do not have to retry this check.}
   if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
     System.Error(reInvalidPtr);
 end;
