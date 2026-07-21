@@ -3010,18 +3010,20 @@ var
           Exit(False);
         end;
 
+        {No more parent classes?}
+        if LParentClassSelfPointer = nil then
+          Exit(True);
+
+        {Recursively check the parent class for validity.}
+        Result := IsValidVMTAddress(LParentClassSelfPointer, True)
+          and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
+
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
         thread frees the block at an inopportune moment then the reads above may cause an A/V.  If this happens then
         the AClassPointer cannot be a class.}
         Exit(False);
       end;
-      {No more parent classes?}
-      if LParentClassSelfPointer = nil then
-        Exit(True);
-      {Recursively check the parent class for validity.}
-      Result := IsValidVMTAddress(LParentClassSelfPointer, True)
-        and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
     end
     else
       Result := False;
