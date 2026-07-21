@@ -8537,11 +8537,12 @@ begin
 end;
 
 {Adjusts the block information for blocks that contain a debug mode sub-block.  Returns True if the allocation group for
-the block is within the given range, False otherwise.}
+the block is within the given range, False otherwise.  If AMayCheckForDebugInfo = True then the block header will be
+trusted and the block will checked for debug info, otherwise the block will be assumed to not contain debug info.}
 function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
-  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean; inline;
+  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal; AMayCheckForDebugInfo: Boolean): Boolean; inline;
 begin
-  if BlockHasDebugInfo(ABlockInfo.BlockAddress) then
+  if AMayCheckForDebugInfo and BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
     ABlockInfo.DebugInformation := ABlockInfo.BlockAddress;
     ABlockInfo.UsableSize := ABlockInfo.DebugInformation.UserSize;
@@ -8599,6 +8600,8 @@ var
   LPMediumBlock: Pointer;
   LBlockOffsetFromMediumSpanStart, LMediumBlockSize, LSmallBlockOffset, LLastBlockOffset: Integer;
   LPSmallBlockManager: PSmallBlockManager;
+  LPDebugHeader: PFastMM_DebugBlockHeader;
+  LMayCheckForDebugInfo: Boolean;
 begin
   {Assume success, i.e. that all arenas will be walked.  This will be reset to False if a lock timeout occurs.}
   Result := True;
@@ -8656,8 +8659,11 @@ begin
           LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
           LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
 
-          if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+          if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+            AMaximumAllocationGroup, True) then
+          begin
             ACallBack(LBlockInfo);
+          end;
 
           LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
         end;
@@ -8852,8 +8858,11 @@ begin
                         LBlockInfo.SmallBlockSpanBlockSize := 0;
                         LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                         LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+                          AMaximumAllocationGroup, True) then
+                        begin
                           ACallBack(LBlockInfo);
+                        end;
                       end;
                     end;
 
@@ -8882,8 +8891,25 @@ begin
                         LBlockInfo.SmallBlockSpanBlockSize := 0;
                         LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
 
-                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                        {The header for a small block that is split off from the sequential feed span is set after
+                        allocation and without the protection of a lock, so there is a small but real chance that the
+                        header for a small block may not yet have been set by the thread that allocated it.  Small block
+                        spans may be recycled medium blocks, so the content is unpredictable.  Consequently we need to
+                        check the validity of the header as well as any claimed debug info inside the block.}
+                        LPDebugHeader := PFastMM_DebugBlockHeader(LBlockInfo.BlockAddress);
+                        LMayCheckForDebugInfo := BlockHasDebugInfo(LPDebugHeader)
+                          and (GetSpanForSmallBlock(LPDebugHeader) = LPMediumBlock)
+                          and (LBlockInfo.UsableSize > CDebugBlockHeaderSize)
+                          and (LBlockInfo.UsableSize >= CDebugBlockHeaderSize + LPDebugHeader.UserSize
+                            + CalculateDebugBlockFooterSize(LPDebugHeader.StackTraceEntryCount))
+                          and (LPDebugHeader.CalculateHeaderCheckSum = LPDebugHeader.HeaderCheckSum)
+                          and (LPDebugHeader.CalculateFooterCheckSum = LPDebugHeader.DebugFooterPtr^);
+
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+                          AMaximumAllocationGroup, LMayCheckForDebugInfo) then
+                        begin
                           ACallBack(LBlockInfo);
+                        end;
                       end;
 
                       Inc(LSmallBlockOffset, LPSmallBlockManager.BlockSize);
