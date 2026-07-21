@@ -4252,10 +4252,20 @@ begin
   begin
     PPointerArray(LPUserArea)[0] := TFastMM_FreedObject;
     {$ifdef 32Bit}
+    {Maintain QWord alignment of the start of the block.}
     PIntegerArray(LPUserArea)[1] := Integer(Cardinal($01010101) * CDebugFillByteFreedBlock);
     {$endif}
     Dec(LByteOffset, 8);
     Inc(LPUserArea, 8);
+
+    {FillChar was significantly improved in Delphi XE7, so use that for larger blocks.}
+    {$if CompilerVersion >= 28}
+    if LByteOffset >= 32 then
+    begin
+      FillChar(LPUserArea^, LByteOffset, CDebugFillByteFreedBlock);
+      Exit;
+    end;
+    {$endif}
   end;
 
   if LByteOffset and 1 <> 0 then
@@ -4293,6 +4303,15 @@ var
 begin
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+
+  {FillChar was significantly improved in Delphi XE7, so use that for larger blocks.}
+  {$if CompilerVersion >= 28}
+  if LByteOffset >= 40 then
+  begin
+    FillChar(LPUserArea^, LByteOffset, CDebugFillByteAllocatedBlock);
+    Exit;
+  end;
+  {$endif}
 
   if LByteOffset and 1 <> 0 then
   begin
