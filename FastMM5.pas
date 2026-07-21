@@ -8104,7 +8104,7 @@ asm
   mov eax, r8d
   and eax, (CBlockIsFreeFlag or CIsSmallBlockFlag)
   cmp eax, CIsSmallBlockFlag
-  je FastMM_ReallocMem_ReallocSmallBlock
+  je @SmallBlock
 
   mov eax, r8d
   and eax, (not CHasDebugInfoFlag)
@@ -8119,6 +8119,29 @@ asm
 
   xor edx,edx
   jmp HandleInvalidFreeMemOrReallocMem
+
+@SmallBlock:
+  {Inline the common in-place small-block downsize path.  This avoids the compiler-generated frame and saved registers
+  in FastMM_ReallocMem_ReallocSmallBlock on Win64.}
+  mov r9d, r8d
+  and r9d, CDropSmallBlockFlagsMask
+  shl r9d, CSmallBlockSpanOffsetBitShift
+  mov rax, rcx
+  and rax, -CMediumBlockAlignment
+  sub rax, r9
+  mov rax, TSmallBlockSpanHeader(rax).SmallBlockManager
+  movzx r9d, TSmallBlockManager(rax).BlockSize
+  sub r9d, CSmallBlockHeaderSize
+
+  {Upsizes and large downsizes use the existing moving path.}
+  cmp r9, rdx
+  jb FastMM_ReallocMem_ReallocSmallBlock
+  lea r10, [rdx * 4 + CSmallBlockDownsizeCheckAdder]
+  cmp r10, r9
+  jb FastMM_ReallocMem_ReallocSmallBlock
+
+  mov rax, rcx
+  ret
 
 {$endif}
 {$else}
