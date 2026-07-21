@@ -10960,6 +10960,8 @@ begin
   DebugLibrary_LogStackTrace_Legacy := nil;
 {$endif}
 
+  DebugSupportConfigured := False;
+
   Result := True;
 end;
 
