@@ -5230,7 +5230,9 @@ begin
       Break;
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
-    change the sequential feed span.}
+    change the sequential feed span.  After the new span is installed it is also impossible for the new offset to equal
+    the old offset, since spans are several multiples of the largest medium block size and the remainder is only binned
+    when the available size falls below what is required for a medium block allocation.}
     if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, CMediumBlockSpanHeaderSize,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
@@ -9401,23 +9403,30 @@ end;
 
 {FastMM_LogStateToFile node sort compare methods.  Returns <0 if ANode1 sorts before ANode2, 0 if they sort equally,
 and >0 if ANode1 must sort after ANode2.}
-
 function FastMM_LogStateToFile_NodeSortCompare_Alphabetical(const ANode1, ANode2: TMemoryLogNode): Integer;
 const
   CMaxContentDescriptionLength = 256;
 var
   LContent1, LContent2: array[0..CMaxContentDescriptionLength - 1] of WideChar;
-  i: Integer;
+  LLen1, LLen2, LMinLen, i: Integer;
 begin
-  BlockContentTypeToTextBuffer(ANode1.BlockContentType, @LContent1, @LContent1[CMaxContentDescriptionLength - 1]);
-  BlockContentTypeToTextBuffer(ANode2.BlockContentType, @LContent2, @LContent2[CMaxContentDescriptionLength - 1]);
+  LLen1 := (NativeUInt(BlockContentTypeToTextBuffer(ANode1.BlockContentType, @LContent1, @LContent1[CMaxContentDescriptionLength - 1]))
+    - NativeUInt(@LContent1)) div SizeOf(WideChar);
+  LLen2 := (NativeUInt(BlockContentTypeToTextBuffer(ANode2.BlockContentType, @LContent2, @LContent2[CMaxContentDescriptionLength - 1]))
+    - NativeUInt(@LContent2)) div SizeOf(WideChar);
 
-  for i := 0 to CMaxContentDescriptionLength - 1 do
+  if LLen1 < LLen2 then
+    LMinLen := LLen1
+  else
+    LMinLen := LLen2;
+  for i := 0 to LMinLen - 1 do
   begin
     Result := Ord(LContent1[i]) - Ord(LContent2[i]);
     if Result <> 0 then
-      Break;
+      Exit;
   end;
+
+  Result := LLen1 - LLen2;
 end;
 
 function FastMM_LogStateToFile_NodeSortCompare_DescendingMemoryUsage(const ANode1, ANode2: TMemoryLogNode): Integer;
