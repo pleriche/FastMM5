@@ -4433,59 +4433,69 @@ end;
 {Checks that the debug fill pattern in the debug block is intact.  Returns True if the block is intact, otherwise
 (optionally) logs and/or displays the error and returns False.}
 function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
+const
+  CDebugFillWordFreedBlock = CDebugFillByteFreedBlock * Word($0101);
+  CDebugFillDWordFreedBlock = CDebugFillByteFreedBlock * Cardinal($01010101);
+  CDebugFillQWordFreedBlock = CDebugFillByteFreedBlock * UInt64($0101010101010101);
 var
   LByteOffset: NativeInt;
-  LPUserArea: PByte;
+  LPBlockEnd: PByte;
   LFillPatternIntact: Boolean;
 begin
-  LByteOffset := APDebugBlockHeader.UserSize;
-  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+  {Get a pointer to just after the block, and use a negative offset for traversal.}
+  LPBlockEnd := PByte(APDebugBlockHeader) + APDebugBlockHeader.UserSize + CDebugBlockHeaderSize;
+  LByteOffset := - APDebugBlockHeader.UserSize;
+
   LFillPatternIntact := True;
 
-  {If the block is large enough the first 4/8 bytes should be a pointer to the freed object class.}
-  if LByteOffset >= CTObjectInstanceSize then
+  {If the block is large enough to hold a TObject then the first 4/8 bytes should be a pointer to the freed object
+  class.}
+  if LByteOffset <= - CTObjectInstanceSize then
   begin
-    LFillPatternIntact := (PPointer(LPUserArea)^ = TFastMM_FreedObject)
-    {$ifdef 32Bit}
-      and (PIntegerArray(LPUserArea)[1] = Integer(Cardinal($01010101) * CDebugFillByteFreedBlock));
-    {$endif};
-    Dec(LByteOffset, 8);
-    Inc(LPUserArea, 8);
-  end;
+    LFillPatternIntact := PPointer(@LPBlockEnd[LByteOffset])^ = TFastMM_FreedObject;
+    Inc(LByteOffset, SizeOf(Pointer));
 
-  if LByteOffset and 1 <> 0 then
-  begin
-    Dec(LByteOffset);
-    if LPUserArea[LByteOffset] <> CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  if LByteOffset and 2 <> 0 then
-  begin
-    Dec(LByteOffset, 2);
-    if PWord(@LPUserArea[LByteOffset])^ <> Word($0101) * CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  if LByteOffset and 4 <> 0 then
-  begin
-    Dec(LByteOffset, 4);
-    if PCardinal(@LPUserArea[LByteOffset])^ <> Cardinal($01010101) * CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  {Loop over the remaining 8 byte chunks using a negative offset.}
-  Inc(LPUserArea, LByteOffset);
-  LByteOffset := - LByteOffset;
-  while LByteOffset < 0 do
-  begin
-    if PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock then
+    {Check chunks of 32 bytes in a loop.}
+    while LByteOffset <= -32 do
     begin
-      LFillPatternIntact := False;
-      Break;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 8])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 16])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 24])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      Inc(LByteOffset, 32);
     end;
 
+  end;
+
+  while LByteOffset <= -8 do
+  begin
+    LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset])^ = CDebugFillQWordFreedBlock)
+      and LFillPatternIntact;
     Inc(LByteOffset, 8);
+  end;
+
+  if LByteOffset <= -4 then
+  begin
+    LFillPatternIntact := (PCardinal(@LPBlockEnd[LByteOffset])^ = CDebugFillDWordFreedBlock)
+      and LFillPatternIntact;
+    Inc(LByteOffset, 4);
+  end;
+
+  if LByteOffset <= -2 then
+  begin
+    LFillPatternIntact := (PWord(@LPBlockEnd[LByteOffset])^ = CDebugFillWordFreedBlock)
+      and LFillPatternIntact;
+    Inc(LByteOffset, 2);
+  end;
+
+  if LByteOffset < 0 then
+  begin
+    LFillPatternIntact := (LPBlockEnd[LByteOffset] = CDebugFillByteFreedBlock)
+      and LFillPatternIntact;
   end;
 
   if not LFillPatternIntact then
