@@ -1,0 +1,3 @@
+# Output written by the profiling demos when they are run
+*.csv
+SnapshotDiffDemo_Diff.txt
