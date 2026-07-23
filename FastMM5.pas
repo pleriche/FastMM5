@@ -1748,9 +1748,6 @@ const
 var
   {Lookup table for converting a block size to a small block type index from 0..CSmallBlockTypeCount - 1}
   SmallBlockTypeLookup: array[0.. CMaximumSmallBlockSize div CSmallBlockGranularity - 1] of Byte;
-{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
-  ThreadArenaAffinityHasEntries: Byte;
-{$endif}
 
   {The small block managers.  Every arena has a separate manager for each small block size.  This should ideally be
   aligned on a 64-byte (cache line) boundary in order to prevent false dependencies between adjacent small block
@@ -1765,6 +1762,8 @@ var
   ThreadArenaAffinityEntries: array[0..CFastMM_ThreadArenaAffinitySlotCount - 1] of UInt64;
   {One bit per small-block type records which block sizes caused severe contention for the thread.}
   ThreadArenaAffinitySmallBlockTypeMasks: array[0..CFastMM_ThreadArenaAffinitySlotCount - 1] of UInt64;
+  {A nonzero entry enables the affinity lookup for the corresponding small-block type.}
+  ThreadArenaAffinityEnabledSmallBlockTypes: array[0..CSmallBlockTypeCount - 1] of Byte;
   ThreadArenaAffinityNextArena: Cardinal;
 {$endif}
 
@@ -4642,7 +4641,9 @@ asm
   {Publish the entry and mask together by returning the slot version to an even value.}
   lea r9, ThreadArenaAffinitySlotVersions
   lock inc dword ptr [r9 + r11 * 4]
-  mov byte ptr ThreadArenaAffinityHasEntries, 1
+  {Enable the lookup only for block types that have actually encountered severe contention.}
+  lea r9, ThreadArenaAffinityEnabledSmallBlockTypes
+  mov byte ptr [r9 + r8], 1
 end;
 {$endif}
 
@@ -7952,8 +7953,9 @@ asm
 {$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
   lea rdx, SmallBlockTypeLookup
   movzx ecx, byte ptr [rdx + rcx]
-  {Use the original arena order until at least one thread has encountered severe contention.}
-  cmp byte ptr ThreadArenaAffinityHasEntries, 0
+  {Use the original arena order until this block type has encountered severe contention.}
+  lea rdx, ThreadArenaAffinityEnabledSmallBlockTypes
+  cmp byte ptr [rdx + rcx], 0
   je @UseArenaZero
 
   {Only threads that have encountered contention on every arena use a stable starting arena.}
