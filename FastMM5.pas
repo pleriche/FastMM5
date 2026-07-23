@@ -6693,6 +6693,17 @@ begin
 
 end;
 
+function IsSmallBlock(APBlock: Pointer): Boolean; inline;
+begin
+  Result := (PSmallBlockHeader(APBlock)[-1].BlockStatusFlagsAndSpanOffset and CIsSmallBlockFlag) <> 0;
+end;
+
+function IsSmallBlockWithDebugInfo(APBlock: Pointer): Boolean; inline;
+begin
+  Result := (PSmallBlockHeader(APBlock)[-1].BlockStatusFlagsAndSpanOffset
+    and (CIsSmallBlockFlag + CHasDebugInfoFlag)) = CIsSmallBlockFlag + CHasDebugInfoFlag;
+end;
+
 function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; inline;
 begin
   Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment)
@@ -8929,15 +8940,11 @@ begin
                         allocation and without the protection of a lock, so there is a small but real chance that the
                         header for a small block may not yet have been set by the thread that allocated it.  Small block
                         spans may be recycled medium blocks, so the content is unpredictable.  Consequently we need to
-                        check the validity of the header as well as any claimed debug info inside the block.}
+                        check the validity of the header.}
                         LPDebugHeader := PFastMM_DebugBlockHeader(LBlockInfo.BlockAddress);
-                        LMayCheckForDebugInfo := BlockHasDebugInfo(LPDebugHeader)
+                        LMayCheckForDebugInfo := IsSmallBlockWithDebugInfo(LPDebugHeader)
                           and (GetSpanForSmallBlock(LPDebugHeader) = LPMediumBlock)
-                          and (LBlockInfo.UsableSize > CDebugBlockHeaderSize)
-                          and (LBlockInfo.UsableSize >= CDebugBlockHeaderSize + LPDebugHeader.UserSize
-                            + CalculateDebugBlockFooterSize(LPDebugHeader.StackTraceEntryCount))
-                          and (LPDebugHeader.CalculateHeaderCheckSum = LPDebugHeader.HeaderCheckSum)
-                          and (LPDebugHeader.CalculateFooterCheckSum = LPDebugHeader.DebugFooterPtr^);
+                          and (LBlockInfo.UsableSize > (CDebugBlockHeaderSize + CalculateDebugBlockFooterSize(0)));
 
                         if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
                           AMaximumAllocationGroup, LMayCheckForDebugInfo) then
@@ -8989,7 +8996,13 @@ begin
   and footer checksums) may be changed several times due to successive FastMM_ReallocMem calls while inside this
   callback.  In order to have a high degree of certainty that the block is actually corrupted we need run the check
   multiple times:  If at any time the block is flagged as not having debug information or the checksums are valid then
-  we assume there is no corruption.}
+  we assume there is no corruption.
+
+  An additional problematic scenario is when a small block is split off from the sequential feed span:  Its header can
+  only be populated after the block has already been split off - without the protection of a lock.  It is therefore
+  possible that the (not yet valid) header for a small block may indicate that it contains debug information when it
+  actually does not.  We do basic validity checks on the block header in FastMM_WalkBlocks, but since the header is only
+  16 bits it is not inconceivable that an invalid header may appear valid.}
 
   LRemainingAttempts := CMaxCorruptionCheckAttempts;
   while True do
