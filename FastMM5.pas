@@ -9014,10 +9014,11 @@ begin
       Break;
     end;
 
-    {Is the block still flagged as containing debug info?  If not then another thread is busy manipulating its debug
-    information, and we assume that it is intact.}
+    {Is the block still flagged as containing debug info?  If not then another thread is either manipulating its debug
+    information or it is a small block for which the header wasn't set yet.  We therefore assume that the block is
+    intact.}
     if not BlockHasDebugInfo(ABlockInfo.DebugInformation) then
-      Break;
+      Exit;
 
     {If the retry attempts have been exhausted then we accept that the block has been corrupted.}
     Dec(LRemainingAttempts);
