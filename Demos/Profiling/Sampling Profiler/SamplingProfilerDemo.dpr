@@ -3,6 +3,13 @@ CSV time series, then verifies the collected samples show the expected rise and 
 passed.}
 program SamplingProfilerDemo;
 
+{$ifdef FPC}
+  {See the same block in FastMM_SamplingProfiler.pas:  FPC does not predefine CompilerVersion.}
+  {$mode delphi}
+  {$macro on}
+  {$define CompilerVersion:=22}
+{$endif}
+
 {$APPTYPE CONSOLE}
 
 uses

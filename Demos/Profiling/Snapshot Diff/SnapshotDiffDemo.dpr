@@ -2,6 +2,13 @@
 verifies that the diff reports the expected deltas.  Exit code 0 = all checks passed.}
 program SnapshotDiffDemo;
 
+{$ifdef FPC}
+  {See the same block in FastMM_SnapshotDiff.pas:  FPC does not predefine CompilerVersion.}
+  {$mode delphi}
+  {$macro on}
+  {$define CompilerVersion:=22}
+{$endif}
+
 {$APPTYPE CONSOLE}
 
 uses

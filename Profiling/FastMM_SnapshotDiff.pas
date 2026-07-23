@@ -40,6 +40,15 @@ Version history:
 
 unit FastMM_SnapshotDiff;
 
+{$ifdef FPC}
+  {Free Pascal does not predefine Delphi's CompilerVersion constant that the version switches below rely on, so it is
+  supplied as a macro (FPC evaluates the IF CompilerVersion switches correctly against a macro).  Version 22 selects
+  the behaviour FPC wants:  no unit scope names, and inline enabled.}
+  {$mode delphi}
+  {$macro on}
+  {$define CompilerVersion:=22}
+{$endif}
+
 interface
 
 {$RangeChecks Off}
