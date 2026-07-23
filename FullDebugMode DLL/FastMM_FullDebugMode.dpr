@@ -276,15 +276,26 @@ end;
 
 {$if SizeOf(Pointer) = 8}
 
-function CaptureStackBackTrace(FramesToSkip, FramesToCapture: DWORD;
-  BackTrace: Pointer; BackTraceHash: PDWORD): Word;
+function CaptureStackBackTrace(FramesToSkip, FramesToCapture: DWORD; BackTrace: Pointer; BackTraceHash: PDWORD): Word;
   external kernel32 name 'RtlCaptureStackBackTrace';
 
 {We use the Windows API to do frame based stack tracing under 64-bit.}
-procedure GetFrameBasedStackTrace(AReturnAddresses: PNativeUInt;
-  AMaxDepth, ASkipFrames: Cardinal);
+procedure GetFrameBasedStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+type
+{$PointerMath On}
+  PNativeUIntArray = ^NativeUInt;
+{$PointerMath Off}
+var
+  LCapturedFrameCount: Cardinal;
 begin
-  CaptureStackBackTrace(ASkipFrames, AMaxDepth, AReturnAddresses, nil);
+  LCapturedFrameCount := CaptureStackBackTrace(ASkipFrames, AMaxDepth, AReturnAddresses, nil);
+
+  {Clear trailing entries}
+  while LCapturedFrameCount < AMaxDepth do
+  begin
+    PNativeUIntArray(AReturnAddresses)[LCapturedFrameCount] := 0;
+    Inc(LCapturedFrameCount);
+  end;
 end;
 
 {$else}

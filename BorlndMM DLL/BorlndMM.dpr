@@ -34,6 +34,13 @@ begin
   Result := 0;
 end;
 
+{FastMM_GetHeapStatus takes a timeout parameter, whereas the exported GetHeapStatus should not, so it needs to be
+wrapped.}
+function BorlndMM_GetHeapStatus: THeapStatus;
+begin
+  Result := FastMM_GetHeapStatus(50);
+end;
+
 procedure DumpBlocks;
 begin
   {Do nothing}
@@ -92,7 +99,7 @@ function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuff
 exports
   GetAllocMemSize name 'GetAllocMemSize',
   GetAllocMemCount name 'GetAllocMemCount',
-  FastMM_GetHeapStatus name 'GetHeapStatus',
+  BorlndMM_GetHeapStatus name 'GetHeapStatus',
   DumpBlocks name 'DumpBlocks',
   System.ReallocMemory name 'ReallocMemory',
   System.FreeMemory name 'FreeMemory',
@@ -114,6 +121,7 @@ exports
   HeapAddRef name '@Borlndmm@HeapAddRef$qqrv',
   {Export additional calls in order to make FastMM specific functionality available to the application and/or library.}
   FastMM_WalkBlocks,
+  FastMM_ProcessAllPendingFrees,
   FastMM_ScanDebugBlocksForCorruption,
   FastMM_GetUsageSummary,
   FastMM_LogStateToFile,
