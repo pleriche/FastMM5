@@ -977,6 +977,18 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
 
 implementation
 
+{Define FastMM_EnableAdaptiveSmallBlockArenaAffinity for adaptive per-thread arena affinity on Win64.  It is intended
+ for applications with severe small-block allocator contention.}
+{$if defined(FastMM_EnableAdaptiveSmallBlockArenaAffinity) and defined(MSWINDOWS) and defined(CPUX64)
+  and not defined(PurePascal)}
+  {$define FastMM_AdaptiveSmallBlockArenaAffinity}
+{$ifend}
+
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+const
+  CFastMM_ThreadArenaAffinitySlotCount = 256;
+{$endif}
+
 {All blocks are preceded by a block header.  The block header varies in size according to the block type.  The block
 type and state may be determined from the bits of the word preceding the block address, as follows:
 
@@ -1741,6 +1753,19 @@ var
   aligned on a 64-byte (cache line) boundary in order to prevent false dependencies between adjacent small block
   managers (RSP-28144).}
   SmallBlockManagers: TSmallBlockArenas;
+
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+  {Threads are entered into this table only after they encounter contention on every small-block arena.}
+  {Even slot versions are stable; an odd version means that the entry and mask are being updated.}
+  ThreadArenaAffinitySlotVersions: array[0..CFastMM_ThreadArenaAffinitySlotCount - 1] of Cardinal;
+  {The low 56 bits identify the live thread and the high 8 bits hold the assigned arena index plus one.}
+  ThreadArenaAffinityEntries: array[0..CFastMM_ThreadArenaAffinitySlotCount - 1] of UInt64;
+  {One bit per small-block type records which block sizes caused severe contention for the thread.}
+  ThreadArenaAffinitySmallBlockTypeMasks: array[0..CFastMM_ThreadArenaAffinitySlotCount - 1] of UInt64;
+  {A nonzero entry enables the affinity lookup for the corresponding small-block type.}
+  ThreadArenaAffinityEnabledSmallBlockTypes: array[0..CSmallBlockTypeCount - 1] of Byte;
+  ThreadArenaAffinityNextArena: Cardinal;
+{$endif}
 
   {The default size of new medium block spans.  Must be a multiple of 64K and may not exceed CMaximumMediumBlockSpanSize.}
   DefaultMediumBlockSpanSize: Integer;
@@ -4540,6 +4565,87 @@ begin
   Inc(FastMM_SmallBlockThreadContentionCount);
   OS_AllowOtherThreadToRun;
 end;
+
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+{Enable small-block arena affinity for the current thread and block type after severe contention has been observed.}
+procedure EnableSmallBlockArenaAffinityForCurrentThread(ASmallBlockTypeIndex: Integer);
+asm
+  .noframe
+  mov r8d, ecx
+  mov edx, dword ptr gs:[$48]
+
+  {Combine the thread ID, stack base and TEB address so that a recycled thread ID cannot inherit a stale entry.}
+  mov r10, qword ptr gs:[$08]
+  shr r10, 16
+  mov r11, qword ptr gs:[$30]
+  shr r11, 12
+  xor r10d, r11d
+  xor r10d, edx
+  and r10d, $00ffffff
+  shl r10, 32
+  mov eax, edx
+  or r10, rax
+
+  mov eax, edx
+  shr eax, 2
+  and eax, CFastMM_ThreadArenaAffinitySlotCount - 1
+  mov r11d, eax
+
+  {Serialize all updates to a slot so that a colliding thread cannot publish an entry with another thread's mask.}
+  lea r9, ThreadArenaAffinitySlotVersions
+@AcquireSlot:
+  mov eax, [r9 + r11 * 4]
+  test al, 1
+  jnz @SlotBusy
+  lea edx, [eax + 1]
+  lock cmpxchg [r9 + r11 * 4], edx
+  jne @AcquireSlot
+  jmp @SlotAcquired
+@SlotBusy:
+  pause
+  jmp @AcquireSlot
+
+@SlotAcquired:
+  lea r9, ThreadArenaAffinityEntries
+  mov rax, [r9 + r11 * 8]
+  mov rdx, rax
+  shl rdx, 8
+  shr rdx, 8
+  cmp rdx, r10
+  je @SetSmallBlockType
+
+  {Assign activated threads evenly across all configured arenas.}
+  mov ecx, 1
+  lock xadd dword ptr ThreadArenaAffinityNextArena, ecx
+{$if (CFastMM_SmallBlockArenaCount = 4) or (CFastMM_SmallBlockArenaCount = 8) or (CFastMM_SmallBlockArenaCount = 16)}
+  and ecx, CFastMM_SmallBlockArenaCount - 1
+{$else}
+  mov eax, ecx
+  xor edx, edx
+  mov r9d, CFastMM_SmallBlockArenaCount
+  div r9d
+  mov ecx, edx
+{$ifend}
+  inc ecx
+  mov eax, ecx
+  shl rax, 56
+  or rax, r10
+  lea r9, ThreadArenaAffinitySmallBlockTypeMasks
+  mov qword ptr [r9 + r11 * 8], 0
+  lea r9, ThreadArenaAffinityEntries
+  mov [r9 + r11 * 8], rax
+
+@SetSmallBlockType:
+  lea r9, ThreadArenaAffinitySmallBlockTypeMasks
+  bts qword ptr [r9 + r11 * 8], r8
+  {Publish the entry and mask together by returning the slot version to an even value.}
+  lea r9, ThreadArenaAffinitySlotVersions
+  lock inc dword ptr [r9 + r11 * 4]
+  {Enable the lookup only for block types that have actually encountered severe contention.}
+  lea r9, ThreadArenaAffinityEnabledSmallBlockTypes
+  mov byte ptr [r9 + r8], 1
+end;
+{$endif}
 
 procedure LogMediumBlockThreadContentionAndYieldToOtherThread;
 begin
@@ -7357,7 +7463,8 @@ end;
 
 {Tries to allocate a small block through the given small block manager.  If the manager has no available blocks, or
 it is locked, then the corresponding managers in other arenas are also tried.}
-function FastMM_GetMem_GetSmallBlock(APSmallBlockManager: PSmallBlockManager): Pointer;
+function FastMM_GetMem_GetSmallBlock(APSmallBlockManager: PSmallBlockManager
+  {$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}; AStartArenaIndex: Integer{$endif}): Pointer;
 {$ifdef X86ASM}
 asm
   {--------------Attempt 1--------------
@@ -7486,9 +7593,22 @@ asm
   pop eax
   jmp @Attempt1Loop
 {$else}
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+var
+  LPFirstArenaSmallBlockManager, LPStartArenaSmallBlockManager: PSmallBlockManager;
+  LArenasVisited: Integer;
+{$endif}
 begin
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+  LPFirstArenaSmallBlockManager := APSmallBlockManager;
+  Dec(LPFirstArenaSmallBlockManager, CSmallBlockTypeCount * AStartArenaIndex);
+  LPStartArenaSmallBlockManager := APSmallBlockManager;
+{$endif}
   while True do
   begin
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+    APSmallBlockManager := LPStartArenaSmallBlockManager;
+{$endif}
 
     {--------------Attempt 1--------------
     Try to get a block from the first arena with an available block.  During the first attempt only memory that has
@@ -7500,6 +7620,9 @@ begin
       3) From the sequential feed span}
 
     {Walk the arenas for this small block type until we find an unlocked arena that can be used to obtain a block.}
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+    LArenasVisited := 0;
+{$endif}
     while True do
     begin
 
@@ -7539,14 +7662,28 @@ begin
       end;
 
       {Could not obtain a block from this arena:  Move on to the next arena.}
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+      Inc(LArenasVisited);
+      if LArenasVisited = CFastMM_SmallBlockArenaCount then
+        Break;
+      if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CFastMM_SmallBlockArenaCount - 1]) then
+        Inc(APSmallBlockManager, CSmallBlockTypeCount)
+      else
+        APSmallBlockManager := LPFirstArenaSmallBlockManager;
+{$else}
       if NativeUInt(APSmallBlockManager) < NativeUInt(@SmallBlockManagers[CFastMM_SmallBlockArenaCount - 1]) then
         Inc(APSmallBlockManager, CSmallBlockTypeCount)
       else
         Break;
+{$endif}
 
     end;
     {Go back to the corresponding manager in the first arena}
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+    APSmallBlockManager := LPFirstArenaSmallBlockManager;
+{$else}
     Dec(APSmallBlockManager, CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1));
+{$endif}
 
     {--------------Attempt 2--------------
     Lock the first unlocked arena and try again.  During the second attempt a new sequential feed span will be allocated
@@ -7595,11 +7732,18 @@ begin
       else
         Break;
     end;
+{$ifndef FastMM_AdaptiveSmallBlockArenaAffinity}
     Dec(APSmallBlockManager, CSmallBlockTypeCount * (CFastMM_SmallBlockArenaCount - 1));
+{$endif}
 
     {--------------Back off--------------
     All arenas are currently locked:  Back off and start again at the first arena}
 
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+    EnableSmallBlockArenaAffinityForCurrentThread(
+      (NativeUInt(LPFirstArenaSmallBlockManager) - NativeUInt(@SmallBlockManagers[0][0]))
+        shr CSmallBlockManagerSizeBits);
+{$endif}
     LogSmallBlockThreadContentionAndYieldToOtherThread;
 
   end;
@@ -7806,12 +7950,86 @@ asm
   {Small block:  Get the small block manager index in ecx}
   add ecx, 1
   shr ecx, CSmallBlockGranularityBits
+{$ifdef FastMM_AdaptiveSmallBlockArenaAffinity}
+  lea rdx, SmallBlockTypeLookup
+  movzx ecx, byte ptr [rdx + rcx]
+  {Use the original arena order until this block type has encountered severe contention.}
+  lea rdx, ThreadArenaAffinityEnabledSmallBlockTypes
+  cmp byte ptr [rdx + rcx], 0
+  je @UseArenaZero
+
+  {Only threads that have encountered contention on every arena use a stable starting arena.}
+  mov edx, dword ptr gs:[$48]
+  cmp edx, System.MainThreadID
+  je @UseArenaZero
+
+  {Build the same live-thread key used when the entry was registered.}
+  mov r10, qword ptr gs:[$08]
+  shr r10, 16
+  mov r11, qword ptr gs:[$30]
+  shr r11, 12
+  xor r10d, r11d
+  xor r10d, edx
+  and r10d, $00ffffff
+  shl r10, 32
+  mov r11d, edx
+  or r10, r11
+
+  mov eax, edx
+  shr eax, 2
+  and eax, CFastMM_ThreadArenaAffinitySlotCount - 1
+  mov r9d, eax
+
+  {Read a consistent entry and block-type mask.  An update in progress falls back to arena 0.}
+  lea r8, ThreadArenaAffinitySlotVersions
+  mov edx, [r8 + r9 * 4]
+  test dl, 1
+  jnz @UseArenaZero
+
+  lea r8, ThreadArenaAffinityEntries
+  mov rax, [r8 + r9 * 8]
+  mov r11, rax
+  shl r11, 8
+  shr r11, 8
+  cmp r11, r10
+  jne @UseArenaZero
+
+  {Use the assigned arena only for block sizes on which this thread encountered severe contention.}
+  lea r8, ThreadArenaAffinitySmallBlockTypeMasks
+  bt qword ptr [r8 + r9 * 8], rcx
+  jnc @UseArenaZero
+
+  lea r11, ThreadArenaAffinitySlotVersions
+  cmp edx, [r11 + r9 * 4]
+  jne @UseArenaZero
+
+  shr rax, 56
+  test eax, eax
+  jz @UseArenaZero
+  dec eax
+  mov r8d, ecx
+  mov edx, eax
+  shl r8, CSmallBlockManagerSizeBits
+  imul r9, rdx, CSmallBlockManagerSize * CSmallBlockTypeCount
+  lea rcx, SmallBlockManagers
+  add rcx, r8
+  add rcx, r9
+  jmp FastMM_GetMem_GetSmallBlock
+
+@UseArenaZero:
+  {Get a pointer to the small block manager for arena 0 in rcx}
+  shl rcx, CSmallBlockManagerSizeBits
+  lea r8, SmallBlockManagers
+  add rcx, r8
+  xor edx, edx
+{$else}
   lea rdx, SmallBlockTypeLookup
   movzx ecx, byte ptr [rdx + rcx]
   {Get a pointer to the small block manager for arena 0 in rcx}
   shl rcx, CSmallBlockManagerSizeBits
   lea rdx, SmallBlockManagers
   add rcx, rdx
+{$endif}
   jmp FastMM_GetMem_GetSmallBlock
 @NotASmallBlock:
   cmp rcx, (CMaximumMediumBlockSize - CMediumBlockHeaderSize)
@@ -8164,7 +8382,7 @@ asm
   mov eax, r8d
   and eax, (CBlockIsFreeFlag or CIsSmallBlockFlag)
   cmp eax, CIsSmallBlockFlag
-  je FastMM_ReallocMem_ReallocSmallBlock
+  je @SmallBlock
 
   mov eax, r8d
   and eax, (not CHasDebugInfoFlag)
@@ -8178,6 +8396,29 @@ asm
   je FastMM_ReallocMem_ReallocDebugBlock
 
   jmp HandleInvalidReallocMem
+
+@SmallBlock:
+  {Inline the common in-place small-block downsize path.  This avoids the compiler-generated frame and saved registers
+  in FastMM_ReallocMem_ReallocSmallBlock on Win64.}
+  mov r9d, r8d
+  and r9d, CDropSmallBlockFlagsMask
+  shl r9d, CSmallBlockSpanOffsetBitShift
+  mov rax, rcx
+  and rax, -CMediumBlockAlignment
+  sub rax, r9
+  mov rax, TSmallBlockSpanHeader(rax).SmallBlockManager
+  movzx r9d, TSmallBlockManager(rax).BlockSize
+  sub r9d, CSmallBlockHeaderSize
+
+  {Upsizes and large downsizes use the existing moving path.}
+  cmp r9, rdx
+  jb FastMM_ReallocMem_ReallocSmallBlock
+  lea r10, [rdx * 4 + CSmallBlockDownsizeCheckAdder]
+  cmp r10, r9
+  jb FastMM_ReallocMem_ReallocSmallBlock
+
+  mov rax, rcx
+  ret
 
 {$endif}
 {$else}
