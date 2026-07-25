@@ -246,10 +246,13 @@ foreach ($install in $selected) {
 
       # Compile from the source directory:  the "in 'FastMM_TestUtils.pas'"
       # clause is resolved relative to the current directory, not to the .dpr.
+      # -O gives the object file search path.  Nothing here links an .obj, but it
+      # costs nothing and lets the same command line serve compilers whose RTL
+      # declares external routines from .obj files.
       Push-Location $srcDir
       try {
         $buildOutput = & $info.exe -B -Q "-U$($srcDir);$($rootDir);$($info.lib)" `
-          '-NSSystem;System.Win;Winapi;Vcl' "-N$outDir" "-E$outDir" $dpr 2>&1
+          "-O$($info.lib)" '-NSSystem;System.Win;Winapi;Vcl' "-N$outDir" "-E$outDir" $dpr 2>&1
       } finally { Pop-Location }
 
       if (-not (Test-Path $exe)) {
