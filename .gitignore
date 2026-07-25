@@ -67,3 +67,6 @@ __recovery/
 
 # Boss dependency manager vendor folder https://github.com/HashLoad/boss
 modules/
+
+# Local list of Delphi installations for Tests\RunTests.ps1 (machine specific)
+Tests/CompilerPaths.txt

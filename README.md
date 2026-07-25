@@ -77,7 +77,7 @@ The units in the Profiling folder are optional add-ons that build on the public 
 * PurePascal - The assembly language code paths are disabled, and only the Pascal code paths are used.  This is normally used for debugging purposes only.
 
 ### Tests
-The Tests folder contains console test programs covering the block size classes, the debug mode, the corruption scan, the mode transition and double free contracts, and multithreaded stress.  Each one exits with 0 when all its checks pass.  `pwsh -File Tests\RunTests.ps1` builds and runs all of them with every Delphi installation it finds, for Win32 and Win64, and exits with the number of failed runs.  See Tests\README.md for the details.
+The Tests folder contains console test programs covering the block size classes, the debug mode, the corruption scan, the mode transition and double free contracts, and multithreaded stress.  Each one exits with 0 when all its checks pass.  `pwsh -File Tests\RunTests.ps1` builds and runs all of them for Win32 and Win64 and exits with the number of failed runs;  it uses the newest installed Delphi version by default, with no configuration needed.  See Tests\README.md for the details.
 
 ### Supported Compilers
 Delphi XE3 and later

@@ -1,7 +1,6 @@
 # FastMM5 test suite
 
-Console test programs for FastMM5, plus a script that builds and runs them with
-every Delphi installation it finds.
+Console test programs for FastMM5, plus a script that builds and runs them.
 
 Each test is a standalone console application that exits with **0 when every
 check passed** and with the number of failed checks otherwise, so the suite
@@ -10,16 +9,40 @@ needs no test framework and plugs into any CI step that looks at exit codes.
 ## Running
 
 ```powershell
-pwsh -File RunTests.ps1                  # every configured compiler, Win32 and Win64
-pwsh -File RunTests.ps1 -Only D13.1      # a single compiler
-pwsh -File RunTests.ps1 -Platforms Win32 # a single platform
+pwsh -File RunTests.ps1                  # newest installed compiler, Win32 and Win64
+pwsh -File RunTests.ps1 -AllCompilers    # every installation that was found
+pwsh -File RunTests.ps1 -Only 23.0       # one specific installation
+pwsh -File RunTests.ps1 -Platforms Win32 # one platform only
 pwsh -File RunTests.ps1 -Quick           # shorter stress runs (for a quick check)
 pwsh -File RunTests.ps1 -VerboseOutput   # print the full output of every test
+pwsh -File RunTests.ps1 -ListCompilers   # only report what was found, run nothing
 ```
 
-The exit code of the script is the number of failed test runs. Edit the
-`$Compilers` table at the top of the script if your Delphi installations are not
-under `C:\Delphi\...`.
+Nothing needs to be configured: the installed Delphi versions are read from the
+registry (and from `%EmbarcaderoRoot%` if that is set), and the newest one is
+used. `-ListCompilers` shows what was found, with the compiler version of each,
+which is the number the `CompilerVersion` guards in the sources refer to:
+
+```
+Delphi installations found (* = selected):
+  * 23.0 (compiler version 29)  C:\Program Files (x86)\Embarcadero\Studio\23.0
+    22.0 (compiler version 28)  C:\Program Files (x86)\Embarcadero\Studio\22.0
+```
+
+To pin the list instead - other install locations, a specific set of versions, or
+a machine where the registry cannot be read - put a `CompilerPaths.txt` next to
+the script with one installation root per line. All entries in it are used, so
+this doubles as "run against exactly these". The file is in `.gitignore`, so a
+local setup never shows up as a change.
+
+```
+# One Delphi installation root per line, optionally "Name = Path".
+# The name is what -Only matches; without one the folder name is used.
+Athens  = C:\Program Files (x86)\Embarcadero\Studio\23.0
+%ProgramFiles(x86)%\Embarcadero\Studio\22.0
+```
+
+The exit code of the script is the number of failed test runs.
 
 A single test can also be built and run by hand:
 
@@ -68,8 +91,13 @@ Two things cost time to work out and are easy to trip over again:
 
 ## Compiler support
 
-The tests build with Delphi XE3 and later, matching FastMM5 itself, and are
-verified against Delphi 10 Seattle and Delphi 13.1 on Win32 and Win64.
+The tests build with Delphi XE3 and later, matching FastMM5 itself. Verified on
+Win32 and Win64 with Delphi 10 Seattle, 11.3 Alexandria, 12.3 Athens and 13.1:
+72 of 72 runs pass.
+
+Only the Embarcadero era versions are found automatically, since those are the
+ones that register themselves under `Embarcadero\BDS`. Anything older can be
+listed in `CompilerPaths.txt`.
 
 The version guards in the sources (`{$if CompilerVersion >= ...}`) are there so
 that the same files also work in forks that support older compilers; on XE3 and
