@@ -160,15 +160,18 @@ function Find-Installations {
 
 function Get-CompilerInfo($install, [string]$platform) {
   if ($platform -eq 'Win64') {
-    return @{
-      exe = Join-Path $install.Root 'bin\dcc64.exe'
-      lib = Join-Path $install.Root 'lib\win64\release'
-    }
+    $exe = Join-Path $install.Root 'bin\dcc64.exe'
+    $lib = Join-Path $install.Root 'lib\win64\release'
+  } else {
+    $exe = Join-Path $install.Root 'bin\dcc32.exe'
+    $lib = Join-Path $install.Root 'lib\win32\release'
   }
-  return @{
-    exe = Join-Path $install.Root 'bin\dcc32.exe'
-    lib = Join-Path $install.Root 'lib\win32\release'
+  # Versions before the platform aware layout keep the RTL directly in "lib".
+  if (-not (Test-Path $lib)) {
+    $flat = Join-Path $install.Root 'lib'
+    if (Test-Path $flat) { $lib = $flat }
   }
+  return @{ exe = $exe; lib = $lib }
 }
 
 function Format-Installation($install) {
