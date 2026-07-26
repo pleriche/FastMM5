@@ -9730,6 +9730,65 @@ begin
   end;
 end;
 
+{Returns True if the memory region [APStart, APStart + ASize) is entirely committed and readable.}
+function SharedMemoryManager_RegionIsReadable(APStart: Pointer; ASize: NativeUInt): Boolean;
+var
+  LRegionInfo: TMemoryRegionInfo;
+  LPCurrent, LPEnd, LPNextRegion: Pointer;
+begin
+  Result := False;
+  if (APStart = nil) or (ASize = 0) then
+    Exit;
+  LPCurrent := APStart;
+  LPEnd := Pointer(PAnsiChar(APStart) + ASize);
+  while NativeUInt(LPCurrent) < NativeUInt(LPEnd) do
+  begin
+    OS_GetVirtualMemoryRegionInfo(LPCurrent, LRegionInfo);
+    if (LRegionInfo.RegionState <> mrsAllocated) or (not (marRead in LRegionInfo.AccessRights)) then
+      Exit;
+    {Advance to the start of the next region.  Bail out if there is no forward progress (a defensive guard against a
+    zero-sized or backward region result).}
+    LPNextRegion := Pointer(PAnsiChar(LRegionInfo.RegionStartAddress) + LRegionInfo.RegionSize);
+    if NativeUInt(LPNextRegion) <= NativeUInt(LPCurrent) then
+      Exit;
+    LPCurrent := LPNextRegion;
+  end;
+  Result := True;
+end;
+
+{Returns True if APCodeAddress points into committed, executable memory.}
+function SharedMemoryManager_AddressIsExecutable(APCodeAddress: Pointer): Boolean;
+var
+  LRegionInfo: TMemoryRegionInfo;
+begin
+  Result := False;
+  if APCodeAddress = nil then
+    Exit;
+  OS_GetVirtualMemoryRegionInfo(APCodeAddress, LRegionInfo);
+  Result := (LRegionInfo.RegionState = mrsAllocated) and (marExecute in LRegionInfo.AccessRights);
+end;
+
+{The shared memory manager is discovered through a named file mapping whose name contains only the (public) process ID
+in a session-scoped namespace, so a hostile process in the same session can pre-create the mapping and publish an
+arbitrary pointer.  Before the record is adopted (and dereferenced) it is therefore validated:  the whole record must
+lie in committed, readable memory, and its three mandatory entry points must point into committed, executable memory.
+This turns a planted/garbage pointer into a graceful "no shared manager found" instead of an access violation.  It does
+not change the shared record format, so it remains compatible with the memory managers of other FastMM versions and the
+built-in memory manager - a genuine provider's record passes these checks.}
+function SharedMemoryManager_RecordIsValid(APMemoryManagerEx: PMemoryManagerEx): Boolean;
+var
+  LPEntryPoints: PPointerArray;
+begin
+  Result := False;
+  if not SharedMemoryManager_RegionIsReadable(APMemoryManagerEx, SizeOf(TMemoryManagerEx)) then
+    Exit;
+  {The mandatory GetMem, FreeMem and ReallocMem fields are the first three pointers in the record.}
+  LPEntryPoints := PPointerArray(APMemoryManagerEx);
+  Result := SharedMemoryManager_AddressIsExecutable(LPEntryPoints[0])
+    and SharedMemoryManager_AddressIsExecutable(LPEntryPoints[1])
+    and SharedMemoryManager_AddressIsExecutable(LPEntryPoints[2]);
+end;
+
 {Searches the current process for a shared memory manager}
 function FastMM_FindSharedMemoryManager: PMemoryManagerEx;
 var
@@ -9754,6 +9813,11 @@ begin
     end;
     Winapi.Windows.CloseHandle(LLocalMappingObjectHandle);
   end;
+
+  {The pointer comes from a mapping that an untrusted process could have created, so validate it before it is returned
+  (and subsequently dereferenced) - see SharedMemoryManager_RecordIsValid.}
+  if (Result <> nil) and (not SharedMemoryManager_RecordIsValid(Result)) then
+    Result := nil;
 end;
 
 {Searches the current process for a shared memory manager.  If no memory has been allocated using this memory manager
