@@ -53,6 +53,12 @@ The optimization strategy of the memory manager may be tuned via FastMM_SetOptim
 The default configuration should scale close to linearly up to between 8 and 16 threads, so for most applications there should be no need to tweak any performance settings. Beyond 16 threads you may consider increasing the number of arenas (CFastMM_...BlockArenaCount), but inspect the thread contention counts first (FastMM_...BlockThreadContentionCount), before assuming that it is necessary.
 
 
+### Profiling Tools
+The units in the Profiling folder are optional add-ons that build on the public FastMM5 API.  They are not required by, and have no effect on, the memory manager itself - simply add the unit to a project to use it.
+
+* FastMM_SamplingProfiler.pas - Runs a low priority background thread that periodically samples the memory manager state and appends it as a row to a CSV file, producing time series for the process memory footprint, the allocated/reserved/overhead byte counts, the memory manager efficiency and the small/medium/large block breakdown.  Optionally a second CSV is written with one row per small block size class per sample, so per-bin fragmentation can be tracked over time.  A callback may be registered to receive every sample, e.g. to feed a live dashboard.  This reveals memory growth and fragmentation trends that a single point-in-time snapshot cannot show.  See the demo under Demos\Profiling\Sampling Profiler.
+* FastMM_SnapshotDiff.pas - Captures point-in-time snapshots of all live allocations, aggregated by block content (class instances by class name, probable string data, unclassified blocks), and compares two snapshots taken at different times.  This answers the question "which classes grew between point A and point B?" without requiring debug mode, allocation groups or a recompile.  (FastMM_LogStateToFile can only diff allocation group ranges, which requires debug mode, whereas this diffs two arbitrary points in time in any mode.)  See the demo under Demos\Profiling\Snapshot Diff.
+
 ### The following conditional defines are supported
 * FastMM_FullDebugMode (or FullDebugMode) - If defined then FastMM_EnterDebugMode will be called on startup so that the memory manager starts up in debug mode.  If FullDebugMode is defined then the FastMM_DebugLibraryStaticDependency define is also implied.
 * FastMM_FullDebugModeWhenDLLAvailable (or FullDebugModeWhenDLLAvailable) - If defined an attempt will be made to load the debug support library during startup.  If successful then FastMM_EnterDebugMode will be called so that the memory manager starts up in debug mode.
@@ -69,6 +75,9 @@ The default configuration should scale close to linearly up to between 8 and 16 
 * FastMM_AttemptToUseSharedMM (or AttemptToUseSharedMM) - If defined FastMM_AttemptToUseSharedMemoryManager will be called during startup, switching to using the memory manager shared by another module (if there is a shared memory manager).
 * FastMM_NeverUninstall (or NeverUninstall) - Sets the FastMM_NeverUninstall global variable to True.  Use this if any leaked pointers should remain valid after this unit is finalized.
 * PurePascal - The assembly language code paths are disabled, and only the Pascal code paths are used.  This is normally used for debugging purposes only.
+
+### Tests
+The Tests folder contains console test programs covering the block size classes, the debug mode, the corruption scan, the mode transition and double free contracts, and multithreaded stress.  Each one exits with 0 when all its checks pass.  `pwsh -File Tests\RunTests.ps1` builds and runs all of them for Win32 and Win64 and exits with the number of failed runs;  it uses the newest installed Delphi version by default, with no configuration needed.  See Tests\README.md for the details.
 
 ### Supported Compilers
 Delphi XE3 and later
