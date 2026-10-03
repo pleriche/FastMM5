@@ -888,7 +888,7 @@ var
     + 'The leaks ordered by size are:'#13#10'{14}'#13#10#13#10
     + 'Memory leak detail was logged to {16}'#13#10;
   FastMM_MemoryLeakMessageBoxCaption: PWideChar = 'Unexpected Memory Leak';
-  {Attempts to free or reallocate a debug block that has alredy been freed.}
+  {Attempts to free or reallocate a debug block that has already been freed.}
   FastMM_DebugBlockDoubleFree: PWideChar = 'An attempt was made to free a block that has already been freed.'#13#10#13#10
     + 'The block size is {3}.'#13#10#13#10
     + 'The block was allocated on {25} {26} by thread {4}, and the stack trace (return addresses) at the time was:'
@@ -1547,7 +1547,7 @@ type
     function Equals(Obj: TObject): Boolean; override;
     function GetHashCode: Integer; override;
     function ToString: string; override;
-    function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
+    function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HRESULT; override;
     procedure AfterConstruction; override;
     procedure BeforeDestruction; override;
     procedure Dispatch(var Message); override;
@@ -1756,7 +1756,7 @@ var
   AlignmentRequestCounters: array[TFastMM_MinimumAddressAlignment] of Integer;
   AlignmentRequestCountersLock: TSimpleLock;
 
-  {The current optimization stategy in effect.}
+  {The current optimization strategy in effect.}
   OptimizationStrategy: TFastMM_MemoryManagerOptimizationStrategy;
 
 {$ifdef 32Bit}
@@ -2837,7 +2837,7 @@ end;
 {Returns the thread ID for the calling thread.}
 function OS_GetCurrentThreadID: Cardinal; inline;
 begin
-  Result := Winapi.Windows.GetCurrentThreadID;
+  Result := Winapi.Windows.GetCurrentThreadId;
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
@@ -4224,7 +4224,7 @@ begin
   Result := 0; //Suppress compiler warning
 end;
 
-function TFastMM_FreedObject.SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult;
+function TFastMM_FreedObject.SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HRESULT;
 begin
   VirtualMethodOnFreedObject('SafeCallException');
   Result := 0; //Suppress compiler warning
@@ -9750,7 +9750,7 @@ begin
     {Set up the loop counters}
     I := 0;
     J := ARightIndex - 1;
-    while true do
+    while True do
     begin
       {Find the first item from the left that does not sort before the pivot.}
       repeat
@@ -10789,7 +10789,8 @@ begin
         end
         else
           Result := @MoveMultipleOf64_Large;
-      end else if (ASmallBlockSize and 31) = 0 then
+      end
+      else if (ASmallBlockSize and 31) = 0 then
       begin
 {$ifdef X86ASM}
         if LSSE2Available then
@@ -10797,7 +10798,8 @@ begin
         else
 {$endif}
           Result := @MoveMultipleOf32;
-      end else if (ASmallBlockSize and 15) = 0 then
+      end
+      else if (ASmallBlockSize and 15) = 0 then
       begin
 {$ifdef X86ASM}
         if LSSE2Available then
@@ -10807,7 +10809,8 @@ begin
           Result := @MoveMultipleOf16;
 {$ifdef 32Bit}
       {Under 64-bit there are no block sizes that are a multiple of 8.}
-      end else if (ASmallBlockSize and 7) = 0 then
+      end
+      else if (ASmallBlockSize and 7) = 0 then
       begin
         Result := @MoveMultipleOf8;
 {$endif}
@@ -10938,7 +10941,7 @@ begin
     LPLargeBlockManager := @LargeBlockManagers[LArenaInd];
 
     LPLargeBlockManager.FirstLargeBlockHeader := PLargeBlockHeader(LPLargeBlockManager);
-    LPLargeBlockManager.LastLargeBlockHeader := PLargeBlockHeader(LPLargeBlockManager)
+    LPLargeBlockManager.LastLargeBlockHeader := PLargeBlockHeader(LPLargeBlockManager);
   end;
 
   {---------Debug setup-------}

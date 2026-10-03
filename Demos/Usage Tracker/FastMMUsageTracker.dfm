@@ -104,21 +104,21 @@ object fFastMMUsageTracker: TfFastMMUsageTracker
     object tsVMGraph: TTabSheet
       Caption = 'VM Graph'
       ImageIndex = 1
-      object Label1: TLabel
+      object LabelAddress: TLabel
         Left = 8
         Top = 440
         Width = 38
         Height = 13
         Caption = 'Address'
       end
-      object Label2: TLabel
+      object LabelState: TLabel
         Left = 152
         Top = 440
         Width = 25
         Height = 13
         Caption = 'State'
       end
-      object Label3: TLabel
+      object LabelExeOrDll: TLabel
         Left = 8
         Top = 468
         Width = 43

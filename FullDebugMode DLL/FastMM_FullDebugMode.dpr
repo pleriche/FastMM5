@@ -172,7 +172,7 @@ var
   LRemovedItemChildIndex, LMovedItemChildIndex: Integer;
   LMovedItem, LChildItem: PReturnAddressInfo;
 begin
-  {Is this entry currentlty in the tree?}
+  {Is this entry currently in the tree?}
   if AEntry.ParentEntry = nil then
     Exit;
 
@@ -567,7 +567,7 @@ end;
 found.  This is the "raw" stack tracing routine.}
 
 {$IFDEF MACOS}
-function backtrace(result: PNativeUInt; size: Integer): Integer; cdecl; external libc name '_backtrace';
+function backtrace(Result: PNativeUInt; size: Integer): Integer; cdecl; external libc name '_backtrace';
 function _NSGetExecutablePath(buf: PAnsiChar; BufSize: PCardinal): Integer; cdecl; external libc name '__NSGetExecutablePath';
 {$ENDIF}
 
@@ -924,10 +924,10 @@ begin
     AMaxDepth,
     ABuffer,
     {madExcept stack trace fine tuning}
-    false, //hide items which have no line number information?
-    true,  //show relative address offset to procedure entrypoint?
-    true,  //show relative line number offset to procedure entry point?
-    false  //skip special noise reduction processing?
+    False, //hide items which have no line number information?
+    True,  //show relative address offset to procedure entrypoint?
+    True,  //show relative line number offset to procedure entry point?
+    False  //skip special noise reduction processing?
     );
 end;
 {$endif}

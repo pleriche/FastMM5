@@ -86,9 +86,9 @@ type
     tsGeneralInformation: TTabSheet;
     mVMStatistics: TMemo;
     sgVMDump: TStringGrid;
-    Label1: TLabel;
-    Label2: TLabel;
-    Label3: TLabel;
+    LabelAddress: TLabel;
+    LabelState: TLabel;
+    LabelExeOrDll: TLabel;
     eAddress: TEdit;
     eState: TEdit;
     eDLLName: TEdit;
@@ -124,7 +124,7 @@ type
     AddressSpacePageCount: Integer;
     OR_VMDumpDownCell: TGridCoord;
     procedure HeaderClicked(AGrid: TStringgrid; const ACell: TGridCoord);
-    procedure SortGrid(grid: TStringgrid; PB_Nummeric: Boolean; byColumn: Integer; ascending: Boolean);
+    procedure SortGrid(grid: TStringgrid; PB_Numeric: Boolean; byColumn: Integer; ascending: Boolean);
     procedure UpdateGraphMetrics;
   public
     {Refreshes the display}
@@ -314,7 +314,7 @@ begin
   Action := caFree;
 end;
 
-procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean; byColumn: Integer; ascending: Boolean);
+procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Numeric: Boolean; byColumn: Integer; ascending: Boolean);
 
   function CompareNumeric(const S1, S2: string): Integer;
   var
@@ -345,7 +345,7 @@ procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean;
       Grid.Cols[k].Exchange(i, j);
   end;
 
-  procedure QuickSortNummeric(L, R: Integer);
+  procedure QuickSortNumeric(L, R: Integer);
   var
     I, J: Integer;
     P: string;
@@ -368,7 +368,7 @@ procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean;
         end;
       until I > J;
       if L < J then
-        QuickSortNummeric(L, J);
+        QuickSortNumeric(L, J);
       L := I;
     until I >= R;
   end;
@@ -416,11 +416,11 @@ procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean;
   end;
 
 begin
-  Screen.Cursor := crHourglass;
+  Screen.Cursor := crHourGlass;
   Grid.Perform(WM_SETREDRAW, 0, 0);
   try
-    if PB_Nummeric then
-      QuickSortNummeric(Grid.FixedRows, Grid.Rowcount - 1)
+    if PB_Numeric then
+      QuickSortNumeric(Grid.FixedRows, Grid.Rowcount - 1)
     else
       QuickSortString(Grid.FixedRows, Grid.Rowcount - 1);
     if not Ascending then
@@ -527,7 +527,7 @@ var
           for i := LRegionStartIndex to LRegionEndIndex do
             AMemoryMap[i] := LChunkState;
           LRegionStartIndex := LRegionEndIndex;
-        end
+        end;
       end;
       Inc(LRegionStartIndex);
     until LRegionStartIndex >= AddressSpacePageCount;
@@ -542,9 +542,9 @@ var
     LA_Char: array[0..MAX_PATH] of Char;
   begin
     LP_Base := nil;
-    LU_rv := VirtualQuery(LP_Base, LR_Info, sizeof(LR_Info));
+    LU_rv := VirtualQuery(LP_Base, LR_Info, SizeOf(LR_Info));
     LI_I := 1;
-    while LU_rv = sizeof(LR_Info) do
+    while LU_rv = SizeOf(LR_Info) do
     begin
       with sgVMDump do
       begin
@@ -567,7 +567,7 @@ var
               else
               begin
                 Cells[4, LI_I] := '';
-                Cells[2, LI_I] := 'Commited';
+                Cells[2, LI_I] := 'Committed';
               end;
             end;
 
@@ -588,7 +588,7 @@ var
         end;
 
         Inc(LP_Base, LR_Info.RegionSize);
-        LU_rv := VirtualQuery(LP_Base, LR_Info, sizeof(LR_Info));
+        LU_rv := VirtualQuery(LP_Base, LR_Info, SizeOf(LR_Info));
         Inc(LI_I);
       end;
     end;
@@ -766,7 +766,8 @@ var
         begin
           if MP_NtQuerySystemInformation(SystemBasicInformation, @LR_SysBaseInfo, SizeOf(LR_SysBaseInfo), nil) = 0 then
           begin
-            with LR_SysBaseInfo do begin
+            with LR_SysBaseInfo do 
+            begin
               Add('Maximum Increment                 = ' + CardinalToKStringFormatted(uKeMaximumIncrement));
               Add('Page Size                         = ' + CardinalToKStringFormatted(uPageSize));
               Add('Number of Physical Pages          = ' + CardinalToKStringFormatted(uMmNumberOfPhysicalPages));
@@ -901,8 +902,8 @@ end;
 procedure TfFastMMUsageTracker.sgBlockStatisticsDrawCell(Sender: TObject;
   ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
-  d: integer;
-  y: integer;
+  d: Integer;
+  y: Integer;
   s: string;
   LOldColour, LColour: TColor;
 begin
@@ -919,7 +920,7 @@ begin
     s := sgBlockStatistics.Cells[ACol, ARow];
     y := sgBlockStatistics.Canvas.TextHeight(s);
     y := ((Rect.Bottom - Rect.Top) - y) div 2;
-    sgBlockStatistics.Canvas.TextRect(Rect, Rect.Left + 2, Rect.top + y, s);
+    sgBlockStatistics.Canvas.TextRect(Rect, Rect.Left + 2, Rect.Top + y, s);
     sgBlockStatistics.Canvas.Brush.Color := LOldColour;
   end;
 end;
@@ -942,7 +943,7 @@ end;
 procedure TfFastMMUsageTracker.dgMemoryMapDrawCell(Sender: TObject; ACol,
   ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
-  LChunkIndex: integer;
+  LChunkIndex: Integer;
   LChunkColour: TColor;
 begin
   {Get the chunk index}
@@ -1002,7 +1003,7 @@ procedure TfFastMMUsageTracker.dgMemoryMapSelectCell(Sender: TObject; ACol,
 var
   LChunkIndex: Cardinal;
   LMBI: TMemoryBasicInformation;
-  LA_Char: array[0..MAX_PATH] of char;
+  LA_Char: array[0..MAX_PATH] of Char;
 begin
   eDLLName.Text := '';
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
@@ -1097,7 +1098,7 @@ begin
   if (Button = mbLeft) and (Shift = []) then
   begin
     LGrid.MouseToCell(X, Y, p.X, p.Y);
-    if CompareMem(@p, @OR_VMDumpDownCell, sizeof(p))
+    if CompareMem(@p, @OR_VMDumpDownCell, SizeOf(p))
       and (p.Y < LGrid.FixedRows)
       and (p.X >= LGrid.FixedCols) then
     begin
@@ -1123,13 +1124,13 @@ begin
         LMarker := 't' // up wedge in Marlett font
       else
         LMarker := 'u'; // down wedge in Marlett font
-      with LGrid.canvas do
+      with LGrid.Canvas do
       begin
         Font.Name := 'Marlett';
         Font.Charset := SYMBOL_CHARSET;
         Font.Size := 12;
         TextOut(Rect.Right - TextWidth(LMarker), Rect.Top, LMarker);
-        Font := LGrid.font;
+        Font := LGrid.Font;
       end;
     end;
   end;
