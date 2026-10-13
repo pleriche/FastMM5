@@ -1208,6 +1208,10 @@ type
 
   TMoveProc = procedure(const ASource; var ADest; ACount: NativeInt);
 
+  {An offset with an ABA counter, for lock-free compare-and-swap operations.  Where the two halves are read separately
+  (32-bit code) the counter must be read first:  An offset read first could belong to the previous sequential feed span
+  while the counter and the span read after it belong to a new one, and if the new span starts at the same offset the
+  compare-and-swap would then succeed with the previous span.  64-bit code reads both halves in one operation.}
   TIntegerWithABACounter = record
     case Integer of
       0: (IntegerAndABACounter: Int64);
@@ -5575,9 +5579,9 @@ asm
   mov ebp, edx
 @TrySequentialFeedLoop:
 
-  {Get the old ABA counter and offset in edx:eax}
-  mov eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
+  {Get the old ABA counter and offset in edx:eax.  The counter must be read first (see TIntegerWithABACounter).}
   mov edx, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.ABACounter
+  mov eax, TMediumBlockManager(esi).LastMediumBlockSequentialFeedOffset.IntegerValue
 
   {Get the available size in ecx, and check that it is sufficient.}
   lea ecx, [eax - CMediumBlockSpanHeaderSize]
@@ -5639,7 +5643,15 @@ begin
   {The arena is not necessarily locked, so we may have to try several times to split off a block.}
   while True do
   begin
+    {The counter must be read first if the two halves are read separately (see TIntegerWithABACounter).}
+{$ifdef 32Bit}
+    LPreviousLastSequentialFeedBlockOffset.ABACounter :=
+      APMediumBlockManager.LastMediumBlockSequentialFeedOffset.ABACounter;
+    LPreviousLastSequentialFeedBlockOffset.IntegerValue :=
+      APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
+{$else}
     LPreviousLastSequentialFeedBlockOffset := APMediumBlockManager.LastMediumBlockSequentialFeedOffset;
+{$endif}
 
     {Is there space available for at least the minimum size block?}
     LBlockSize := LPreviousLastSequentialFeedBlockOffset.IntegerValue - CMediumBlockSpanHeaderSize;
@@ -7126,9 +7138,9 @@ asm
   mov esi, eax
 @TrySequentialFeedLoop:
 
-  {Get the old ABA counter and offset in edx:eax}
-  mov eax, TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue
+  {Get the old ABA counter and offset in edx:eax.  The counter must be read first (see TIntegerWithABACounter).}
   mov edx, TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.ABACounter
+  mov eax, TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue
 
   {Get the new ABA counter and offset in ecx:ebx}
   movzx edi, TSmallBlockManager(esi).BlockSize
@@ -7211,7 +7223,15 @@ var
 begin
   while True do
   begin
+    {The counter must be read first if the two halves are read separately (see TIntegerWithABACounter).}
+{$ifdef 32Bit}
+    LPreviousLastSequentialFeedBlockOffset.ABACounter :=
+      APSmallBlockManager.LastSmallBlockSequentialFeedOffset.ABACounter;
+    LPreviousLastSequentialFeedBlockOffset.IntegerValue :=
+      APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
+{$else}
     LPreviousLastSequentialFeedBlockOffset := APSmallBlockManager.LastSmallBlockSequentialFeedOffset;
+{$endif}
 
     {Subtract the block size and increment the ABA counter to the new sequential feed offset.}
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
