@@ -5771,15 +5771,18 @@ begin
       {Split the block in two}
       LPSecondSplit := PMediumFreeBlockContent(PByte(Result) + LBestMatchBlockSize);
       LPMediumBlockSpan := GetMediumBlockSpan(Result);
-      SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, True, False);
+      SetMediumBlockHeader_SetSizeAndFlags(LPSecondSplit, LSecondSplitSize, False, False);
       SetMediumBlockHeader_SetMediumBlockSpan(LPSecondSplit, LPMediumBlockSpan);
 
-      {The second split is an entirely new block so all the header fields must be set.}
+      {The second split is an entirely new block so all the header fields must be set.  The first split is in use.}
       SetMediumBlockHeader_SetIsSmallBlockSpan(LPSecondSplit, False);
+      PMediumBlockHeader(LPSecondSplit)[-1].PreviousBlockIsFree := False;
 
-      {Bin the second split.}
-      if LSecondSplitSize >= CMinimumMediumBlockSize then
-        InsertMediumBlockIntoBin(APMediumBlockManager, LPSecondSplit, LSecondSplitSize);
+      {Free the second split.  Unlike a block taken from a bin, a block taken from the pending free list was not free,
+      so the block following it may be free and the second split must be merged with it.  The first split is in use,
+      so the span cannot become entirely free and be released here.}
+      FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(APMediumBlockManager, LPMediumBlockSpan,
+        LPSecondSplit, False);
 
     end;
 
