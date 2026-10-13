@@ -752,7 +752,7 @@ times than FastMM_EndEraseFreedBlockContent and the last Begin/End call was succ
 function FastMM_EraseFreedBlockContentActive: Boolean;
 
 {Gets/sets the depth of allocation and free stack traces in debug mode.  The minimum stack trace depth is 0, and the
-maximum is CFastMM_MaximumStackTraceEntryCount.}
+maximum is CFastMM_StackTrace_MaximumEntryCount.}
 function FastMM_GetDebugModeStackTraceEntryCount: Byte;
 procedure FastMM_SetDebugModeStackTraceEntryCount(AStackTraceEntryCount: Byte);
 
@@ -5024,7 +5024,7 @@ var
 begin
   {Get the block header}
   LPLargeBlockHeader := @PLargeBlockHeader(APointer)[-1];
-  {Large block - size is (16 + 4) less than the allocated size}
+  {The available size is the actual block size less the large block header.}
   LOldAvailableSize := LPLargeBlockHeader.ActualBlockSize - CLargeBlockHeaderSize;
   {Is it an upsize or a downsize?}
   if ANewSize > LOldAvailableSize then
@@ -6189,8 +6189,7 @@ asm
   test al, al
   jnz @Attempt1NextManager
 
-  {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
-  a block that is of sufficient size if possible.}
+  {1.1) Process the pending free list of this arena, and reuse a block that is of sufficient size if possible.}
   cmp TMediumBlockManager(esi).PendingFreeList, 0
   je @Attempt1NoPendingFrees
   mov eax, esi
@@ -6383,8 +6382,7 @@ begin
         and (AtomicExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1) = 0) then
       begin
 
-        {1.1) Process pending free lists:  Scan the pending free lists for all medium block managers first, and reuse
-        a block that is of sufficient size if possible.}
+        {1.1) Process the pending free list of this arena, and reuse a block that is of sufficient size if possible.}
         if LPMediumBlockManager.PendingFreeList <> nil then
         begin
           Result := FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock(LPMediumBlockManager, AMinimumBlockSize,
