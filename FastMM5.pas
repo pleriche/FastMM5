@@ -11526,7 +11526,7 @@ begin
 
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
   FastMM has been uninstalled:  https://quality.embarcadero.com/browse/RSP-16796}
-  if CurrentInstallationState = mmisInstalled then
+  if CurrentInstallationState in [mmisInstalled, mmisUsingSharedMemoryManager] then
     SetLocaleOverride('');
 
   {All pending frees must be released before a leak check can be performed.}
