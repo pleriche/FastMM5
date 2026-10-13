@@ -4625,6 +4625,8 @@ begin
   as not containing any debug information, otherwise a concurrent call to FastMM_ScanDebugBlocksForCorruption may flag
   this block as corrupted.}
   SetBlockHasDebugInfo(LPActualBlock, False);
+  {Without the barrier an ARM CPU may make the updates below visible to other threads before the cleared flag.}
+  WeakMemoryOrderingBarrier;
 
   {Update the information in the block header.}
   LPActualBlock.FreedByThread := OS_GetCurrentThreadID;
@@ -4641,7 +4643,9 @@ begin
   {Update the header and footer checksums}
   LPActualBlock.CalculateAndSetHeaderAndFooterCheckSums;
 
-  {Restore the debug information flag.}
+  {Restore the debug information flag.  Without the barrier an ARM CPU may make the flag visible to other threads before
+  the updates above.}
+  WeakMemoryOrderingBarrier;
   SetBlockHasDebugInfo(LPActualBlock, True);
 
   {Return the actual block to the memory pool.}
@@ -4677,6 +4681,8 @@ begin
     as not containing any debug information, otherwise a concurrent call to FastMM_ScanDebugBlocksForCorruption may flag
     this block as corrupted.}
     SetBlockHasDebugInfo(LPActualBlock, False);
+    {Without the barrier an ARM CPU may make the updates below visible to other threads before the cleared flag.}
+    WeakMemoryOrderingBarrier;
 
     LPOldFooter := LPActualBlock.DebugFooterPtr;
 
@@ -4688,7 +4694,9 @@ begin
     LPNewFooter := LPActualBlock.DebugFooterPtr;
     System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize - CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 
-    {Restore the debug information flag.}
+    {Restore the debug information flag.  Without the barrier an ARM CPU may make the flag visible to other threads
+    before the updates above.}
+    WeakMemoryOrderingBarrier;
     SetBlockHasDebugInfo(LPActualBlock, True);
 
     Result := APointer;
@@ -4715,7 +4723,9 @@ begin
       {Free the old block.}
       FastMM_FreeMem_FreeDebugBlock(APointer);
 
-      {Set the flag in the actual block header to indicate that the block contains debug information.}
+      {Set the flag in the actual block header to indicate that the block contains debug information.  Without the
+      barrier an ARM CPU may make the flag visible to other threads before the debug header and footer.}
+      WeakMemoryOrderingBarrier;
       SetBlockHasDebugInfo(Result, True);
 
       {Return a pointer to the user data}
@@ -8439,7 +8449,9 @@ begin
   if AFillBlockWithDebugPattern then
     FillAllocatedDebugBlockWithDebugPattern(Result);
 
-  {Set the flag in the actual block header to indicate that the block contains debug information.}
+  {Set the flag in the actual block header to indicate that the block contains debug information.  Without the barrier
+  an ARM CPU may make the flag visible to other threads before the debug header and footer.}
+  WeakMemoryOrderingBarrier;
   SetBlockHasDebugInfo(Result, True);
 
   {If the current allocation number matches FastMM_DebugBreakAllocationNumber then trigger a break point in the
@@ -8766,6 +8778,10 @@ function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastM
 begin
   if AMayCheckForDebugInfo and BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
+    {The debug header must be read after the flag, but an ARM CPU may otherwise perform the reads in the opposite
+    order.}
+    WeakMemoryOrderingBarrier;
+
     ABlockInfo.DebugInformation := ABlockInfo.BlockAddress;
     ABlockInfo.UsableSize := ABlockInfo.DebugInformation.UserSize;
     Inc(PByte(ABlockInfo.BlockAddress), CDebugBlockHeaderSize);
@@ -9191,7 +9207,9 @@ begin
 
     {Is the block still flagged as containing debug info?  If not then another thread is either manipulating its debug
     information or it is a small block for which the header wasn't set yet.  We therefore assume that the block is
-    intact.}
+    intact.  The flag must be read after the checksums, but an ARM CPU may otherwise perform the reads in the opposite
+    order and miss that another thread has started to update the block.}
+    WeakMemoryOrderingBarrier;
     if not BlockHasDebugInfo(ABlockInfo.DebugInformation) then
       Exit;
 
