@@ -8300,6 +8300,84 @@ begin
 {$endif}
 end;
 
+{The ReallocMem entry point while the content of allocated or freed blocks is being erased.  FastMM_ReallocMem frees
+the old block, or the part of it that is no longer needed, without erasing it, and does not fill the space that it adds.
+This routine therefore only resizes a block in place if nothing would be freed, and otherwise moves it through the
+erasing GetMem and FreeMem routines.  The thresholds for moving a block and the margins for growing it are those of
+FastMM_ReallocMem.}
+function FastMM_ReallocMem_EraseBlockContent(APointer: Pointer; ANewSize: NativeInt): Pointer;
+var
+  LBlockHeader: Integer;
+  LIsSmallBlock, LResizeInPlace: Boolean;
+  LAvailableSize, LNewAllocSize, LMoveSize: NativeInt;
+begin
+  LBlockHeader := PBlockStatusFlags(APointer)[-1];
+
+  {Blocks with debug information, invalid pointers and negative sizes are left to FastMM_ReallocMem.  The debug block
+  routines erase debug blocks when they are freed.}
+  if (ANewSize < 0)
+    or ((LBlockHeader and (CBlockIsFreeFlag or CIsSmallBlockFlag) <> CIsSmallBlockFlag)
+      and (LBlockHeader and (not CHasDebugInfoFlag) <> CIsMediumBlockFlag)
+      and (LBlockHeader and (not CHasDebugInfoFlag) <> CIsLargeBlockFlag)) then
+  begin
+    Exit(FastMM_ReallocMem(APointer, ANewSize));
+  end;
+
+  LIsSmallBlock := LBlockHeader and CIsSmallBlockFlag <> 0;
+  LAvailableSize := FastMM_BlockMaximumUserBytes(APointer);
+
+  if ANewSize > LAvailableSize then
+  begin
+    {Grow by the same margin as FastMM_ReallocMem, so that the block is not moved again on every subsequent upsize.}
+    if LIsSmallBlock then
+      LNewAllocSize := LAvailableSize shl 1 + CSmallBlockUpsizeAdder
+    else
+      LNewAllocSize := LAvailableSize + (LAvailableSize shr 2);
+    if LNewAllocSize < ANewSize then
+      LNewAllocSize := ANewSize;
+    LMoveSize := FastMM_BlockCurrentUserBytes(APointer);
+  end
+  else
+  begin
+    {The new size fits:  The block is kept unless the new size is less than a quarter (small blocks) or half (medium
+    and large blocks) of the available size.}
+    if LIsSmallBlock then
+      LResizeInPlace := (ANewSize shl 2 + CSmallBlockDownsizeCheckAdder) >= LAvailableSize
+    else
+      LResizeInPlace := ANewSize >= (LAvailableSize shr 1);
+
+    if LResizeInPlace then
+    begin
+      {The requested size is stored for large blocks.}
+      if LBlockHeader and (not CHasDebugInfoFlag) = CIsLargeBlockFlag then
+        PLargeBlockHeader(APointer)[-1].UserAllocatedSize := ANewSize;
+      Exit(APointer);
+    end;
+
+    LNewAllocSize := ANewSize;
+    LMoveSize := ANewSize;
+  end;
+
+  if EraseAllocatedBlockContentCounter > 0 then
+    Result := FastMM_GetMem_EraseAllocatedBlock(LNewAllocSize)
+  else
+    Result := FastMM_GetMem(LNewAllocSize);
+
+  if Result <> nil then
+  begin
+    {The requested size is stored for large blocks.}
+    if LNewAllocSize > (CMaximumMediumBlockSize - CMediumBlockHeaderSize) then
+      PLargeBlockHeader(Result)[-1].UserAllocatedSize := ANewSize;
+
+    System.Move(APointer^, Result^, LMoveSize);
+
+    if EraseFreedBlockContentCounter > 0 then
+      FastMM_FreeMem_EraseBeforeFree(APointer)
+    else
+      FastMM_FreeMem(APointer);
+  end;
+end;
+
 function FastMM_AllocMem(ASize: NativeInt): Pointer;
 begin
   Result := FastMM_GetMem(ASize);
@@ -10956,7 +11034,10 @@ begin
       LNewMemoryManager.FreeMem := FastMM_FreeMem
     else
       LNewMemoryManager.FreeMem := FastMM_FreeMem_EraseBeforeFree;
-    LNewMemoryManager.ReallocMem := FastMM_ReallocMem;
+    if (EraseAllocatedBlockContentCounter <= 0) and (EraseFreedBlockContentCounter <= 0) then
+      LNewMemoryManager.ReallocMem := FastMM_ReallocMem
+    else
+      LNewMemoryManager.ReallocMem := FastMM_ReallocMem_EraseBlockContent;
     LNewMemoryManager.AllocMem := FastMM_AllocMem;
     LNewMemoryManager.RegisterExpectedMemoryLeak := FastMM_RegisterExpectedMemoryLeak;
     LNewMemoryManager.UnregisterExpectedMemoryLeak := FastMM_UnregisterExpectedMemoryLeak;
