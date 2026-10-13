@@ -7,7 +7,8 @@ Description:
  stack traces.
 
 Usage:
- 1) To compile you will need the JCL library (http://sourceforge.net/projects/jcl/)
+ 1) To compile you will need the JCL library (http://sourceforge.net/projects/jcl/).  The Windows on ARM (Arm64EC) DLL
+    does not use the JCL, since the JCL does not support Arm64EC yet.
  2) Place in the same location as the replacement borlndmm.dll or your application's executable module.
 
 Change log:
@@ -56,6 +57,12 @@ Change log:
  Version 1.71 (29 April 2026)
   - Reduce the number of false positives in the 64-bit stack tracing code by skipping opcodes that are only valid in
     32-bit mode.
+ Version 1.72 (14 October 2026)
+  - Added support for Windows on ARM (Arm64EC).  The DLL is named FastMM_FullDebugModeArm64EC.dll, and raw stack traces
+    are the same as frame based stack traces:  Both walk the stack with the unwind information.  The JCL does not
+    support Arm64EC yet, so return addresses are described by module and offset only.
+  - 64-bit frame based stack traces no longer start with a return address inside this DLL.
+  - If no stack tracing library is selected, return addresses are described by module and offset.
 
 }
 
@@ -70,6 +77,16 @@ time.}
 {.$define EurekaLog_V7}
 
 {--------------------End of options block-------------------------}
+
+{The JCL does not support Windows on ARM (Arm64EC) yet.}
+{$ifdef ARM64EC}
+{$undef JCLDebug}
+{$endif}
+
+{Without a stack tracing library return addresses are described by module and offset only.}
+{$if not (defined(JCLDebug) or defined(madExcept) or defined(EurekaLog_Legacy) or defined(EurekaLog_V7))}
+{$define ModuleAndOffsetOnly}
+{$ifend}
 {$ENDIF}
 
 // JCL_DEBUG_EXPERT_INSERTJDBG OFF
@@ -88,8 +105,10 @@ uses
 {$Warn Symbol_Platform off}
 {$Align 8}
 
-{The name of the 64-bit DLL has a '64' at the end.}
-{$if SizeOf(Pointer) = 8}
+{The name of the 64-bit DLL has a '64' at the end, and that of the Windows on ARM (Arm64EC) DLL 'Arm64EC'.}
+{$if defined(ARM64EC)}
+{$LIBSUFFIX 'Arm64EC'}
+{$elseif SizeOf(Pointer) = 8}
 {$LIBSUFFIX '64'}
 {$ifend}
 
@@ -259,6 +278,7 @@ end;
 
 {--------------------------Stack Tracing Subroutines--------------------------}
 
+{$ifndef ARM64EC}
 procedure GetStackRange(var AStackBaseAddress, ACurrentStackPointer: NativeUInt);
 asm
   {$if SizeOf(Pointer) = 8}
@@ -271,6 +291,7 @@ asm
   mov [edx], ebp
   {$ifend}
 end;
+{$endif}
 
 {--------------------------Frame Based Stack Tracing--------------------------}
 
@@ -288,7 +309,8 @@ type
 var
   LCapturedFrameCount: Cardinal;
 begin
-  LCapturedFrameCount := CaptureStackBackTrace(ASkipFrames, AMaxDepth, AReturnAddresses, nil);
+  {RtlCaptureStackBackTrace includes the frame of this routine, so one more frame is skipped.}
+  LCapturedFrameCount := CaptureStackBackTrace(ASkipFrames + 1, AMaxDepth, AReturnAddresses, nil);
 
   {Clear trailing entries}
   while LCapturedFrameCount < AMaxDepth do
@@ -411,6 +433,11 @@ begin
   end;
 end;
 {$ENDIF}
+
+{Raw stack tracing scans the stack for x86/x64 call instructions and needs inline assembler, neither of which applies
+to Windows on ARM (Arm64EC).  The Arm64EC DLL exports the frame based stack tracing routine under both names instead:
+It walks the stack with the unwind information, which does not depend on frame pointers.}
+{$ifndef ARM64EC}
 
 {Thread-safe version that avoids the global variable Default8087CW.}
 procedure Set8087CW(ANewCW: Word);
@@ -706,6 +733,8 @@ begin
   {$ENDIF}
 end;
 
+{$endif}
+
 {--------------------------DLL load and unload notifications--------------------------}
 
 {$IFDEF MSWINDOWS}
@@ -794,7 +823,7 @@ end;
 
 {Gets the textual representation of the stack trace into ABuffer and returns a pointer to the position just after the
 last character.}
-{$ifdef JCLDebug}
+{$if defined(JCLDebug) or defined(ModuleAndOffsetOnly)}
 {Converts an unsigned integer to a hexadecimal string at the buffer location, returning the new buffer position.}
 function NativeUIntToHexBuf(ANum: NativeUInt; APBuffer: PAnsiChar): PAnsiChar;
 const
@@ -823,7 +852,9 @@ begin
   System.Move(LDigitBuffer[MaxDigits - LCount], APBuffer^, LCount);
   Result := APBuffer + LCount;
 end;
+{$ifend}
 
+{$ifdef JCLDebug}
 {Subroutine used by LogStackTrace}
 procedure AppendInfoToString(var AString: string; const AInfo: string);
 begin
@@ -910,6 +941,49 @@ begin
     end;
 
     LLogStackTrace_Locked := 0;
+  end;
+end;
+{$endif}
+
+{$ifdef ModuleAndOffsetOnly}
+{Describes each return address by the name of the module containing it and its offset in that module, e.g.
+"MyApp.exe+1A2B3C".  The offset can be looked up in the map file of the module, after subtracting the address of the
+code section (usually $1000).}
+function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LMemInfo: TMemoryBasicInformation;
+  LModuleFileName: array[0..MAX_PATH] of Char;
+  LInfoText: AnsiString;
+begin
+  Result := ABuffer;
+
+  for LInd := 1 to AMaxDepth do
+  begin
+    LAddress := AReturnAddresses^;
+    if LAddress = 0 then
+      Exit;
+    Result^ := #13;
+    Inc(Result);
+    Result^ := #10;
+    Inc(Result);
+    Result := NativeUIntToHexBuf(LAddress, Result);
+
+    {Find the module containing the call instruction, which is at least one byte before the return address.  The image
+    of a module is a single allocation, so the allocation base is the module handle.}
+    if (VirtualQuery(Pointer(LAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
+      and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
+    begin
+      LInfoText := AnsiString(Format(' [%s+%x]', [ExtractFileName(LModuleFileName),
+        LAddress - NativeUInt(LMemInfo.AllocationBase)]));
+      if Length(LInfoText) > CMaxInfoTextLength then
+        SetLength(LInfoText, CMaxInfoTextLength);
+      System.Move(Pointer(LInfoText)^, Result^, Length(LInfoText));
+      Inc(Result, Length(LInfoText));
+    end;
+
+    Inc(AReturnAddresses);
   end;
 end;
 {$endif}
@@ -1027,7 +1101,11 @@ end;
 
 exports
   GetFrameBasedStackTrace,
+{$ifdef ARM64EC}
+  GetFrameBasedStackTrace name 'GetRawStackTrace',
+{$else}
   GetRawStackTrace,
+{$endif}
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
 {$ENDIF}
