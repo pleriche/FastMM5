@@ -3309,7 +3309,7 @@ begin
   Result := APTarget;
 
   if AValue < 0 then
-    Result := AppendTextToBuffer(@CMinusSign, 1, Result, APTargetBufferEnd);
+    Result := AppendTextToBuffer(CMinusSign, 1, Result, APTargetBufferEnd);
 
   Result := NativeUIntToTextBuffer(NativeUInt(Abs(AValue)), Result, APTargetBufferEnd);
 end;
