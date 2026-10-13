@@ -11342,16 +11342,12 @@ begin
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
 end;
 
-procedure FastMM_ApplyConditionalDefines;
+{Applies the conditional defines that configure event reporting.  This must be done before the memory manager is
+installed, since installation errors are reported as events.}
+procedure FastMM_ApplyConditionalDefines_EventReporting;
 begin
-  {This procedure provides backward compatibility with the conditional defines of FastMM4.}
-
   {$ifdef FastMM_ClearLogFileOnStartup}
   FastMM_DeleteEventLogFile;
-  {$endif}
-
-  {$ifdef FastMM_Align16Bytes}
-  FastMM_EnterMinimumAddressAlignment(maa16Bytes);
   {$endif}
 
   {$ifdef FastMM_EnableMemoryLeakReporting}
@@ -11371,6 +11367,14 @@ begin
 
   {$ifdef FastMM_NoMessageBoxes}
   FastMM_MessageBoxEvents := [];
+  {$endif}
+end;
+
+{Applies the conditional defines that require the memory manager to be installed.}
+procedure FastMM_ApplyConditionalDefines_AfterInstallation;
+begin
+  {$ifdef FastMM_Align16Bytes}
+  FastMM_EnterMinimumAddressAlignment(maa16Bytes);
   {$endif}
 
   {$if defined(FastMM_FullDebugModeWhenDLLAvailable)}
@@ -11502,13 +11506,14 @@ begin
   UnitCurrentlyInitialized := True;
 
   FastMM_InitializeMemoryManager;
+  FastMM_ApplyConditionalDefines_EventReporting;
   FastMM_InstallMemoryManager;
 
   {If installation was successful, check for any legacy FastMM4 conditional defines and adjust the configuration
   accordingly.}
   if CurrentInstallationState = mmisInstalled then
   begin
-    FastMM_ApplyConditionalDefines;
+    FastMM_ApplyConditionalDefines_AfterInstallation;
     Result := True;
   end
   else
