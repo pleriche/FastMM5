@@ -10313,10 +10313,6 @@ var
   LChildDirection: Boolean;
   i: Integer;
 begin
-  {If there's no space to add another entry then we need to abort in order to avoid a potential buffer overrun.}
-  if APLeakSummary.LeakCount >= Length(APLeakSummary.MemoryLeakEntries) then
-    Exit;
-
   {Try to find the block type in the list.}
   i := 0;
   if APLeakSummary.LeakCount > 0 then
@@ -10347,6 +10343,11 @@ begin
       i := LPSummaryEntry.ChildIndexes[LChildDirection];
       if i = 0 then
       begin
+        {If there's no space to add another entry then we need to abort in order to avoid a potential buffer overrun.
+        This is only checked here, so that leaks of block types that are already in the list are still counted.}
+        if APLeakSummary.LeakCount >= Length(APLeakSummary.MemoryLeakEntries) then
+          Exit;
+
         LPSummaryEntry.ChildIndexes[LChildDirection] := APLeakSummary.LeakCount;
         Break;
       end;
