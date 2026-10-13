@@ -80,10 +80,11 @@ Usage Instructions:
     memory manager starts up in debug mode.
 
     FastMM_DebugLibraryStaticDependency - If defined there will be a static dependency on the debug support library,
-    FastMM_FullDebugMode.dll (32-bit) or FastMM_FullDebugMode64.dll (64-bit).  If FastMM_EnterDebugMode will be called
-    in the startup code and the memory manager will also be shared between an application and libraries, then it
-    may be necessary to enable this define in order to avoid DLL unload order issues during application shutdown
-    (typically manifesting as an access violation when attempting to report on memory leaks during shutdown).
+    FastMM_FullDebugMode.dll (32-bit), FastMM_FullDebugMode64.dll (64-bit) or FastMM_FullDebugModeArm64EC.dll (Windows
+    on ARM).  If FastMM_EnterDebugMode will be called in the startup code and the memory manager will also be shared
+    between an application and libraries, then it may be necessary to enable this define in order to avoid DLL unload
+    order issues during application shutdown (typically manifesting as an access violation when attempting to report on
+    memory leaks during shutdown).
     It is a longstanding issue with Windows that it is not always able to unload DLLs in the correct order during
     application shutdown when DLLs are loaded dynamically during startup.  Note that while enabling this define will
     introduce a static dependency on the debug support library, it does not actually enter debug mode by default -
@@ -291,8 +292,17 @@ const
   CFastMM_LargeBlockArenaCount = 8;
 {$endif}
 
-  {The default name of the debug support library.}
-  CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
+  {The default name of the debug support library.  Windows on ARM (Arm64EC) applications can load the x64 library, but
+  its stack tracing assumes x64 code, so they need a library of their own.}
+{$ifdef CPUARM64}
+  CFastMM_DefaultDebugSupportLibraryName = 'FastMM_FullDebugModeArm64EC.dll';
+{$else}
+  {$ifdef 64Bit}
+  CFastMM_DefaultDebugSupportLibraryName = 'FastMM_FullDebugMode64.dll';
+  {$else}
+  CFastMM_DefaultDebugSupportLibraryName = 'FastMM_FullDebugMode.dll';
+  {$endif}
+{$endif}
 
 type
 
@@ -2779,6 +2789,24 @@ end;
 
 
 {------------------------------------------}
+{-------------Memory ordering--------------}
+{------------------------------------------}
+
+procedure WeakMemoryOrderingBarrier; inline;
+begin
+{$ifdef WeakMemoryOrdering}
+  MemoryBarrier;
+{$endif}
+end;
+
+procedure ReleaseLock(var ALock: Integer); inline;
+begin
+  WeakMemoryOrderingBarrier;
+  ALock := 0;
+end;
+
+
+{------------------------------------------}
 {--------TSimpleLock implementation--------}
 {------------------------------------------}
 
@@ -2791,8 +2819,7 @@ end;
 
 procedure TSimpleLock.Unlock;
 begin
-  {Need a memory fence for ARM here.}
-  FLock := 0;
+  ReleaseLock(FLock);
 end;
 
 
@@ -2953,6 +2980,15 @@ begin
   end;
 end;
 
+{Returns the pointer stored at APAddress.  Under the LLVM based compilers (e.g. Windows on ARM) a try..except block only
+catches an access violation raised inside a routine that it calls, not one raised by the code in the block itself, so
+code that relies on catching access violations must read memory through a routine like this, and under ARM it must not
+be inlined.}
+function ReadPointerAt(APAddress: Pointer): Pointer; {$ifndef CPUARM64}inline;{$endif}
+begin
+  Result := PPointer(APAddress)^;
+end;
+
 {Attempts to determine whether APointer points to a valid class instance.  Returns the class if it does, otherwise nil.
 APointer is assumed to point to to at least 4 (32-bit) or 8 (64-bit) readable bytes of memory.}
 function FastMM_DetectClassInstance(APointer: Pointer): TClass;
@@ -2997,14 +3033,14 @@ var
     begin
       try
         {Get a pointer to the parent class' self pointer}
-        LParentClassSelfPointer := PPointer(PByte(AClassPointer) + ParentVMTOffset)^;
+        LParentClassSelfPointer := ReadPointerAt(PByte(AClassPointer) + ParentVMTOffset);
         {Is the "Self" pointer valid?}
-        if PPointer(PByte(AClassPointer) + SelfPtrVMTOffset)^ <> AClassPointer then
+        if ReadPointerAt(PByte(AClassPointer) + SelfPtrVMTOffset) <> AClassPointer then
           Exit(False);
 
         {Do a sanity check on the pointer to the name of the class.  The short string containing the name is always just
         after the VMT.}
-        LPClassNameString := PShortString(PPointer(PByte(AClassPointer) + ClassNameVMTOffset)^);
+        LPClassNameString := PShortString(ReadPointerAt(PByte(AClassPointer) + ClassNameVMTOffset));
         if (NativeUInt(LPClassNameString) - NativeUInt(AClassPointer) > CMaxVMTSize)
           or (not IsValidVMTAddress(LPClassNameString, False)) then
         begin
@@ -3017,7 +3053,7 @@ var
 
         {Recursively check the parent class for validity.}
         Result := IsValidVMTAddress(LParentClassSelfPointer, True)
-          and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
+          and InternalIsValidClass(ReadPointerAt(LParentClassSelfPointer), ADepth + 1);
 
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
@@ -4804,7 +4840,7 @@ begin
   end;
 
   {The large block manager no longer needs to be locked}
-  APLargeBlockManager.LargeBlockManagerLocked := 0;
+  ReleaseLock(APLargeBlockManager.LargeBlockManagerLocked);
 
   {Free all the memory for the large blocks}
   LPCurrentLargeBlock := LOldPendingFreeList;
@@ -4901,7 +4937,7 @@ begin
         PLargeBlockHeader(Result).NextLargeBlockHeader := LOldFirstLargeBlock;
         LOldFirstLargeBlock.PreviousLargeBlockHeader := Result;
 
-        LPLargeBlockManager.LargeBlockManagerLocked := 0;
+        ReleaseLock(LPLargeBlockManager.LargeBlockManagerLocked);
 
         {Add the size of the header}
         Inc(PByte(Result), CLargeBlockHeaderSize);
@@ -4935,7 +4971,7 @@ begin
     UnlinkLargeBlock(LPLargeBlockHeader);
 
     {The large block manager no longer has to be locked, since the large block has been unlinked.}
-    LPLargeBlockManager.LargeBlockManagerLocked := 0;
+    ReleaseLock(LPLargeBlockManager.LargeBlockManagerLocked);
 
     {Release the memory used by the large block.}
     Result := FastMM_FreeMem_FreeLargeBlock_ReleaseVM(LPLargeBlockHeader);
@@ -5367,7 +5403,7 @@ begin
       InsertMediumBlockIntoBin(APMediumBlockManager, APMediumBlock, LBlockSize);
 
     if AUnlockMediumBlockManager then
-      APMediumBlockManager.MediumBlockManagerLocked := 0;
+      ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
 
     Result := 0;
   end
@@ -5380,7 +5416,7 @@ begin
     LPNextMediumBlockSpan.PreviousMediumBlockSpanHeader := LPPreviousMediumBlockSpan;
 
     if AUnlockMediumBlockManager then
-      APMediumBlockManager.MediumBlockManagerLocked := 0;
+      ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
 
     {Free the entire span.}
     Result := OS_FreeVirtualMemory(APMediumBlockSpan, APMediumBlockSpan.SpanSize);
@@ -5425,8 +5461,6 @@ begin
   {Try to lock the medium block manager so that the block may be freed.}
   if AtomicCmpExchange(LPMediumBlockManager.MediumBlockManagerLocked, 1, 0) = 0 then
   begin
-
-    {Memory fence required for ARM here}
 
     if LPMediumBlockManager.PendingFreeList = nil then
     begin
@@ -5512,7 +5546,8 @@ begin
     Inc(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.ABACounter);
     APMediumBlockManager.SequentialFeedMediumBlockSpan := LPNewSpan;
 
-    {May need a memory fence here for ARM.}
+    {Without the barrier an ARM CPU may make the new offset visible to other threads before the writes above.}
+    WeakMemoryOrderingBarrier;
 
     APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := Integer(NativeInt(Result) - NativeInt(LPNewSpan));
   end
@@ -5617,6 +5652,9 @@ begin
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
         - LBlockSize + (Int64(1) shl 32);
 
+      {The span must be read after the offset:  If an ARM CPU performed the reads in the opposite order then a new
+      offset could be paired with the previous span, and the AtomicCmpExchange below would not detect it.}
+      WeakMemoryOrderingBarrier;
       LPSequentialFeedSpan := APMediumBlockManager.SequentialFeedMediumBlockSpan;
 
       if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerAndABACounter,
@@ -5706,7 +5744,7 @@ begin
       and (not CheckFreeDebugBlockIntact(Result)) then
     begin
       {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
-      APMediumBlockManager.MediumBlockManagerLocked := 0;
+      ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
       System.Error(reInvalidPtr);
     end;
 
@@ -6016,7 +6054,7 @@ begin
   if BlockHasDebugInfo(Result)
     and (not CheckFreeDebugBlockIntact(Result)) then
   begin
-    APMediumBlockManager.MediumBlockManagerLocked := 0;
+    ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
     System.Error(reInvalidPtr);
   end;
 
@@ -6046,7 +6084,7 @@ begin
   {Set the header for this block, clearing the debug info flag.}
   SetMediumBlockHeader_SetSizeAndFlags(Result, LBlockSize, False, False);
 
-  APMediumBlockManager.MediumBlockManagerLocked := 0;
+  ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
 {$endif}
 end;
 
@@ -6329,7 +6367,7 @@ begin
             AOptimalBlockSize, AMaximumBlockSize);
           if Result <> nil then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
             Exit;
           end;
         end;
@@ -6343,7 +6381,7 @@ begin
         end;
 
         {A different thread grabbed the last block, unlock the manager and try the next arena.}
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+        ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
       end;
 
       {Try the next arena.}
@@ -6412,7 +6450,7 @@ begin
             AMinimumBlockSize, AOptimalBlockSize);
           if Result <> nil then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
             Exit;
           end;
         end;
@@ -6425,7 +6463,7 @@ begin
             AOptimalBlockSize, AMaximumBlockSize);
           if Result <> nil then
           begin
-            LPMediumBlockManager.MediumBlockManagerLocked := 0;
+            ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
             Exit;
           end;
         end;
@@ -6433,7 +6471,7 @@ begin
         {3.4) If we get here then there are no suitable free blocks, pending free blocks, and the current sequential
         feed span has no space:  Allocate a new sequential feed span and split off a block of the optimal size.}
         Result := FastMM_GetMem_GetMediumBlock_AllocateNewSequentialFeedSpan(LPMediumBlockManager, AOptimalBlockSize);
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+        ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
         Exit;
       end;
 
@@ -6530,13 +6568,13 @@ begin
           SetMediumBlockHeader_SetSizeAndFlags(APointer, Integer(LNewBlockSize), False, False);
 
           {Unlock the medium blocks}
-          LPMediumBlockManager.MediumBlockManagerLocked := 0;
+          ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
 
           Exit(APointer);
         end;
 
         {Couldn't use the next block, because another thread grabbed it:  Unlock the medium blocks}
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+        ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
       end;
     end;
   end;
@@ -6828,7 +6866,7 @@ begin
 
     {Unlock the small block manager if required}
     if AUnlockSmallBlockManager then
-      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
+      ReleaseLock(APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked);
   end
   else
   begin
@@ -6840,7 +6878,7 @@ begin
 
     {Unlock the small block manager if required}
     if AUnlockSmallBlockManager then
-      APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked := 0;
+      ReleaseLock(APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked);
 
     {Clear the small block span flag in the header of the medium block.  This is important in case the block is ever
     reused and allocated blocks subsequently enumerated.}
@@ -6895,8 +6933,6 @@ begin
 
   if AtomicCmpExchange(LPSmallBlockManager.SmallBlockManagerLocked, 1, 0) = 0 then
   begin
-
-    {ARM requires a memory fence here.}
 
     if LPSmallBlockManager.PendingFreeList = nil then
     begin
@@ -7025,7 +7061,7 @@ begin
   {Handle "out of memory".}
   if LPSmallBlockSpan = nil then
   begin
-    APSmallBlockManager.SmallBlockManagerLocked := 0;
+    ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
     Exit(nil);
   end;
 
@@ -7044,7 +7080,8 @@ begin
   LPSmallBlockSpan.TotalBlocksInSpan := LTotalBlocksInSpan;
   LPSmallBlockSpan.BlocksInUse := LTotalBlocksInSpan;
 
-  {Memory fence required for ARM here.}
+  {Without the barrier an ARM CPU may make the flag below visible to other threads before the writes above.}
+  WeakMemoryOrderingBarrier;
 
   {Update the medium block header to indicate that this medium block serves as a small block span.  This flag must be
   set after the small block manager pointer in the header is set in case FastMM_WalkBlocks is scanning this medium
@@ -7054,13 +7091,14 @@ begin
   {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
   APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
 
-  {Memory fence required for ARM here.}
+  {Without the barrier an ARM CPU may make the new offset visible to other threads before the writes above.}
+  WeakMemoryOrderingBarrier;
 
   {Set it up for sequential block serving.  The sequential feed span must be set before the sequential feed offset.}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
   APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := LLastBlockOffset;
 
-  APSmallBlockManager.SmallBlockManagerLocked := 0;
+  ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
 
   {Return the last block in the span}
   Result := PByte(LPSmallBlockSpan) + LLastBlockOffset;
@@ -7175,6 +7213,9 @@ begin
     LNewLastSequentialFeedBlockOffset.IntegerAndABACounter := LPreviousLastSequentialFeedBlockOffset.IntegerAndABACounter
       - APSmallBlockManager.BlockSize + (Int64(1) shl 32);
 
+    {The span must be read after the offset:  If an ARM CPU performed the reads in the opposite order then a new offset
+    could be paired with the previous span, and the AtomicCmpExchange below would not detect it.}
+    WeakMemoryOrderingBarrier;
     LPSequentialFeedSpan := APSmallBlockManager.SequentialFeedSmallBlockSpan;
 
     if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
@@ -7247,7 +7288,7 @@ begin
   if LPNextFreeBlock <> nil then
     FastMM_FreeMem_FreeSmallBlockChain(LPNextFreeBlock, True)
   else
-    APSmallBlockManager.SmallBlockManagerLocked := 0;
+    ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
 
   {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
   fill pattern.}
@@ -7343,9 +7384,7 @@ begin
     LPNewFirstPartiallyFreeSpan.PreviousPartiallyFreeSpan := PSmallBlockSpanHeader(APSmallBlockManager);
   end;
 
-  {ARM requires a data memory barrier here to ensure that all prior writes have completed before the arena is unlocked.}
-
-  APSmallBlockManager.SmallBlockManagerLocked := 0;
+  ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
 
   {Does this block currently contain debug info?  If so, check the header and footer checksums as well as the debug
   fill pattern.}
@@ -7531,7 +7570,7 @@ begin
             Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
 
           {Other threads must have taken all the available blocks before the manager could be locked.}
-          APSmallBlockManager.SmallBlockManagerLocked := 0;
+          ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
         end;
       end;
 
@@ -7585,7 +7624,7 @@ begin
           Result := FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager);
           if Result <> nil then
           begin
-            APSmallBlockManager.SmallBlockManagerLocked := 0;
+            ReleaseLock(APSmallBlockManager.SmallBlockManagerLocked);
             Exit;
           end;
         end;
@@ -8533,7 +8572,7 @@ begin
           if LPPendingFreeBlock <> nil then
             FastMM_FreeMem_FreeSmallBlockChain(LPPendingFreeBlock, True)
           else
-            LPSmallBlockManager.SmallBlockManagerLocked := 0;
+            ReleaseLock(LPSmallBlockManager.SmallBlockManagerLocked);
         end
         else
         begin
@@ -8560,7 +8599,7 @@ begin
         if LPPendingFreeBlock <> nil then
           FastMM_FreeMem_FreeMediumBlockChain(LPMediumBlockManager, LPPendingFreeBlock, True)
         else
-          LPMediumBlockManager.MediumBlockManagerLocked := 0;
+          ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
       end
       else
       begin
@@ -8722,7 +8761,7 @@ begin
           LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
         end;
       finally
-        LPLargeBlockManager.LargeBlockManagerLocked := 0;
+        ReleaseLock(LPLargeBlockManager.LargeBlockManagerLocked);
       end;
     end;
 
@@ -8828,6 +8867,9 @@ begin
                 if (AWalkBlockTypes * [btSmallBlockSpan, btSmallBlock] <> [])
                   and PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
                 begin
+                  {A new small block span has its manager set before the flag, but ARM CPUs may perform the reads in
+                  the opposite order.}
+                  WeakMemoryOrderingBarrier;
                   LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
                   LLockWaitTimeMilliseconds := 0;
@@ -8849,8 +8891,6 @@ begin
                   else
                   begin
 
-                    {Memory fence required for ARM}
-
                     {The last block may have been released before the manager was locked, so we need to check whether it
                     is still a small block span.}
                     if PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
@@ -8866,7 +8906,7 @@ begin
                     else
                     begin
                       LSmallBlockOffset := 0;
-                      LPSmallBlockManager.SmallBlockManagerLocked := 0;
+                      ReleaseLock(LPSmallBlockManager.SmallBlockManagerLocked);
                       LPSmallBlockManager := nil;
                     end;
                   end;
@@ -8971,7 +9011,7 @@ begin
 
                 finally
                   if LPSmallBlockManager <> nil then
-                    LPSmallBlockManager.SmallBlockManagerLocked := 0;
+                    ReleaseLock(LPSmallBlockManager.SmallBlockManagerLocked);
                 end;
 
               end;
@@ -8984,7 +9024,7 @@ begin
         end;
 
       finally
-        LPMediumBlockManager.MediumBlockManagerLocked := 0;
+        ReleaseLock(LPMediumBlockManager.MediumBlockManagerLocked);
       end;
     end;
 
