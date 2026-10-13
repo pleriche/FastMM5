@@ -180,9 +180,9 @@ uses
 {$ifdef RequireIDEPresenceForLeakReporting} {$define FastMM_RequireIDEPresenceForLeakReporting} {$endif}
 {$ifdef NoMessageBoxes} {$define FastMM_NoMessageBoxes} {$endif}
 {$ifdef ShareMM} {$define FastMM_ShareMM} {$endif}
-{$ifdef ShareMM} {$define FastMM_ShareMMIfLibrary} {$endif}
-{$ifdef ShareMM} {$define FastMM_AttemptToUseSharedMM} {$endif}
-{$ifdef ShareMM} {$define FastMM_NeverUninstall} {$endif}
+{$ifdef ShareMMIfLibrary} {$define FastMM_ShareMMIfLibrary} {$endif}
+{$ifdef AttemptToUseSharedMM} {$define FastMM_AttemptToUseSharedMM} {$endif}
+{$ifdef NeverUninstall} {$define FastMM_NeverUninstall} {$endif}
 {$ifdef NoDebugInfo} {$define FastMM_NoDebugInfo} {$endif}
 
 {If the "FastMM_FullDebugMode" is defined then a static dependency on the debug support library is assumed, unless
