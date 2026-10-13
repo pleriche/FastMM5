@@ -9935,13 +9935,13 @@ begin
     {Is this MM being shared?  If so, switching to another MM is not allowed}
     if SharingFileMappingObjectHandle = 0 then
     begin
-      {May not switch memory manager after memory has been allocated}
-      if not FastMM_HasLivePointers then
+      LPMemoryManagerEx := FastMM_FindSharedMemoryManager;
+      if LPMemoryManagerEx <> nil then
       begin
-        LPMemoryManagerEx := FastMM_FindSharedMemoryManager;
-        if LPMemoryManagerEx <> nil then
-        begin
 
+        {May not switch memory manager after memory has been allocated}
+        if not FastMM_HasLivePointers then
+        begin
           InstalledMemoryManager := LPMemoryManagerEx^;
           SetMemoryManager(InstalledMemoryManager);
           CurrentInstallationState := mmisUsingSharedMemoryManager;
@@ -9952,18 +9952,19 @@ begin
           Result := True;
         end
         else
+        begin
+          {Memory has already been allocated using this memory manager.  We cannot rip the memory manager out from
+          under live pointers.}
+          LTokenValues := Default(TEventLogTokenValues);
+          AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
+          LogEvent(mmetCannotSwitchToSharedMemoryManagerWithLivePointers, LTokenValues);
+
           Result := False;
+        end;
+
       end
       else
-      begin
-        {Memory has already been allocated using this memory manager.  We cannot rip the memory manager out from under
-        live pointers.}
-        LTokenValues := Default(TEventLogTokenValues);
-        AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
-        LogEvent(mmetCannotSwitchToSharedMemoryManagerWithLivePointers, LTokenValues);
-
         Result := False;
-      end;
     end
     else
     begin
