@@ -8497,8 +8497,11 @@ begin
   end
   else
   begin
-    {Catch an attempt to reallocate a freed block.}
-    if LBlockHeader and CBlockIsFreeFlag <> 0 then
+    {Catch an attempt to reallocate a freed block or an invalid pointer before a new block is allocated, using the same
+    checks as FastMM_ReallocMem.}
+    if (LBlockHeader and (CBlockIsFreeFlag or CIsSmallBlockFlag) <> CIsSmallBlockFlag)
+      and (LBlockHeader and (not CHasDebugInfoFlag) <> CIsMediumBlockFlag)
+      and (LBlockHeader and (not CHasDebugInfoFlag) <> CIsLargeBlockFlag) then
     begin
       Result := HandleInvalidReallocMem(APointer);
       Exit;
