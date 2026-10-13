@@ -4565,13 +4565,16 @@ begin
 end;
 
 procedure ReleaseEmergencyReserveAddressSpace;
+{$ifdef 32Bit}
+var
+  LPEmergencyReserve: Pointer;
+{$endif}
 begin
 {$ifdef 32Bit}
-  if EmergencyReserveAddressSpace <> nil then
-  begin
-    OS_FreeVirtualMemory(EmergencyReserveAddressSpace, CEmergencyReserveAddressSpace);
-    EmergencyReserveAddressSpace := nil;
-  end;
+  {Several threads may run out of address space at the same time, so the reserve must be taken atomically.}
+  LPEmergencyReserve := AtomicExchange(EmergencyReserveAddressSpace, nil);
+  if LPEmergencyReserve <> nil then
+    OS_FreeVirtualMemory(LPEmergencyReserve, CEmergencyReserveAddressSpace);
 {$endif}
 end;
 
