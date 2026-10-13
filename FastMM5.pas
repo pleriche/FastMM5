@@ -5729,6 +5729,8 @@ begin
         if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(
           APMediumBlockManager, LPMediumBlockSpan, Result, False) <> 0 then
         begin
+          {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
+          ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
           System.Error(reInvalidPtr);
         end;
       end;
@@ -5741,6 +5743,8 @@ begin
       if FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(
         APMediumBlockManager, LPMediumBlockSpan, LPPendingFreeBlock, False) <> 0 then
       begin
+        {The arena must be unlocked before the error is raised, otherwise the leak check at shutdown will hang.}
+        ReleaseLock(APMediumBlockManager.MediumBlockManagerLocked);
         System.Error(reInvalidPtr);
       end;
     end;
