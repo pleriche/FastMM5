@@ -11547,8 +11547,11 @@ begin
     FastMM_UninstallMemoryManager;
 
     {Free all memory.  If this is a .DLL that owns its own memory manager, then it is necessary to prevent the main
-    application from running out of address space.}
-    FastMM_FreeAllMemory;
+    application from running out of address space.  If FastMM could not be uninstalled because another memory manager
+    has been installed on top of it, then that memory manager may still pass calls through to FastMM, so the memory
+    must remain valid.}
+    if CurrentInstallationState <> mmisInstalled then
+      FastMM_FreeAllMemory;
   end;
 
   Result := True;
