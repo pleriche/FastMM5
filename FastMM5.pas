@@ -2543,8 +2543,8 @@ begin
     if (MemoryUsageLimit > 0)
       and (MemoryUsageCurrent > MemoryUsageLimit) then
     begin
-      Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
-      MemoryUsageLimitGraceAmount := 0;
+      {Several threads may exceed the limit at the same time, but the grace amount may only be added once.}
+      AtomicIncrement(MemoryUsageLimit, AtomicExchange(MemoryUsageLimitGraceAmount, 0));
 
       OS_FreeVirtualMemory(Result, ABlockSize);
       Result := nil;
@@ -2573,8 +2573,8 @@ begin
   if (MemoryUsageLimit > 0)
     and (MemoryUsageCurrent > MemoryUsageLimit) then
   begin
-    Inc(MemoryUsageLimit, MemoryUsageLimitGraceAmount);
-    MemoryUsageLimitGraceAmount := 0;
+    {Several threads may exceed the limit at the same time, but the grace amount may only be added once.}
+    AtomicIncrement(MemoryUsageLimit, AtomicExchange(MemoryUsageLimitGraceAmount, 0));
 
     OS_FreeVirtualMemory(APAddress, ABlockSize);
     Exit(False);
@@ -2604,10 +2604,16 @@ begin
     AMemoryRegionInfo.AccessRights := [];
     if (LMemInfo.State = MEM_COMMIT) and (LMemInfo.Protect and PAGE_GUARD = 0) then
     begin
-      if (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+      if (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_WRITECOPY or PAGE_EXECUTE or PAGE_EXECUTE_READ
+        or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+      begin
         Include(AMemoryRegionInfo.AccessRights, marRead);
-      if (LMemInfo.Protect and (PAGE_READWRITE or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
+      end;
+      if (LMemInfo.Protect and (PAGE_READWRITE or PAGE_WRITECOPY or PAGE_EXECUTE_READWRITE
+        or PAGE_EXECUTE_WRITECOPY) <> 0) then
+      begin
         Include(AMemoryRegionInfo.AccessRights, marWrite);
+      end;
       if (LMemInfo.Protect and (PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0) then
         Include(AMemoryRegionInfo.AccessRights, marExecute);
     end;
