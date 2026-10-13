@@ -700,7 +700,9 @@ the first time it is called, unless the debug support library has already been l
 FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have been set by the application.}
 function FastMM_LoadDebugSupportLibrary: Boolean;
 {Frees the debug support library, pointing the stack trace handlers currently using the debug support library back to
-the default no-op handlers.}
+the default no-op handlers.  Calls into the library that are already in progress are not waited for, so this must not
+be called while other threads may be capturing or logging stack traces, e.g. by allocating or freeing blocks in debug
+mode.}
 function FastMM_FreeDebugSupportLibrary: Boolean;
 
 {Enters/exits debug mode.  Calls may be nested, in which case debug mode is only exited when the number of
