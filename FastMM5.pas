@@ -6893,6 +6893,8 @@ begin
     {Unlock the small block manager if required}
     if AUnlockSmallBlockManager then
       ReleaseLock(APSmallBlockSpan.SmallBlockManager.SmallBlockManagerLocked);
+
+    Result := 0;
   end
   else
   begin
@@ -6914,10 +6916,8 @@ begin
     sequential feed range has been exhausted and all the blocks subsequently freed.}
 
     {Free the block pool}
-    FastMM_FreeMem_FreeMediumBlock(APSmallBlockSpan);
+    Result := FastMM_FreeMem_FreeMediumBlock(APSmallBlockSpan);
   end;
-
-  Result := 0;
 {$endif}
 end;
 
