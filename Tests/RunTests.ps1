@@ -49,6 +49,7 @@ $Tests = @(
   @{ name = 'FastMM5Test_SizeClasses';        args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_UsagePerSizeClass';  args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ModeTransition';     args = @();            quickArgs = @() }
+  @{ name = 'FastMM5Test_EraseModes';         args = @('20000');     quickArgs = @('5000') }
   @{ name = 'FastMM5Test_DoubleFree';         args = @('2000');      quickArgs = @('2000') }
   @{ name = 'FastMM5Test_ScanCoverage';       args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanHeaderBounds';   args = @();            quickArgs = @() }
@@ -265,7 +266,9 @@ foreach ($install in $selected) {
         continue
       }
 
-      $testArgs = if ($Quick) { $test.quickArgs } else { $test.args }
+      # @() keeps a single argument an array:  splatting a plain string would pass
+      # each of its characters as a separate argument.
+      $testArgs = @(if ($Quick) { $test.quickArgs } else { $test.args })
       $output = & $exe @testArgs 2>&1
       $code = $LASTEXITCODE
       if ($VerboseOutput) { $output | ForEach-Object { Write-Host "      $_" } }
