@@ -4481,8 +4481,11 @@ begin
 end;
 
 {Checks that the debug fill pattern in the debug block is intact.  Returns True if the block is intact, otherwise
-(optionally) logs and/or displays the error and returns False.}
-function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
+(optionally) logs and/or displays the error and returns False.  If AMayHaveBeenAllocated is True and the block is no
+longer flagged as free when the fill pattern is found to be modified, then it is assumed that another thread has just
+allocated the block and True is returned.}
+function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader;
+  AMayHaveBeenAllocated: Boolean = False): Boolean;
 const
   CDebugFillWordFreedBlock = CDebugFillByteFreedBlock * Word($0101);
   CDebugFillDWordFreedBlock = CDebugFillByteFreedBlock * Cardinal($01010101);
@@ -4550,6 +4553,15 @@ begin
 
   if not LFillPatternIntact then
   begin
+    {Has another thread just allocated the block?  Without the barrier an ARM CPU may read the header before the fill
+    pattern.}
+    if AMayHaveBeenAllocated then
+    begin
+      WeakMemoryOrderingBarrier;
+      if not BlockIsFree(APDebugBlockHeader) then
+        Exit(True);
+    end;
+
     {Log the block error.}
     LogFreedDebugBlockFillPatternCorrupted(APDebugBlockHeader);
     Result := False;
@@ -8778,8 +8790,7 @@ function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastM
 begin
   if AMayCheckForDebugInfo and BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
-    {The debug header must be read after the flag, but an ARM CPU may otherwise perform the reads in the opposite
-    order.}
+    {Without the barrier an ARM CPU may read the debug header before the flag.}
     WeakMemoryOrderingBarrier;
 
     ABlockInfo.DebugInformation := ABlockInfo.BlockAddress;
@@ -9006,8 +9017,8 @@ begin
                 if (AWalkBlockTypes * [btSmallBlockSpan, btSmallBlock] <> [])
                   and PMediumBlockHeader(LPMediumBlock)[-1].IsSmallBlockSpan then
                 begin
-                  {A new small block span has its manager set before the flag, but ARM CPUs may perform the reads in
-                  the opposite order.}
+                  {A new small block span has its manager set before the flag.  Without the barrier an ARM CPU may read
+                  the manager before the flag.}
                   WeakMemoryOrderingBarrier;
                   LPSmallBlockManager := PSmallBlockSpanHeader(LPMediumBlock).SmallBlockManager;
 
@@ -9207,8 +9218,8 @@ begin
 
     {Is the block still flagged as containing debug info?  If not then another thread is either manipulating its debug
     information or it is a small block for which the header wasn't set yet.  We therefore assume that the block is
-    intact.  The flag must be read after the checksums, but an ARM CPU may otherwise perform the reads in the opposite
-    order and miss that another thread has started to update the block.}
+    intact.  Without the barrier an ARM CPU may read the flag before the checksums, and so miss that another thread
+    has started to update the block.}
     WeakMemoryOrderingBarrier;
     if not BlockHasDebugInfo(ABlockInfo.DebugInformation) then
       Exit;
@@ -9225,9 +9236,11 @@ begin
 
   end;
 
-  {If it is a free block, check whether it has been modified after being freed.  A free debug block should never be
-  modified while the arena is locked, so we do not have to retry this check.}
-  if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
+  {If it is a free block, check whether it has been modified after being freed.  A free block cannot be allocated while
+  the arena is locked, except for a small block split off from the sequential feed span:  Its header is only set
+  afterwards, so a recycled span may still show the header of a freed debug block.  A block that is no longer flagged
+  as free by the time the modification is detected has therefore been allocated rather than modified.}
+  if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation, True)) then
     System.Error(reInvalidPtr);
 end;
 
