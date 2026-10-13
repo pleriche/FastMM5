@@ -11017,6 +11017,18 @@ begin
   end;
 end;
 
+procedure FastMM_ConfigureDebugMode;
+begin
+  {If both handlers have been assigned then we do not need to load the support DLL.}
+  if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
+    or (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText) then
+  begin
+    FastMM_LoadDebugSupportLibrary;
+  end;
+
+  DebugSupportConfigured := True;
+end;
+
 {Configures the appropriate entry points for each of the memory manager functions according to the current settings,
 e.g. whether debug or normal mode is in effect.}
 function FastMM_SetMemoryManagerEntryPoints: Boolean;
@@ -11048,6 +11060,12 @@ begin
   end
   else
   begin
+    {Configure debug support, e.g. load the debug support library, the first time the debug mode entry points are set.
+    This is done here rather than in FastMM_EnterDebugMode, since debug mode may have been entered before the memory
+    manager was installed.}
+    if not DebugSupportConfigured then
+      FastMM_ConfigureDebugMode;
+
     LNewMemoryManager.GetMem := FastMM_DebugGetMem;
     LNewMemoryManager.FreeMem := FastMM_DebugFreeMem;
     LNewMemoryManager.ReallocMem := FastMM_DebugReallocMem;
@@ -11193,18 +11211,6 @@ begin
   Result := True;
 end;
 
-procedure FastMM_ConfigureDebugMode;
-begin
-  {If both handlers have been assigned then we do not need to load the support DLL.}
-  if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
-    or (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText) then
-  begin
-    FastMM_LoadDebugSupportLibrary;
-  end;
-
-  DebugSupportConfigured := True;
-end;
-
 function AdjustDebugModeCounter(ACounterAdjustment: Integer): Boolean;
 begin
   SetMemoryManagerLock.Lock;
@@ -11216,12 +11222,7 @@ begin
 
     {Does the current state match the counter?  If not, try to set the memory manager.}
     if (DebugModeCounter > 0) <> DebugModeActive then
-    begin
-      if (not DebugSupportConfigured) and (DebugModeCounter > 0) then
-        FastMM_ConfigureDebugMode;
-
-      Result := FastMM_SetMemoryManagerEntryPoints;
-    end
+      Result := FastMM_SetMemoryManagerEntryPoints
     else
       Result := True;
 
