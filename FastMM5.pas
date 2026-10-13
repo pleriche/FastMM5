@@ -119,11 +119,12 @@ Usage Instructions:
     FastMM_NoMessageBoxes (or NoMessageBoxes) - Clears the set of events that will cause a message box to be displayed
     (FastMM_MessageBoxEvents) on startup.
 
-    FastMM_ShareMM (or ShareMM) - If defined then FastMM_ShareMemoryManager will be called during startup, sharing the
-    memory manager of the module if the memory manager of another module is not already being shared.
+    FastMM_ShareMM (or ShareMM) - If defined and the module is not a library then FastMM_ShareMemoryManager will be
+    called during startup, sharing the memory manager of the module if the memory manager of another module is not
+    already being shared.  Define FastMM_ShareMMIfLibrary as well to also share the memory manager of a library.
 
-    FastMM_ShareMMIfLibrary (or ShareMMIfLibrary) - If defined and the module is not a library then the ShareMM define
-    is disabled.
+    FastMM_ShareMMIfLibrary (or ShareMMIfLibrary) - If defined together with FastMM_ShareMM then the memory manager is
+    also shared if the module is a library.  It has no effect on its own.
 
     FastMM_AttemptToUseSharedMM (or AttemptToUseSharedMM) - If defined FastMM_AttemptToUseSharedMemoryManager will be
     called during startup, switching to using the memory manager shared by another module (if there is a shared memory
