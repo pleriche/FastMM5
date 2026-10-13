@@ -73,11 +73,12 @@ Usage Instructions:
   The following conditional defines are supported:
     FastMM_FullDebugMode (or FullDebugMode) - If defined then FastMM_EnterDebugMode will be called on startup so that
     the memory manager starts in debug mode.  If FastMM_FullDebugMode is defined and FastMM_DebugLibraryDynamicLoading
-    (or LoadDebugDLLDynamically) is not defined then FastMM_DebugLibraryStaticDependency is implied.
+    (or LoadDebugDLLDynamically) is not defined then FastMM_DebugLibraryStaticDependency is implied.  If the debug
+    support library is loaded dynamically and it is not available then debug mode is entered without stack traces.
 
     FastMM_FullDebugModeWhenDLLAvailable (or FullDebugModeWhenDLLAvailable) - If defined an attempt will be made to load
     the debug support library during startup.  If successful then FastMM_EnterDebugMode will be called so that the
-    memory manager starts up in debug mode.
+    memory manager starts up in debug mode.  Takes precedence over FastMM_FullDebugMode.
 
     FastMM_DebugLibraryStaticDependency - If defined there will be a static dependency on the debug support library,
     FastMM_FullDebugMode.dll (32-bit), FastMM_FullDebugMode64.dll (64-bit) or FastMM_FullDebugModeArm64EC.dll (Windows
@@ -11372,17 +11373,12 @@ begin
   FastMM_MessageBoxEvents := [];
   {$endif}
 
-  {$ifdef FastMM_FullDebugModeWhenDLLAvailable}
-  {$define StartInDebugMode}
-  {$endif}
-
-  {$ifdef FastMM_FullDebugMode}
-  {$define StartInDebugMode}
-  {$endif}
-
-  {$ifdef StartInDebugMode}
+  {$if defined(FastMM_FullDebugModeWhenDLLAvailable)}
   if FastMM_LoadDebugSupportLibrary then
     FastMM_EnterDebugMode;
+  {$elseif defined(FastMM_FullDebugMode)}
+  {Debug mode is entered even if the debug support library cannot be loaded, just without stack traces.}
+  FastMM_EnterDebugMode;
   {$endif}
 
   {$ifdef FastMM_ShareMM}
