@@ -6634,6 +6634,10 @@ begin
       {The second split is an entirely new block so all the header fields must be set.}
       SetMediumBlockHeader_SetIsSmallBlockSpan(LPNextBlock, False);
 
+      {FastMM_WalkBlocks may be stepping through this span by block size.  Without the barrier an ARM CPU may make the
+      new size visible to it before the header of the second split.}
+      WeakMemoryOrderingBarrier;
+
       {Adjust the size of this block.}
       SetMediumBlockHeader_SetSizeAndFlags(APointer, Integer(LNewBlockSize), False, False);
 
