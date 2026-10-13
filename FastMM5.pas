@@ -9964,14 +9964,17 @@ begin
       Break;
     end;
     {Find a matching entry.  If an exact size match is not required and the leak is larger than the current entry, use
-    it if the expected size of the next entry is too large.}
+    it unless the next entry is a better fit.  The next entry can only be a better fit if it is for the same address and
+    class:  The list may contain entries for other classes with sizes in between.}
     if (LPInsertAfter.LeakAddress = APNewEntry.LeakAddress)
       and ((LPInsertAfter.LeakedClass = APNewEntry.LeakedClass))
       and ((LPInsertAfter.LeakSize = APNewEntry.LeakSize)
         or ((not AExactSizeMatch)
           and (LPInsertAfter.LeakSize < APNewEntry.LeakSize)
           and ((LPInsertAfter.NextLeak = nil)
-            or (LPInsertAfter.NextLeak.LeakSize > APNewEntry.LeakSize))
+            or (LPInsertAfter.NextLeak.LeakSize > APNewEntry.LeakSize)
+            or (LPInsertAfter.NextLeak.LeakAddress <> APNewEntry.LeakAddress)
+            or (LPInsertAfter.NextLeak.LeakedClass <> APNewEntry.LeakedClass))
           )) then
     begin
       if (LPInsertAfter.LeakCount + APNewEntry.LeakCount) >= 0 then
