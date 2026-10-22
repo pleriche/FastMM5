@@ -29,6 +29,10 @@
  has to confirm such a return address from the one above it.  See
  RunCallChainThroughIndirectCalls.
 
+ Under 64-bit the call chain is also run where the stack has to grow while the
+ stack trace is taken.  RtlCaptureStackBackTrace returns no frames at all in
+ that case.  See RunCallChainOnGrowingStack.
+
  Parameter:  The path of the debug support library.  Without it, the library is
  loaded by its default name, i.e. from the directory of this program or from the
  search path.  RunTests.ps1 builds the library into a directory of its own and
@@ -452,6 +456,69 @@ end;
 
 {$ifend}
 
+{-------------------------- A growing stack --------------------------}
+
+{$if SizeOf(Pointer) = 8}
+var
+  {The number of runs of RunCallChainOnGrowingStack in which the stack trace
+   contained the call chain.}
+  GGrowingStackChainCount: Integer;
+
+{Runs the call chain below a large local buffer, so that it runs deeper than
+ the stack of the thread has been before.}
+procedure RunCallChainOnGrowingStack_BelowLargeBuffer;
+var
+  LBuffer: array[0..65535] of Byte;
+begin
+  Level1;
+  {Use the buffer, so that the compiler keeps it.}
+  GBufferByte := LBuffer[Length(LBuffer) div 2];
+end;
+
+{Uses a little more than 256 bytes of stack per level before it runs the call
+ chain.}
+procedure RunCallChainOnGrowingStack_Pad(ALevels: Integer);
+var
+  LBuffer: array[0..255] of Byte;
+begin
+  if ALevels > 0 then
+    RunCallChainOnGrowingStack_Pad(ALevels - 1)
+  else
+    RunCallChainOnGrowingStack_BelowLargeBuffer;
+  GBufferByte := LBuffer[ALevels];
+end;
+
+function RunCallChainOnGrowingStack_Thread(AParameter: Pointer): Integer;
+begin
+  FillChar(GTrace, SizeOf(GTrace), 0);
+  RunCallChainOnGrowingStack_Pad(NativeInt(AParameter));
+  if FindCallChain(GTrace, GChain) = 1 then
+    Inc(GGrowingStackChainCount);
+  Result := 0;
+end;
+
+{Runs the call chain where the stack has to grow while the stack trace is
+ taken, and returns the number of runs in which the stack trace contained it.
+ Whether the stack grows during the stack trace depends on where in a page of
+ the stack the stack trace starts.  The call chain is therefore run in 16 new
+ threads, each time a little deeper.}
+function RunCallChainOnGrowingStack: Integer;
+var
+  LThread: THandle;
+  LThreadId: Cardinal;
+  i: Integer;
+begin
+  GGrowingStackChainCount := 0;
+  for i := 0 to 15 do
+  begin
+    LThread := BeginThread(nil, 0, RunCallChainOnGrowingStack_Thread, Pointer(i), 0, LThreadId);
+    WaitForSingleObject(LThread, INFINITE);
+    CloseHandle(LThread);
+  end;
+  Result := GGrowingStackChainCount;
+end;
+{$ifend}
+
 {-------------------------- The tests --------------------------}
 
 procedure TestLibraryStackTrace(const AName: string; AGetStackTrace: TGetStackTrace);
@@ -495,6 +562,11 @@ begin
     'over stale return addresses:  the call chain is followed by the caller of the routine that ran it');
   if FailureCount <> LFailures then
     DumpStackTrace(GTrace, GChain);
+
+{$if SizeOf(Pointer) = 8}
+  CheckEqualsInt(16, RunCallChainOnGrowingStack,
+    'while the stack grows:  the stack trace contains the call chain, in all 16 runs');
+{$ifend}
 end;
 
 {Allocates a block at the end of the call chain that AScenario runs, and checks

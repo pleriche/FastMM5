@@ -347,6 +347,10 @@ var
 begin
   {RtlCaptureStackBackTrace includes the frame of this routine, so one more frame is skipped.}
   LCapturedFrameCount := CaptureStackBackTrace(ASkipFrames + 1, AMaxDepth, AReturnAddresses, nil);
+  {It returns no frames at all if the stack has to grow while it runs, i.e. if it is called close to the deepest point
+  that the stack has reached so far.  The stack has grown by then, so the second attempt succeeds.}
+  if LCapturedFrameCount = 0 then
+    LCapturedFrameCount := CaptureStackBackTrace(ASkipFrames + 1, AMaxDepth, AReturnAddresses, nil);
 
   {Clear trailing entries}
   while LCapturedFrameCount < AMaxDepth do
@@ -413,6 +417,11 @@ const
   {The target of an indirect call (e.g. CALL EAX) cannot be read from the code, so it cannot be checked.  The return
   address of such a call is only accepted if it is at most this many stack slots above the previous entry.}
   CMaxIndirectCallDistance = 2;
+  {A function without a stack frame uses little stack:  The registers it saves, and the parameters it passes on the
+  stack.  The return addresses of a chain of such functions therefore lie close together, and the search for the next
+  one stops this many bytes above the last entry or the last candidate.  Above that lie the local variables of the
+  function that the next stack frame belongs to, which can be large.}
+  CMaxFramelessStackUsage = 256;
 
 type
   {The state of a memory page. Used by the raw stack tracing mechanism to determine whether an address is a valid call
@@ -525,7 +534,7 @@ end;
 
 {Returns True if the memory page access map says that the address is executable.  If the map does not know the page
 yet, it is queried first.}
-function IsExecutable(AAddress: NativeUInt): Boolean;
+function IsExecutable(AAddress: NativeUInt): Boolean; inline;
 begin
   if MemoryPageAccessMap[AAddress div 4096] = mpaUnknown then
     UpdateMemoryPageAccessMap(AAddress);
@@ -949,7 +958,8 @@ last entry in three steps:
      A return address there is accepted if the call before it goes to the function of the last entry.  For an indirect
      call the target is not known.  Its return address is accepted if it is at most CMaxIndirectCallDistance slots
      above the last entry.  Otherwise it becomes a candidate, which is accepted, before the return address above it,
-     if the call before that return address goes into the candidate's function.  If the next frame belongs to the
+     if the call before that return address goes into the candidate's function.  The search stops
+     CMaxFramelessStackUsage bytes above the last entry or the last candidate.  If the next frame belongs to the
      function of the last entry itself, there is nothing to look for:  That is the case if the frame's return address
      follows a call into that function.
   3. The next frame's return address is the next entry.  It follows a call into the function that the next frame
@@ -960,7 +970,7 @@ procedure TraceLiveReturnAddresses(AFrame, AStackTop: NativeUInt; AReturnAddress
   AMaxDepth, ASkipFrames: Cardinal);
 var
   LState: TTraceLiveReturnAddressesState;
-  LNextFrame, LNextFrameFunction, LLimit, LSlot: NativeUInt;
+  LNextFrame, LNextFrameFunction, LLimit, LSlot, LValue, LLastFound: NativeUInt;
   LFound: Boolean;
 begin
   LState.ReturnAddresses := AReturnAddresses;
@@ -1002,11 +1012,24 @@ begin
     while (LState.MaxDepth > 0)
       and (LSlot < LLimit) do
     begin
-      if LState.AddCallerOfLastEntry(LSlot) then
+      {Most values on the stack are not return addresses.  The memory page access map rules most of them out much faster
+      than the check for a call site.}
+      LValue := PNativeUInt(LSlot)^;
+      if (LValue > $ffff)
+        and (MemoryPageAccessMap[(LValue - 1) div 4096] <> mpaNotExecutable)
+        and LState.AddCallerOfLastEntry(LSlot) then
       begin
         LFound := True;
         {Without a next frame, start again from the last entry:  A next frame may be found from it.}
         if LNextFrame = 0 then
+          Break;
+      end
+      else if LNextFrame <> 0 then
+      begin
+        LLastFound := LState.EntrySlot;
+        if LState.CandidateCount > 0 then
+          LLastFound := LState.CandidateSlots[LState.CandidateCount - 1];
+        if LSlot - LLastFound >= CMaxFramelessStackUsage then
           Break;
       end;
       Inc(LSlot, SizeOf(Pointer));
