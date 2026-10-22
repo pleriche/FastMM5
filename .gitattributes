@@ -1,0 +1,13 @@
+# Text files are checked out with CRLF line breaks, whatever core.autocrlf is set to.  With "auto", git decides
+# which files are text, and leaves the line breaks of files that are already committed with CRLF as they are.
+* text=auto eol=crlf
+
+# Binary files:  never converted, and not diffed or merged as text.
+*.dll binary
+*.res binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
