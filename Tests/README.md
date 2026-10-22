@@ -54,6 +54,13 @@ FastMM5Test_DebugMode.exe
 Compile from within the `Tests` directory - older compilers resolve the
 `in 'FastMM_TestUtils.pas'` clause relative to the current directory.
 
+`FastMM5Test_StackTraces` also needs the debug support library. The script
+builds it from `FullDebugMode DLL` for each target, with `-DModuleAndOffsetOnly`
+so that the JCL is not needed, into a `DebugSupportLibrary` directory of its own
+(so that the other tests do not load it when they enter debug mode), and passes
+its path to the test. Run by hand, the test takes the path as its parameter, or
+loads the library by its default name.
+
 ## The tests
 
 | Program | What it covers |
@@ -68,6 +75,7 @@ Compile from within the `Tests` directory - older compilers resolve the
 | `FastMM5Test_ScanRace.dpr` | The other direction: while threads churn small debug blocks, a scanning thread must not report corruption that is not there, and must not crash. |
 | `FastMM5Test_ScanHeaderBounds.dpr` | Corrupts the size fields in the debug header (`UserSize`, `StackTraceEntryCount`), which is what decides where the scan reads. Each case must produce a clean corruption report rather than an access violation. |
 | `FastMM5Test_MultiThreadStress.dpr` | Multithreaded allocation stress with optional cross thread frees through a lock free mailbox; asserts content integrity and the closing balance. Parameters: `Threads Iterations MaxBlockSize DebugMode CrossThreadFree`. |
+| `FastMM5Test_StackTraces.dpr` | The raw and frame based stack traces of the debug support library must report a known call chain in order, also from a callback of a system library, and FastMM5 must record it in the allocation and free stack traces of a debug block. The 64-bit build is based above 4GB and also checks that the stack trace includes the system library frames, both of which the 64-bit raw stack trace used to miss. Parameter: the path of the debug support library. |
 
 `FastMM_TestUtils.pas` holds the shared scaffolding: the assertions, the failure
 counter and the exit code convention. It also silences message boxes and the

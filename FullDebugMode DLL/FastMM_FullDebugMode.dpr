@@ -1,6 +1,6 @@
 {
 
-Fast Memory Manager: FullDebugMode Support DLL 1.70
+Fast Memory Manager: FullDebugMode Support DLL 1.73
 
 Description:
  Support DLL for FastMM. With this DLL available, FastMM will report debug info (unit name, line numbers, etc.) for
@@ -63,6 +63,12 @@ Change log:
     support Arm64EC yet, so return addresses are described by module and offset only.
   - 64-bit frame based stack traces no longer start with a return address inside this DLL.
   - If no stack tracing library is selected, return addresses are described by module and offset.
+ Version 1.73 (22 October 2026)
+  - 64-bit (x64) raw stack traces are now the same as frame based stack traces, as under Arm64EC.  The raw stack tracing
+    code assumed 32-bit stack frames and only considered return addresses in the low 4GB of address space, so under
+    64-bit it omitted the frames of system libraries and of modules loaded above 4GB, and reported return addresses
+    that were left on the stack by earlier calls.
+  - ModuleAndOffsetOnly may be defined on the command line to build the DLL without a stack tracing library.
 
 }
 
@@ -81,6 +87,14 @@ time.}
 {The JCL does not support Windows on ARM (Arm64EC) yet.}
 {$ifdef ARM64EC}
 {$undef JCLDebug}
+{$endif}
+
+{Defining ModuleAndOffsetOnly (e.g. on the command line) overrides the selection above.}
+{$ifdef ModuleAndOffsetOnly}
+{$undef JCLDebug}
+{$undef madExcept}
+{$undef EurekaLog_Legacy}
+{$undef EurekaLog_V7}
 {$endif}
 
 {Without a stack tracing library return addresses are described by module and offset only.}
@@ -110,6 +124,16 @@ uses
 {$LIBSUFFIX 'Arm64EC'}
 {$elseif SizeOf(Pointer) = 8}
 {$LIBSUFFIX '64'}
+{$ifend}
+
+{Raw stack tracing scans the stack for return addresses that follow call instructions, in order to also report the
+frames of 32-bit code that was compiled without stack frames.  It assumes 32-bit stack frames, and only considers
+return addresses in the low 4GB of address space.  64-bit code (x64 and Arm64EC) does not need it:  Every function that
+calls other functions has unwind information, and the 64-bit frame based stack trace walks the stack with the unwind
+information, which does not depend on stack frames.  The 64-bit DLLs export the frame based stack tracing routine under
+both names.}
+{$if SizeOf(Pointer) = 4}
+{$define RawStackTraces}
 {$ifend}
 
 {--------------------------Return Address Info Cache --------------------------}
@@ -278,20 +302,15 @@ end;
 
 {--------------------------Stack Tracing Subroutines--------------------------}
 
-{$ifndef ARM64EC}
+{Used by the 32-bit frame based and raw stack tracing routines.}
+{$if SizeOf(Pointer) = 4}
 procedure GetStackRange(var AStackBaseAddress, ACurrentStackPointer: NativeUInt);
 asm
-  {$if SizeOf(Pointer) = 8}
-  mov rax, gs:[abs 8]
-  mov [rcx], rax
-  mov [rdx], rbp
-  {$else}
   mov ecx, fs:[4]
   mov [eax], ecx
   mov [edx], ebp
-  {$ifend}
 end;
-{$endif}
+{$ifend}
 
 {--------------------------Frame Based Stack Tracing--------------------------}
 
@@ -366,6 +385,8 @@ const
   {Hexadecimal characters}
   HexTable: array[0..15] of AnsiChar = '0123456789ABCDEF';
 
+{$ifdef RawStackTraces}
+
 type
   {The state of a memory page. Used by the raw stack tracing mechanism to determine whether an address is a valid call
   site or not.}
@@ -434,11 +455,6 @@ begin
 end;
 {$ENDIF}
 
-{Raw stack tracing scans the stack for x86/x64 call instructions and needs inline assembler, neither of which applies
-to Windows on ARM (Arm64EC).  The Arm64EC DLL exports the frame based stack tracing routine under both names instead:
-It walks the stack with the unwind information, which does not depend on frame pointers.}
-{$ifndef ARM64EC}
-
 {Thread-safe version that avoids the global variable Default8087CW.}
 procedure Set8087CW(ANewCW: Word);
 var
@@ -455,10 +471,8 @@ procedure SetMXCSR(ANewMXCSR: Cardinal);
 var
   LMXCSR: Cardinal;
 asm
-  {$if SizeOf(Pointer) <> 8}
   cmp System.TestSSE, 0
   je @exit
-  {$ifend}
   {Remove the flag bits}
   and ANewMXCSR, $ffc0
   mov LMXCSR, ANewMXCSR
@@ -477,8 +491,8 @@ var
   LOld8087CW: Word;
   LOldMXCSR: Cardinal;
 begin
-  {We assume (for now) that all application code will execute within the first 4GB of address space.}
-  if (AReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (AReturnAddress <= $ffffffff){$endif} then
+  {The first 64K of address space is never allocated.}
+  if AReturnAddress > $ffff then
   begin
     {The call address is up to 8 bytes before the return address}
     LCallAddress := AReturnAddress - 8;
@@ -561,14 +575,12 @@ begin
           Result := True;
           Exit;
         end;
-{$ifndef CPUX64} //The 9A cp opcode is not valid in 64-bit mode
         {7 bytes, CALL FAR $1234:12345678}
         if (LCode8Back and $0000FF00) = $00009A00 then
         begin
           Result := True;
           Exit;
         end;
-{$endif}
         {Not a valid call site}
         Result := False;
       except
@@ -653,7 +665,7 @@ begin
         {The pointer to the next stack frame appears valid:  Get the return address of the current frame}
         LReturnAddress := PNativeUInt(LCurrentFrame + SizeOf(Pointer))^;
         {Does this appear to be a valid return address}
-        if (LReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (LReturnAddress <= $ffffffff){$endif} then
+        if LReturnAddress > $ffff then
         begin
           {Is the map for this return address incorrect? It may be unknown or marked as non-executable because a library
           was previously not yet loaded, or perhaps this is not a valid stack frame.}
@@ -733,11 +745,22 @@ begin
   {$ENDIF}
 end;
 
+{$else}
+
+{$IFDEF MSWINDOWS}
+{There is no memory page access map without raw stack tracing.  This routine is still exported, so that all the DLLs
+have the same exports.}
+procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
+begin
+end;
+{$ENDIF}
+
 {$endif}
 
 {--------------------------DLL load and unload notifications--------------------------}
 
-{$IFDEF MSWINDOWS}
+{The memory page access map used by raw stack tracing is invalidated whenever a DLL is loaded or unloaded.}
+{$if defined(MSWINDOWS) and defined(RawStackTraces)}
 
 type
 
@@ -817,7 +840,7 @@ begin
     UnregisterDLLLoadAndUnloadNotifications;
 end;
 
-{$ENDIF}
+{$ifend}
 
 {-----------------------------Stack Trace Logging----------------------------}
 
@@ -1101,10 +1124,10 @@ end;
 
 exports
   GetFrameBasedStackTrace,
-{$ifdef ARM64EC}
-  GetFrameBasedStackTrace name 'GetRawStackTrace',
-{$else}
+{$ifdef RawStackTraces}
   GetRawStackTrace,
+{$else}
+  GetFrameBasedStackTrace name 'GetRawStackTrace',
 {$endif}
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
@@ -1116,7 +1139,7 @@ begin
   JclStackTrackingOptions := JclStackTrackingOptions + [stAllModules];
 {$endif}
 
-{$IFDEF MSWINDOWS}
+{$if defined(MSWINDOWS) and defined(RawStackTraces)}
 
   {When this DLL is unloaded we need to unregister DLL load and unload notifications.}
   DLLProc := DllMain;
@@ -1124,6 +1147,6 @@ begin
   {The memory map used by the stack tracing code must be updated whenever a DLL is loaded or unloaded.}
   RegisterDLLLoadAndUnloadNotifications;
 
-{$ENDIF}
+{$ifend}
 
 end.
