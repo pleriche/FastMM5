@@ -1,17 +1,36 @@
-{Stack traces from the debug support library (FastMM_FullDebugMode.dll,
- FastMM_FullDebugMode64.dll):  the raw and the frame based stack trace must both
- report a known call chain, in order and with nothing in between, and FastMM5
- must record that call chain in the allocation and free stack traces of a debug
- block.
+{Tests the stack traces of the debug support library (FastMM_FullDebugMode.dll
+ and FastMM_FullDebugMode64.dll).
 
- The 64-bit build of this program is based above 4GB.  The raw stack trace of the
- 64-bit library used to only consider return addresses below 4GB, so it came back
- empty for code based above 4GB, and it never included the frames of the system
- libraries, which 64-bit Windows loads above 4GB.  The 64-bit only checks below
- guard that.
+ A known call chain is run, and each routine in it records its own return
+ address.  The raw and the frame based stack traces of the library must both
+ report these return addresses, in order and with nothing in between.  FastMM5
+ must also record the call chain in the allocation and free stack traces of a
+ debug block.
 
- Parameter:  the path of the debug support library.  Without it the library is
- loaded by its default name, i.e. from the directory of this program or the
+ The 64-bit build of this program is based above 4GB.  The 64-bit raw stack
+ trace used to ignore return addresses above 4GB, so for this program it came
+ back empty.  It also never included the frames of system libraries, which
+ 64-bit Windows loads above 4GB.  The checks that are only done under 64-bit
+ test this.
+
+ The call chain is also run in two harder situations:  From a callback of a
+ system library, and from a routine whose local buffer still holds the return
+ addresses of earlier calls.  In the stack trace, the call chain must then be
+ followed by exactly its callers.  The 32-bit raw stack trace used to report
+ everything on the stack that looked like a return address.  Left over return
+ addresses then showed up between the callers, and after the callback the stack
+ trace could fill up before it got back to this program.  In FastMM5's own stack
+ traces this applied to the whole stack, because EBP does not point to a stack
+ frame when FastMM5 asks for a stack trace.
+
+ Under 32-bit the call chain is also run through indirect calls (as for virtual
+ methods) into routines without a stack frame, which save registers before they
+ call on.  The raw stack trace cannot check where an indirect call went, so it
+ has to confirm such a return address from the one above it.  See
+ RunCallChainThroughIndirectCalls.
+
+ Parameter:  The path of the debug support library.  Without it, the library is
+ loaded by its default name, i.e. from the directory of this program or from the
  search path.  RunTests.ps1 builds the library into a directory of its own and
  passes its path, so that the other tests do not load it when they enter debug
  mode.}
@@ -20,7 +39,8 @@ program FastMM5Test_StackTraces;
 
 {$APPTYPE CONSOLE}
 
-{The 32-bit frame based stack trace follows the chain of stack frames.}
+{The routines of the call chain need stack frames:  The 32-bit frame based stack
+ trace follows the chain of stack frames.}
 {$StackFrames on}
 
 {$if SizeOf(Pointer) = 8}
@@ -35,17 +55,18 @@ uses
 
 const
   CMaxDepth = 32;
-  {A medium block:  a freed small block may be handed out again by the next
-   allocation of its size before its free stack trace has been read.}
+  {The size of a medium block.  A freed small block could be handed out again by
+   the next allocation of its size, before the test has read its free stack
+   trace.}
   CBlockSize = 50000;
 
 type
   TGetStackTrace = procedure(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
   TStackTrace = array[0..CMaxDepth - 1] of NativeUInt;
-  {The return addresses of the call chain, innermost first:  into Level3, into
-   Level2, into Level1 and into the routine that called Level1.  Each routine in
-   the chain records its own return address, so the expected values come from
-   the compiler and not from a stack walk.}
+  {The return addresses of the call chain, innermost first:  Into Level3, into
+   Level2, into Level1, and into the routine that called Level1.  Each routine
+   in the chain records its own return address, so the expected values come
+   from the compiler, not from walking the stack.}
   TCallChain = array[0..3] of NativeUInt;
 
 var
@@ -56,6 +77,18 @@ var
   GGetStackTrace: TGetStackTrace;
   GTrace: TStackTrace;
   GBlock: Pointer;
+  {The return address of the routine that started the call chain, as recorded by
+   that routine.  IsCallChainFollowedByCallers checks where it is in the stack
+   trace.}
+  GOuterCaller: NativeUInt;
+  {Keeps the local buffer of RunCallChainOverStaleReturnAddresses from being
+   optimised away.}
+  GBufferByte: Byte;
+{$if SizeOf(Pointer) = 4}
+  {The return addresses that RunCallChainThroughIndirectCalls runs the call
+   chain through, innermost first, as recorded by the routines themselves.}
+  GIndirectCallers: array[0..3] of NativeUInt;
+{$ifend}
 
 {-------------------------- The call chain --------------------------}
 
@@ -76,6 +109,27 @@ begin
   GChain[3] := NativeUInt(ReturnAddress);
   Level2;
 end;
+
+{$if SizeOf(Pointer) = 4}
+{$StackFrames off}
+{Calls Level1 for RunCallChainThroughIndirectCalls.  It has no stack frame and
+ saves registers first, as such routines often do.  The raw stack trace takes a
+ return address to be in a routine that is called if it lies less than 4KB after
+ its start, or less than 256 bytes before it.  This routine is therefore placed
+ well away from the routine that calls it, FramelessCallsIndirectly, so that it
+ does not look like a part of it.}
+procedure FramelessCallsLevel1;
+asm
+  push ebx
+  push esi
+  push edi
+  call Level1
+  pop edi
+  pop esi
+  pop ebx
+end;
+{$StackFrames on}
+{$ifend}
 
 {The actions at the end of the call chain.}
 
@@ -109,7 +163,36 @@ end;
 
 procedure RunCallChainFromSystemCallback;
 begin
+  GOuterCaller := NativeUInt(ReturnAddress);
   EnumSystemLocales(@LocaleCallback, LCID_INSTALLED);
+end;
+
+{Makes calls that leave their return addresses on the stack, in the place where
+ the local buffer of RunCallChainOverStaleReturnAddresses will be.}
+function LeaveReturnAddressesOnStack(ADepth: Integer): Integer;
+begin
+  if ADepth > 0 then
+    Result := LeaveReturnAddressesOnStack(ADepth - 1) + Length(IntToStr(ADepth))
+  else
+    Result := 0;
+end;
+
+{Runs the call chain from a routine whose local buffer is not initialised, so
+ that it still holds the return addresses of earlier calls.}
+procedure RunCallChainOverStaleReturnAddresses;
+var
+  LBuffer: array[0..2047] of Byte;
+begin
+  GOuterCaller := NativeUInt(ReturnAddress);
+  Level1;
+  {Use the buffer, so that the compiler keeps it.}
+  GBufferByte := LBuffer[Length(LBuffer) div 2];
+end;
+
+procedure RunCallChainFromStaleLocals;
+begin
+  LeaveReturnAddressesOnStack(40);
+  RunCallChainOverStaleReturnAddresses;
 end;
 
 {-------------------------- Helpers --------------------------}
@@ -156,38 +239,76 @@ begin
   Result := -1;
 end;
 
-{Returns the index of the first entry at or after AStart that is in a module
- other than this program, or -1 if there is none.}
-function FindEntryOutsideThisProgram(const ATrace: array of NativeUInt; AStart: Integer): Integer;
+{Returns True if the return address is in a module other than this program.}
+function IsCallChainFollowedByCallers_IsInLibrary(AReturnAddress: NativeUInt): Boolean;
 var
-  i: Integer;
   LModule: HMODULE;
 begin
-  for i := AStart to High(ATrace) do
-  begin
-    LModule := ModuleOf(ATrace[i]);
-    if (LModule <> 0) and (LModule <> HInstance) then
-    begin
-      Result := i;
-      Exit;
-    end;
-  end;
-  Result := -1;
+  LModule := ModuleOf(AReturnAddress);
+  Result := (LModule <> 0) and (LModule <> HInstance);
 end;
 
-function FindEntryInThisProgram(const ATrace: array of NativeUInt; AStart: Integer): Integer;
+{Returns True if the stack trace contains the call chain, followed by exactly
+ its callers up to GOuterCaller:
+   - If AThroughLibrary:  First the frames of the system library that called
+     back into this program, then the routine that called the library, and then
+     GOuterCaller.
+   - Otherwise:  GOuterCaller straight after the call chain.
+ A return address that an earlier call left on the stack would get in between.}
+function IsCallChainFollowedByCallers(const ATrace: array of NativeUInt; AThroughLibrary: Boolean): Boolean;
 var
-  i: Integer;
+  LIndex: Integer;
 begin
-  for i := AStart to High(ATrace) do
+  Result := False;
+  LIndex := FindCallChain(ATrace, GChain);
+  if LIndex < 0 then
+    Exit;
+  Inc(LIndex, Length(GChain));
+  if AThroughLibrary then
   begin
-    if ModuleOf(ATrace[i]) = HInstance then
-    begin
-      Result := i;
+    {The frames of the library (which may span more than one module), at least
+     one...}
+    if (LIndex > High(ATrace)) or not IsCallChainFollowedByCallers_IsInLibrary(ATrace[LIndex]) then
       Exit;
-    end;
+    while (LIndex <= High(ATrace)) and IsCallChainFollowedByCallers_IsInLibrary(ATrace[LIndex]) do
+      Inc(LIndex);
+    {...then the routine that called the library.}
+    if (LIndex > High(ATrace)) or (ModuleOf(ATrace[LIndex]) <> HInstance) then
+      Exit;
+    Inc(LIndex);
   end;
-  Result := -1;
+  Result := (LIndex <= High(ATrace)) and (ATrace[LIndex] = GOuterCaller);
+end;
+
+{Returns True if the stack trace contains the call chain, followed directly by
+ the return addresses in ACallers, in order.}
+function IsCallChainFollowedBy(const ATrace, ACallers: array of NativeUInt): Boolean;
+var
+  LIndex, i: Integer;
+begin
+  Result := False;
+  LIndex := FindCallChain(ATrace, GChain);
+  if LIndex < 0 then
+    Exit;
+  Inc(LIndex, Length(GChain));
+  for i := 0 to High(ACallers) do
+  begin
+    if (LIndex + i > High(ATrace)) or (ATrace[LIndex + i] <> ACallers[i]) then
+      Exit;
+  end;
+  Result := True;
+end;
+
+{Returns the allocation stack trace of a debug block.}
+function AllocationStackTrace(ABlock: Pointer): TStackTrace;
+var
+  LEntryCount: Integer;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  LEntryCount := Header(ABlock).StackTraceEntryCount;
+  if LEntryCount > CMaxDepth then
+    LEntryCount := CMaxDepth;
+  Move(Header(ABlock).DebugFooter_AllocationStackTracePtr^, Result, LEntryCount * SizeOf(NativeUInt));
 end;
 
 function TraceContainsModule(const ATrace: array of NativeUInt; AModule: HMODULE): Boolean;
@@ -228,14 +349,114 @@ begin
   end;
 end;
 
+{-------------------------- Indirect calls --------------------------}
+
+{$if SizeOf(Pointer) = 4}
+{$StackFrames off}
+
+{Calls FramelessCallsLevel1 indirectly.  Has no stack frame, and saves
+ registers first.}
+procedure FramelessCallsIndirectly;
+asm
+  push ebx
+  push esi
+  push edi
+  mov eax, offset FramelessCallsLevel1
+  call eax
+@ReturnAddress:
+  mov dword ptr [GIndirectCallers], offset @ReturnAddress
+  pop edi
+  pop esi
+  pop ebx
+end;
+
+{Calls FramelessCallsIndirectly directly.  Has no stack frame, and saves
+ registers first.}
+procedure FramelessCallsDirectly;
+asm
+  push ebx
+  push esi
+  push edi
+  call FramelessCallsIndirectly
+@ReturnAddress:
+  mov dword ptr [GIndirectCallers + 4], offset @ReturnAddress
+  pop edi
+  pop esi
+  pop ebx
+end;
+
+{Calls FramelessCallsDirectly indirectly.  Has a stack frame.  The registers
+ that the routines below save are cleared, so that they cannot look like return
+ addresses.}
+procedure FrameCallsIndirectly;
+asm
+  push ebp
+  mov ebp, esp
+  push ebx
+  push esi
+  push edi
+  xor ebx, ebx
+  xor esi, esi
+  xor edi, edi
+  mov eax, offset FramelessCallsDirectly
+  call eax
+@ReturnAddress:
+  mov dword ptr [GIndirectCallers + 8], offset @ReturnAddress
+  mov eax, [ebp + 4]
+  mov dword ptr [GIndirectCallers + 12], eax
+  pop edi
+  pop esi
+  pop ebx
+  pop ebp
+end;
+
+{$StackFrames on}
+
+{Runs the call chain through indirect calls into routines without a stack
+ frame, which save registers before they call on:
+   RunCallChainThroughIndirectCalls (has a stack frame, calls directly)
+   FrameCallsIndirectly (has a stack frame, calls through EAX)
+   FramelessCallsDirectly
+   FramelessCallsIndirectly (calls through EAX)
+   FramelessCallsLevel1
+   Level1
+ An indirect call does not tell where it goes.  The raw stack trace can only
+ tell that the return address after one is part of the call chain from the
+ return address above it:  The one after FramelessCallsIndirectly from the
+ direct call into FramelessCallsIndirectly, and the one after
+ FrameCallsIndirectly from the stack frame of FrameCallsIndirectly, whose return
+ address follows a direct call into it.}
+procedure RunCallChainThroughIndirectCalls;
+begin
+  FrameCallsIndirectly;
+end;
+
+{Allocates a block at the end of the call chain that
+ RunCallChainThroughIndirectCalls runs, and checks that the call chain is
+ followed by the routines it was called through in the allocation stack trace.}
+procedure CheckAllocationStackTraceThroughIndirectCalls;
+var
+  LTrace: TStackTrace;
+  LFailures: Integer;
+begin
+  GAction := AllocateBlock;
+  RunCallChainThroughIndirectCalls;
+  LTrace := AllocationStackTrace(GBlock);
+  FreeMem(GBlock);
+  LFailures := FailureCount;
+  Check(IsCallChainFollowedBy(LTrace, GIndirectCallers), 'through indirect calls:  the allocation stack trace '
+    + 'contains the call chain, followed by the routines that it was called through');
+  if FailureCount <> LFailures then
+    DumpStackTrace(LTrace, GChain);
+end;
+
+{$ifend}
+
 {-------------------------- The tests --------------------------}
 
 procedure TestLibraryStackTrace(const AName: string; AGetStackTrace: TGetStackTrace);
 var
   LFailures: Integer;
-{$if SizeOf(Pointer) = 8}
-  LIndex: Integer;
-{$ifend}
 begin
   Section(AName);
   Check(Assigned(AGetStackTrace), 'the library exports ' + AName);
@@ -260,16 +481,42 @@ begin
   RunCallChainFromSystemCallback;
   CheckEqualsInt(1, FindCallChain(GTrace, GChain),
     'from a system library callback:  the call chain is reported in order, directly after the first entry');
-{$if SizeOf(Pointer) = 8}
-  {The call chain ends in LocaleCallback, so the next entries are in the library
-   that called it, and after those comes RunCallChainFromSystemCallback.}
-  LIndex := FindEntryOutsideThisProgram(GTrace, 1 + Length(GChain));
-  Check(LIndex > 0, 'from a system library callback:  the stack trace includes the frames of the library');
-  Check((LIndex > 0) and (FindEntryInThisProgram(GTrace, LIndex) > LIndex),
-    'from a system library callback:  the stack trace continues into this program after them');
-{$ifend}
+  Check(IsCallChainFollowedByCallers(GTrace, True),
+    'from a system library callback:  the call chain is followed by the frames of the library, the routine that '
+    + 'called the library and its caller, with nothing in between');
   if FailureCount <> LFailures then
     DumpStackTrace(GTrace, GChain);
+
+  LFailures := FailureCount;
+  RunCallChainFromStaleLocals;
+  CheckEqualsInt(1, FindCallChain(GTrace, GChain),
+    'over stale return addresses:  the call chain is reported in order, directly after the first entry');
+  Check(IsCallChainFollowedByCallers(GTrace, False),
+    'over stale return addresses:  the call chain is followed by the caller of the routine that ran it');
+  if FailureCount <> LFailures then
+    DumpStackTrace(GTrace, GChain);
+end;
+
+{Allocates a block at the end of the call chain that AScenario runs, and checks
+ that the callers follow the call chain in its allocation stack trace.}
+procedure CheckAllocationStackTrace(const AWhat: string; AScenario: TProcedure; AThroughLibrary: Boolean);
+var
+  LTrace: TStackTrace;
+  LFailures: Integer;
+begin
+  GAction := AllocateBlock;
+  AScenario;
+  LTrace := AllocationStackTrace(GBlock);
+  FreeMem(GBlock);
+  LFailures := FailureCount;
+  if AThroughLibrary then
+    Check(IsCallChainFollowedByCallers(LTrace, True), AWhat + ':  the allocation stack trace contains the call '
+      + 'chain, followed by the frames of the library, the routine that called the library and its caller')
+  else
+    Check(IsCallChainFollowedByCallers(LTrace, False), AWhat + ':  the allocation stack trace contains the call '
+      + 'chain, followed by the caller of the routine that ran it');
+  if FailureCount <> LFailures then
+    DumpStackTrace(LTrace, GChain);
 end;
 
 procedure TestDebugBlockStackTraces(ALibrary: HMODULE);
@@ -287,11 +534,10 @@ begin
   GAction := AllocateBlock;
   Level1;
   LAllocationChain := GChain;
-  FillChar(LAllocationTrace, SizeOf(LAllocationTrace), 0);
+  LAllocationTrace := AllocationStackTrace(GBlock);
   LEntryCount := Header(GBlock).StackTraceEntryCount;
   if LEntryCount > CMaxDepth then
     LEntryCount := CMaxDepth;
-  Move(Header(GBlock).DebugFooter_AllocationStackTracePtr^, LAllocationTrace, LEntryCount * SizeOf(NativeUInt));
 
   GAction := FreeBlock;
   Level1;
@@ -313,6 +559,12 @@ begin
     'the free stack trace contains the call chain, in order');
   if FailureCount <> LFailures then
     DumpStackTrace(LFreeTrace, LFreeChain);
+
+  CheckAllocationStackTrace('from a system library callback', RunCallChainFromSystemCallback, True);
+  CheckAllocationStackTrace('over stale return addresses', RunCallChainFromStaleLocals, False);
+{$if SizeOf(Pointer) = 4}
+  CheckAllocationStackTraceThroughIndirectCalls;
+{$ifend}
 
   Check(FastMM_ExitDebugMode, 'FastMM_ExitDebugMode succeeds');
 end;

@@ -62,10 +62,10 @@ $Tests = @(
 )
 
 $debugLibrarySource = Join-Path $rootDir 'FullDebugMode DLL\FastMM_FullDebugMode.dpr'
-# The debug support library includes "{$R *.res}", and the .res file is not in
-# the repository, since the IDE generates it.  This one is supplied through the
-# resource search path instead:  the empty entry that starts every .res file,
-# and nothing else.
+# The debug support library source includes "{$R *.res}", but the .res file is
+# not in the repository, because the IDE generates it.  So the build gets an
+# empty .res file through the resource search path instead.  It consists of the
+# empty entry that every .res file starts with, and nothing else.
 $emptyResourceFile = [byte[]](0,0,0,0, 0x20,0,0,0, 0xFF,0xFF,0,0, 0xFF,0xFF,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0)
 
 # A sortable numeric key from a version string like "23.0" or "10.4".  Parsed by
@@ -254,10 +254,10 @@ foreach ($install in $selected) {
     Write-Host ''
     Write-Host "===================== $(Format-Installation $install) / $platform ====================="
 
-    # The debug support library is built without a stack tracing library
-    # (ModuleAndOffsetOnly), so that the JCL is not needed, and into a directory
-    # of its own, so that the other tests do not load it when they enter debug
-    # mode.
+    # Build the debug support library.  It is built without a stack tracing
+    # library (ModuleAndOffsetOnly), so that the JCL is not needed.  It goes into
+    # a directory of its own, so that the other tests do not load it when they
+    # enter debug mode.
     $dllDir = Join-Path $outDir 'DebugSupportLibrary'
     New-Item -ItemType Directory -Path $dllDir | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $dllDir 'FastMM_FullDebugMode.res'), $emptyResourceFile)

@@ -65,10 +65,19 @@ Change log:
   - If no stack tracing library is selected, return addresses are described by module and offset.
  Version 1.73 (22 October 2026)
   - 64-bit (x64) raw stack traces are now the same as frame based stack traces, as under Arm64EC.  The raw stack tracing
-    code assumed 32-bit stack frames and only considered return addresses in the low 4GB of address space, so under
-    64-bit it omitted the frames of system libraries and of modules loaded above 4GB, and reported return addresses
-    that were left on the stack by earlier calls.
+    code relied on 32-bit stack frames and only handled addresses below 4GB.  Under 64-bit it therefore left out the
+    frames of system libraries and of modules loaded above 4GB, and it reported return addresses that earlier calls
+    had left on the stack.
   - ModuleAndOffsetOnly may be defined on the command line to build the DLL without a stack tracing library.
+  - 32-bit raw stack traces now only report the return addresses of the current call chain.  They used to report
+    everything on the stack that looked like a return address, including return addresses that earlier calls had left
+    in local variables.  This affected every stack trace that FastMM asks for, since EBP does not point to a stack
+    frame at that point.  After a callback from a system library, for example, the stack trace could fill up before
+    it got back to the code that called the library.
+  - Corrected the recognition of the call instruction before a 32-bit return address.  The last bytes of some longer
+    instructions are no longer taken for complete 2 and 3 byte calls.  Calls through a table that is indexed by a
+    register (CALL [EAX*4+$12345678]) are now recognized.  A call that ends where executable memory ends is no longer
+    rejected.  Direct far calls, which 32-bit Windows code does not use, are no longer recognized.
 
 }
 
@@ -89,7 +98,8 @@ time.}
 {$undef JCLDebug}
 {$endif}
 
-{Defining ModuleAndOffsetOnly (e.g. on the command line) overrides the selection above.}
+{Defining ModuleAndOffsetOnly (e.g. on the command line) builds the DLL without a stack tracing library, whatever is
+selected above.}
 {$ifdef ModuleAndOffsetOnly}
 {$undef JCLDebug}
 {$undef madExcept}
@@ -119,6 +129,11 @@ uses
 {$Warn Symbol_Platform off}
 {$Align 8}
 
+{The stack tracing code computes addresses that wrap around, e.g. when it adds a negative call displacement to a return
+address.  With overflow and range checks each of them would raise an exception.}
+{$OverflowChecks off}
+{$RangeChecks off}
+
 {The name of the 64-bit DLL has a '64' at the end, and that of the Windows on ARM (Arm64EC) DLL 'Arm64EC'.}
 {$if defined(ARM64EC)}
 {$LIBSUFFIX 'Arm64EC'}
@@ -126,14 +141,16 @@ uses
 {$LIBSUFFIX '64'}
 {$ifend}
 
-{Raw stack tracing scans the stack for return addresses that follow call instructions, in order to also report the
-frames of 32-bit code that was compiled without stack frames.  It assumes 32-bit stack frames, and only considers
-return addresses in the low 4GB of address space.  64-bit code (x64 and Arm64EC) does not need it:  Every function that
-calls other functions has unwind information, and the 64-bit frame based stack trace walks the stack with the unwind
-information, which does not depend on stack frames.  The 64-bit DLLs export the frame based stack tracing routine under
-both names.}
-{$if SizeOf(Pointer) = 4}
-{$define RawStackTraces}
+{Raw stack tracing is only done under 32-bit Windows.  It searches the stack for return addresses, so that it also finds
+the callers of functions that were compiled without stack frames.  It relies on the layout of 32-bit stack frames, and
+it only handles addresses below 4GB.
+
+64-bit code (x64 and Arm64EC) does not need it.  Every 64-bit function that calls other functions has unwind
+information, and the 64-bit frame based stack trace uses it, so it does not depend on stack frames.  The 64-bit Windows
+DLLs therefore export the frame based stack tracing routine under both names.  Under macOS, raw stack traces come from
+backtrace.}
+{$if defined(MSWINDOWS) and (SizeOf(Pointer) = 4)}
+{$define Win32RawStackTraces}
 {$ifend}
 
 {--------------------------Return Address Info Cache --------------------------}
@@ -349,7 +366,9 @@ var
 begin
   {Get the call stack top and current bottom}
   GetStackRange(LStackTop, LStackBottom);
-  Dec(LStackTop, SizeOf(Pointer) - 1);
+  {A stack frame is the saved frame pointer followed by the return address, so it must start at least two pointers
+  below the top of the stack.}
+  Dec(LStackTop, 2 * SizeOf(Pointer) - 1);
   {Get the current frame start}
   LCurrentFrame := LStackBottom;
   {Fill the call stack}
@@ -381,22 +400,29 @@ end;
 
 {-----------------------------Raw Stack Tracing-----------------------------}
 
-const
-  {Hexadecimal characters}
-  HexTable: array[0..15] of AnsiChar = '0123456789ABCDEF';
+{$ifdef Win32RawStackTraces}
 
-{$ifdef RawStackTraces}
+const
+  {The largest size assumed for a function without a stack frame.  A return address on the stack is only accepted as
+  the caller of the previous entry if its call goes to a function that starts less than this many bytes before that
+  entry.  A larger value would let more return addresses through that earlier calls left on the stack.}
+  CMaxFramelessFunctionSize = 4096;
+  {Some functions end by jumping to code that lies just before them, e.g. System.@UStrCat3 jumps into System.@UStrCat.
+  The previous entry may then lie up to this many bytes before the start of the function that was called.}
+  CMaxTailJumpDistance = 256;
+  {The target of an indirect call (e.g. CALL EAX) cannot be read from the code, so it cannot be checked.  The return
+  address of such a call is only accepted if it is at most this many stack slots above the previous entry.}
+  CMaxIndirectCallDistance = 2;
 
 type
   {The state of a memory page. Used by the raw stack tracing mechanism to determine whether an address is a valid call
-  site or not.}
-  TMemoryPageAccess = (mpaUnknown, mpaNotExecutable, mpaExecutable);
+  site or not.  mpaModuleData is readable data in the image of a module, e.g. import table entries and global
+  variables.  Other readable pages, such as the heap, are mpaNotExecutable.}
+  TMemoryPageAccess = (mpaUnknown, mpaNotExecutable, mpaModuleData, mpaExecutable);
 
 var
   {There are a total of 1M x 4K pages in the (low) 4GB address space}
   MemoryPageAccessMap: array[0..1024 * 1024 - 1] of TMemoryPageAccess;
-
-{$IFDEF MSWINDOWS}
 
 procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
 const
@@ -418,8 +444,10 @@ begin
     FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
 end;
 
-{Updates the memory page access map. Currently only supports the low 4GB of address space.}
-procedure UpdateMemoryPageAccessMap(AAddress: NativeUInt);
+{Queries the region of memory that contains the address, and records in the memory page access map whether its pages
+are executable, or readable data in the image of a module.  Returns the address of the last byte of the region.  Only
+supports the low 4GB of address space.}
+function UpdateMemoryPageAccessMap(AAddress: NativeUInt): NativeUInt;
 var
   LMemInfo: TMemoryBasicInformation;
   LAccess: TMemoryPageAccess;
@@ -429,14 +457,18 @@ begin
   if VirtualQuery(Pointer(AAddress), LMemInfo, SizeOf(LMemInfo)) <> 0 then
   begin
     {Get access type}
+    LAccess := mpaNotExecutable;
     if (LMemInfo.State = MEM_COMMIT)
-      and (LMemInfo.Protect and (PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY or PAGE_EXECUTE) <> 0)
       and (LMemInfo.Protect and PAGE_GUARD = 0) then
     begin
-      LAccess := mpaExecutable
-    end
-    else
-      LAccess := mpaNotExecutable;
+      if LMemInfo.Protect and (PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY or PAGE_EXECUTE) <> 0 then
+        LAccess := mpaExecutable
+      else if (LMemInfo.Type_9 = MEM_IMAGE)
+        and (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_WRITECOPY) <> 0) then
+      begin
+        LAccess := mpaModuleData;
+      end;
+    end;
     {Update the map}
     LStartPage := NativeUInt(LMemInfo.BaseAddress) div 4096;
     LPageCount := LMemInfo.RegionSize div 4096;
@@ -446,14 +478,24 @@ begin
         LPageCount := NativeUInt(Length(MemoryPageAccessMap)) - LStartPage;
       FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(LAccess));
     end;
+    Result := NativeUInt(LMemInfo.BaseAddress) + (LMemInfo.RegionSize - 1);
   end
   else
   begin
     {Invalid address}
     MemoryPageAccessMap[AAddress div 4096] := mpaNotExecutable;
+    Result := AAddress or 4095;
   end;
 end;
-{$ENDIF}
+
+{Updates the memory page access map for the memory from AFirstByte to ALastByte, which may lie on two pages.  This is
+needed when reading it failed, since the map was then out of date.}
+procedure UpdateMemoryPageAccessMapForRange(AFirstByte, ALastByte: NativeUInt);
+begin
+  {The region that contains the first byte may also contain the last byte.  Only query the last byte if it does not.}
+  if UpdateMemoryPageAccessMap(AFirstByte) < ALastByte then
+    UpdateMemoryPageAccessMap(ALastByte);
+end;
 
 {Thread-safe version that avoids the global variable Default8087CW.}
 procedure Set8087CW(ANewCW: Word);
@@ -481,147 +523,573 @@ asm
 end;
 {$ifend}
 
-{$IFDEF MSWINDOWS}
-{Returns true if the return address is a valid call site.  This function is only safe to call while exceptions are
-being handled.}
-function IsValidCallSite(AReturnAddress: NativeUInt): Boolean;
+{Returns True if the memory page access map says that the address is executable.  If the map does not know the page
+yet, it is queried first.}
+function IsExecutable(AAddress: NativeUInt): Boolean;
+begin
+  if MemoryPageAccessMap[AAddress div 4096] = mpaUnknown then
+    UpdateMemoryPageAccessMap(AAddress);
+  Result := MemoryPageAccessMap[AAddress div 4096] = mpaExecutable;
+end;
+
+{Returns True if the memory from the address to the end of a pointer there is in the image of a module, i.e. code or
+readable module data.  That is where calls and jumps through memory read the address that they go to (import table
+entries and global variables).}
+function IsModulePointer(AAddress: NativeUInt): Boolean;
+var
+  LLastByte: NativeUInt;
+begin
+  LLastByte := AAddress + SizeOf(Pointer) - 1;
+  if MemoryPageAccessMap[AAddress div 4096] = mpaUnknown then
+    UpdateMemoryPageAccessMap(AAddress);
+  {If the pointer lies on one page, or the region that was just queried contains both pages, the last byte's page is
+  known now.}
+  if MemoryPageAccessMap[LLastByte div 4096] = mpaUnknown then
+    UpdateMemoryPageAccessMap(LLastByte);
+  Result := (MemoryPageAccessMap[AAddress div 4096] in [mpaModuleData, mpaExecutable])
+    and (MemoryPageAccessMap[LLastByte div 4096] in [mpaModuleData, mpaExecutable]);
+end;
+
+{Returns True if the return address can lie in the function that starts at AFunction.  It can if it is less than
+AMaxOffset bytes after the start of the function, or less than ATailJumpDistance bytes before it.  (The latter is for
+a function that ends by jumping to code that lies just before it.)}
+function IsInFunction(AReturnAddress, AFunction, AMaxOffset, ATailJumpDistance: NativeUInt): Boolean; inline;
+begin
+  if AReturnAddress > AFunction then
+    Result := AReturnAddress - AFunction < AMaxOffset
+  else
+    Result := AFunction - AReturnAddress < ATailJumpDistance;
+end;
+
+type
+  {The state of a stack trace by TraceLiveReturnAddresses, with the routines it uses.  An "entry" is a return address
+  in the stack trace, and a "slot" is the stack address that a value was read from.}
+  TTraceLiveReturnAddressesState = record
+    {Where the next entry goes, the number of entries that are still to be filled in, and the number of entries that
+    are still to be skipped.}
+    ReturnAddresses: PNativeUInt;
+    MaxDepth, SkipFrames: Cardinal;
+    {Stack addresses below this one can be read.}
+    StackTop: NativeUInt;
+    {The last entry, and its slot.}
+    Entry, EntrySlot: NativeUInt;
+    {The floating point control words on entry.  Reading code can cause an access violation, and the RTL then resets
+    the control words to the defaults of this DLL, which may differ from those of the application (QC 107198).  The
+    exception handlers restore these values.}
+    Saved8087CW: Word;
+    SavedMXCSR: Cardinal;
+    {Values on the stack below the last entry that point further up the stack.  Some of them are saved frame pointers.
+    The stack below CollectedTo has already been searched for them.}
+    CollectedTo: NativeUInt;
+    FramePointerCount: Integer;
+    FramePointers: array[0..255] of NativeUInt;
+    {The candidates for the next entry, lowest first, with their slots:  Return addresses after indirect calls (e.g.
+    CALL EAX) that lie more than CMaxIndirectCallDistance slots above the last entry.  An indirect call does not tell
+    where it goes, so it cannot be checked whether it went into the function of the last entry.  It can be checked
+    from further up the stack instead:  If the call before the next return address up the call chain goes into the
+    function of a candidate, that candidate is the next entry.  AddEntry clears the list.}
+    CandidateCount: Integer;
+    CandidateReturnAddresses, CandidateSlots: array[0..15] of NativeUInt;
+    {Adds an entry, or skips it if entries are still to be skipped.  Either way it becomes the last entry.}
+    procedure AddEntry(AReturnAddress, ASlot: NativeUInt);
+    {Returns True if the bytes just before the return address form a call instruction.  Only safe to call while
+    exceptions are being handled.}
+    function IsValidCallSite(AReturnAddress: NativeUInt): Boolean;
+    {Gets the address that the call instruction before the return address calls, following up to two jump thunks.
+    ATarget is 0 if the code does not tell, e.g. for CALL EAX.  Returns False if the call cannot have been made:  A
+    call through memory (CALL [$12345678]) reads the address it goes to from an import table entry or a global
+    variable, which are in the image of a module, and if that memory is not there or not readable the call would
+    have crashed.  The return address must be a valid call site.  Only safe to call while exceptions are being
+    handled.}
+    function GetCallTarget(AReturnAddress: NativeUInt; out ATarget: NativeUInt): Boolean;
+    {Returns True if there is a stack frame at the address, and the address is above the last entry.  A stack frame is
+    a saved EBP that is 0 or points further up the stack, followed by a valid return address.}
+    function IsFrame(AAddress: NativeUInt): Boolean;
+    {Returns the lowest stack frame above the last entry that a value below the last entry points to, or 0 if there is
+    none.}
+    function FindNearestFrame: NativeUInt;
+    {If a candidate lies in the function that starts at AFunction, adds the lowest one as the next entry and returns
+    True.}
+    function AddCandidateInFunction(AFunction: NativeUInt): Boolean;
+    {Adds the return address in the slot as the next entry if the call before it goes into the function of the last
+    entry.  If the call goes into the function of a candidate instead, that candidate is added first.  The return
+    address of an indirect call is added if it is at most CMaxIndirectCallDistance slots above the last entry, and
+    otherwise becomes a candidate.  Returns True if an entry was added.}
+    function AddCallerOfLastEntry(ASlot: NativeUInt): Boolean;
+  end;
+
+procedure TTraceLiveReturnAddressesState.AddEntry(AReturnAddress, ASlot: NativeUInt);
+begin
+  if SkipFrames = 0 then
+  begin
+    ReturnAddresses^ := AReturnAddress;
+    Inc(ReturnAddresses);
+    Dec(MaxDepth);
+  end
+  else
+    Dec(SkipFrames);
+  Entry := AReturnAddress;
+  EntrySlot := ASlot;
+  {The candidates were for the entry after the previous one.}
+  CandidateCount := 0;
+end;
+
+function TTraceLiveReturnAddressesState.IsValidCallSite(AReturnAddress: NativeUInt): Boolean;
 var
   LCallAddress: NativeUInt;
   LCode8Back, LCode4Back, LTemp: Cardinal;
-  LOld8087CW: Word;
-  LOldMXCSR: Cardinal;
 begin
   {The first 64K of address space is never allocated.}
-  if AReturnAddress > $ffff then
-  begin
-    {The call address is up to 8 bytes before the return address}
-    LCallAddress := AReturnAddress - 8;
-    {Update the page map}
-    if MemoryPageAccessMap[LCallAddress div 4096] = mpaUnknown then
-      UpdateMemoryPageAccessMap(LCallAddress);
-    {Check the page access}
-    if (MemoryPageAccessMap[LCallAddress div 4096] = mpaExecutable)
-      and (MemoryPageAccessMap[(LCallAddress + 8) div 4096] = mpaExecutable) then
+  if AReturnAddress <= $ffff then
+    Exit(False);
+
+  {A call instruction is at most 8 bytes long, and it ends just before the return address.  Both the first byte it can
+  start at and its last byte must be executable.}
+  LCallAddress := AReturnAddress - 8;
+  if not (IsExecutable(LCallAddress) and IsExecutable(AReturnAddress - 1)) then
+    Exit(False);
+
+  {Try to determine what kind of call it is (if any), more or less in order of frequency of occurrence. (Code below
+  taken from the Jedi Code Library (jcl.sourceforge.net).)}
+  try
+    {5 bytes, CALL NEAR REL32}
+    if PByteArray(LCallAddress)[3] = $E8 then
     begin
-      {Try to determine what kind of call it is (if any), more or less in order of frequency of occurrence. (Code below
-      taken from the Jedi Code Library (jcl.sourceforge.net).)  We need to retrieve the current floating point control
-      registers, since any external exception will reset it to the DLL defaults which may not otherwise correspond to
-      the defaults of the main application (QC 107198).}
-      LOld8087CW := Get8087CW;
-      LOldMXCSR := GetMXCSR;
-      try
-        {5 bytes, CALL NEAR REL32}
-        if PByteArray(LCallAddress)[3] = $E8 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {Get the 4 bytes before the return address}
-        LCode4Back := PCardinal(LCallAddress + 4)^;
-        {2 byte call?}
-        LTemp := LCode4Back and $F8FF0000;
-        {2 bytes, CALL NEAR EAX}
-        if LTemp = $D0FF0000 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {2 bytes, CALL NEAR [EAX]}
-        if LTemp = $10FF0000 then
-        begin
-          LTemp := LCode4Back - LTemp;
-          if (LTemp <> $04000000) and (LTemp <> $05000000) then
-          begin
-            Result := True;
-            Exit;
-          end;
-        end;
-        {3 bytes, CALL NEAR [EAX+EAX*i]}
-        if (LCode4Back and $00FFFF00) = $0014FF00 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {3 bytes, CALL NEAR [EAX+$12]}
-        if ((LCode4Back and $00F8FF00) = $0050FF00)
-          and ((LCode4Back and $00070000) <> $00040000) then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {4 bytes, CALL NEAR [EAX+EAX+$12]}
-        if Word(LCode4Back) = $54FF then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {6 bytes, CALL NEAR [$12345678]}
-        LCode8Back := PCardinal(LCallAddress)^;
-        if (LCode8Back and $FFFF0000) = $15FF0000 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {6 bytes, CALL NEAR [EAX+$12345678]}
-        if ((LCode8Back and $F8FF0000) = $90FF0000)
-          and ((LCode8Back and $07000000) <> $04000000) then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {7 bytes, CALL NEAR [EAX+EAX+$1234567]}
-        if (LCode8Back and $00FFFF00) = $0094FF00 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {7 bytes, CALL FAR $1234:12345678}
-        if (LCode8Back and $0000FF00) = $00009A00 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        {Not a valid call site}
-        Result := False;
-      except
-        {The access has changed}
-        UpdateMemoryPageAccessMap(LCallAddress);
-        {The RTL sets the FPU control words to the default values if an external exception occurs.  Reset their values
-        here to the values on entry to this call.}
-        Set8087CW(LOld8087CW);
-        SetMXCSR(LOldMXCSR);
-        {Not executable}
-        Result := False;
+      Result := True;
+      Exit;
+    end;
+    {Get the 4 bytes before the return address}
+    LCode4Back := PCardinal(LCallAddress + 4)^;
+    {2 byte call?}
+    LTemp := LCode4Back and $F8FF0000;
+    {2 bytes, CALL NEAR EAX}
+    if LTemp = $D0FF0000 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {2 bytes, CALL NEAR [EAX].  The encodings for [ESP] and [EBP] do not count:  They mean that a SIB byte or a 32-bit
+    address follows, so the instruction would be longer.}
+    if LTemp = $10FF0000 then
+    begin
+      LTemp := LCode4Back and $07000000;
+      if (LTemp <> $04000000) and (LTemp <> $05000000) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+    {3 bytes, CALL NEAR [EAX+EAX*i].  A SIB byte with EBP as the base does not count:  It means that a 32-bit
+    displacement follows, so the instruction would be longer.}
+    if ((LCode4Back and $00FFFF00) = $0014FF00)
+      and ((LCode4Back and $07000000) <> $05000000) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {3 bytes, CALL NEAR [EAX+$12]}
+    if ((LCode4Back and $00F8FF00) = $0050FF00)
+      and ((LCode4Back and $00070000) <> $00040000) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {4 bytes, CALL NEAR [EAX+EAX+$12]}
+    if Word(LCode4Back) = $54FF then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {6 bytes, CALL NEAR [$12345678]}
+    LCode8Back := PCardinal(LCallAddress)^;
+    if (LCode8Back and $FFFF0000) = $15FF0000 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {6 bytes, CALL NEAR [EAX+$12345678]}
+    if ((LCode8Back and $F8FF0000) = $90FF0000)
+      and ((LCode8Back and $07000000) <> $04000000) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {7 bytes, CALL NEAR [EAX+EAX+$1234567]}
+    if (LCode8Back and $00FFFF00) = $0094FF00 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {7 bytes, CALL NEAR [EAX*i+$12345678]:  A SIB byte without a base register (which is encoded as EBP), followed by
+    a 32-bit displacement.}
+    if (LCode8Back and $07FFFF00) = $0514FF00 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    {Direct far calls (CALL FAR $1234:12345678) are not accepted.  32-bit Windows code does not use them.  A check for
+    them would pass for about one in 256 code addresses, as often as the check for CALL NEAR REL32 does, so it would
+    let many code pointers on the stack through that are not return addresses.}
+    {Not a valid call site}
+    Result := False;
+  except
+    {Reading the code failed, so the memory page access map was out of date for it.}
+    UpdateMemoryPageAccessMapForRange(LCallAddress, AReturnAddress - 1);
+    {The RTL sets the FPU control words to the default values if an external exception occurs.  Reset them to the
+    values on entry to the stack trace.}
+    Set8087CW(Saved8087CW);
+    SetMXCSR(SavedMXCSR);
+    {Not executable}
+    Result := False;
+  end;
+end;
+
+function TTraceLiveReturnAddressesState.GetCallTarget(AReturnAddress: NativeUInt; out ATarget: NativeUInt): Boolean;
+var
+  LJumpCount: Integer;
+  LPointerAddress: NativeUInt;
+  {The memory that is being read:  The call instruction before the return address, the address that a call or jump
+  through memory reads, or a jump thunk.  If reading it fails, the exception handler updates the memory page access
+  map for it.}
+  LReadFirstByte, LReadLastByte: NativeUInt;
+begin
+  ATarget := 0;
+  Result := False;
+  LReadFirstByte := AReturnAddress - 8;
+  LReadLastByte := AReturnAddress - 1;
+  try
+    if PByte(AReturnAddress - 5)^ = $E8 then
+    begin
+      {5 bytes, CALL NEAR REL32}
+      ATarget := AReturnAddress + NativeUInt(PInteger(AReturnAddress - 4)^);
+    end
+    else if PWord(AReturnAddress - 6)^ = $15FF then
+    begin
+      {6 bytes, CALL NEAR [$12345678]:  A call through an import table entry or a global variable.  If the address is
+      not in the image of a module, this is not a call that was made.}
+      LPointerAddress := PNativeUInt(AReturnAddress - 4)^;
+      if not IsModulePointer(LPointerAddress) then
+        Exit;
+      LReadFirstByte := LPointerAddress;
+      LReadLastByte := LPointerAddress + SizeOf(Pointer) - 1;
+      ATarget := PNativeUInt(LPointerAddress)^;
+    end;
+    {The call can have been made.  For any other kind of call, e.g. CALL EAX, the code does not tell where it goes, so
+    ATarget stays 0.}
+    Result := True;
+    {Follow JMP REL32 and JMP [$12345678] thunks, e.g. those that the linker generates for imported functions.}
+    for LJumpCount := 1 to 2 do
+    begin
+      if (ATarget = 0)
+        or not (IsExecutable(ATarget) and IsExecutable(ATarget + 5)) then
+      begin
+        Break;
+      end;
+      LReadFirstByte := ATarget;
+      LReadLastByte := ATarget + 5;
+      if PByte(ATarget)^ = $E9 then
+        ATarget := ATarget + 5 + NativeUInt(PInteger(ATarget + 1)^)
+      else if PWord(ATarget)^ = $25FF then
+      begin
+        {A jump through memory, which is only followed if the address that it reads is in the image of a module.}
+        LPointerAddress := PNativeUInt(ATarget + 2)^;
+        if not IsModulePointer(LPointerAddress) then
+          Break;
+        LReadFirstByte := LPointerAddress;
+        LReadLastByte := LPointerAddress + SizeOf(Pointer) - 1;
+        ATarget := PNativeUInt(LPointerAddress)^;
+      end
+      else
+        Break;
+    end;
+  except
+    {Reading failed, so the memory page access map was out of date for that memory.}
+    UpdateMemoryPageAccessMapForRange(LReadFirstByte, LReadLastByte);
+    {The RTL sets the FPU control words to the default values if an external exception occurs, so reset them to the
+    values on entry to the stack trace.}
+    Set8087CW(Saved8087CW);
+    SetMXCSR(SavedMXCSR);
+    ATarget := 0;
+    Result := False;
+  end;
+end;
+
+function TTraceLiveReturnAddressesState.IsFrame(AAddress: NativeUInt): Boolean;
+var
+  LSavedFrame: NativeUInt;
+begin
+  if (AAddress <= EntrySlot)
+    or (AAddress + SizeOf(Pointer) >= StackTop)
+    or (AAddress and (SizeOf(Pointer) - 1) <> 0) then
+  begin
+    Exit(False);
+  end;
+
+  LSavedFrame := PNativeUInt(AAddress)^;
+  if (LSavedFrame <> 0)
+    and ((LSavedFrame <= AAddress) or (LSavedFrame >= StackTop)) then
+  begin
+    Exit(False);
+  end;
+
+  Result := IsValidCallSite(PNativeUInt(AAddress + SizeOf(Pointer))^);
+end;
+
+function TTraceLiveReturnAddressesState.FindNearestFrame: NativeUInt;
+var
+  LPointer: NativeUInt;
+  LIndex, LKeptCount: Integer;
+begin
+  {Collect the values below the last entry that point further up the stack.  Over the whole stack trace, each stack
+  address is only read once.}
+  while CollectedTo < EntrySlot do
+  begin
+    LPointer := PNativeUInt(CollectedTo)^;
+    if (LPointer > CollectedTo)
+      and (LPointer < StackTop)
+      and (FramePointerCount < Length(FramePointers)) then
+    begin
+      FramePointers[FramePointerCount] := LPointer;
+      Inc(FramePointerCount);
+    end;
+    Inc(CollectedTo, SizeOf(Pointer));
+  end;
+
+  {Find the lowest frame among them.  Pointers to below the last entry will not be needed again, since the last entry
+  only moves up the stack, so they are dropped.}
+  Result := 0;
+  LKeptCount := 0;
+  for LIndex := 0 to FramePointerCount - 1 do
+  begin
+    LPointer := FramePointers[LIndex];
+    if LPointer > EntrySlot then
+    begin
+      FramePointers[LKeptCount] := LPointer;
+      Inc(LKeptCount);
+      if ((Result = 0) or (LPointer < Result))
+        and IsFrame(LPointer) then
+      begin
+        Result := LPointer;
+      end;
+    end;
+  end;
+  FramePointerCount := LKeptCount;
+end;
+
+function TTraceLiveReturnAddressesState.AddCandidateInFunction(AFunction: NativeUInt): Boolean;
+var
+  LIndex: Integer;
+begin
+  for LIndex := 0 to CandidateCount - 1 do
+  begin
+    if IsInFunction(CandidateReturnAddresses[LIndex], AFunction, CMaxFramelessFunctionSize, CMaxTailJumpDistance) then
+    begin
+      AddEntry(CandidateReturnAddresses[LIndex], CandidateSlots[LIndex]);
+      Exit(True);
+    end;
+  end;
+  Result := False;
+end;
+
+function TTraceLiveReturnAddressesState.AddCallerOfLastEntry(ASlot: NativeUInt): Boolean;
+var
+  LReturnAddress, LCallTarget: NativeUInt;
+begin
+  LReturnAddress := PNativeUInt(ASlot)^;
+  if not (IsValidCallSite(LReturnAddress)
+    and GetCallTarget(LReturnAddress, LCallTarget)) then
+  begin
+    Exit(False);
+  end;
+
+  if LCallTarget = 0 then
+  begin
+    {An indirect call:  Further up than CMaxIndirectCallDistance slots it becomes a candidate.}
+    if ASlot - EntrySlot > CMaxIndirectCallDistance * SizeOf(Pointer) then
+    begin
+      if CandidateCount < Length(CandidateReturnAddresses) then
+      begin
+        CandidateReturnAddresses[CandidateCount] := LReturnAddress;
+        CandidateSlots[CandidateCount] := ASlot;
+        Inc(CandidateCount);
+      end;
+      Exit(False);
+    end;
+  end
+  else if not IsInFunction(Entry, LCallTarget, CMaxFramelessFunctionSize, CMaxTailJumpDistance) then
+  begin
+    {The call does not go into the function of the last entry.  If it goes into the function of a candidate, the
+    candidate is the next entry, and this return address the one after it.}
+    if not AddCandidateInFunction(LCallTarget) then
+      Exit(False);
+    if MaxDepth = 0 then
+      Exit(True);
+  end;
+
+  AddEntry(LReturnAddress, ASlot);
+  Result := True;
+end;
+
+{Fills the list with the return addresses of the current call chain, starting with the return address of the stack
+frame at AFrame.  The entries that are not needed are set to 0.
+
+It is not good enough to scan the stack for values that look like return addresses:  Local variables often still hold
+the return addresses of earlier calls.  Instead, every entry is shown to be part of the current call chain before it is
+added.  The first entry is the return address of the frame at AFrame.  After that, the next entries are found from the
+last entry in three steps:
+  1. Find the next stack frame up the stack.  It belongs to the function that the last entry returns into, or, if that
+     function has no stack frame, to its nearest caller that has one.
+     - If the function that was called from the last entry has a stack frame, the slot just below the last entry holds
+       its saved EBP, which points to the next frame.
+     - Otherwise, take the lowest frame above the last entry that some value below the last entry points to.  Every
+       value below the last entry belongs to the current call chain, and a function without a stack frame that uses
+       EBP for something else saves EBP on the stack first.  (FastMM's own code does this, which is why EBP does not
+       point to a stack frame when FastMM asks for a stack trace.)
+  2. Between the last entry and the next frame lie the return addresses of calls into functions without a stack frame.
+     A return address there is accepted if the call before it goes to the function of the last entry.  For an indirect
+     call the target is not known.  Its return address is accepted if it is at most CMaxIndirectCallDistance slots
+     above the last entry.  Otherwise it becomes a candidate, which is accepted, before the return address above it,
+     if the call before that return address goes into the candidate's function.  If the next frame belongs to the
+     function of the last entry itself, there is nothing to look for:  That is the case if the frame's return address
+     follows a call into that function.
+  3. The next frame's return address is the next entry.  It follows a call into the function that the next frame
+     belongs to, so a candidate in that function is accepted first.
+If there is no next frame, the next entry is the first return address above the last entry that passes the test in
+step 2.  The stack trace ends when there is none.}
+procedure TraceLiveReturnAddresses(AFrame, AStackTop: NativeUInt; AReturnAddresses: PNativeUInt;
+  AMaxDepth, ASkipFrames: Cardinal);
+var
+  LState: TTraceLiveReturnAddressesState;
+  LNextFrame, LNextFrameFunction, LLimit, LSlot: NativeUInt;
+  LFound: Boolean;
+begin
+  LState.ReturnAddresses := AReturnAddresses;
+  LState.MaxDepth := AMaxDepth;
+  LState.SkipFrames := ASkipFrames;
+  LState.StackTop := AStackTop;
+  LState.Saved8087CW := Get8087CW;
+  LState.SavedMXCSR := GetMXCSR;
+  LState.CollectedTo := AFrame;
+  LState.FramePointerCount := 0;
+  LState.AddEntry(PNativeUInt(AFrame + SizeOf(Pointer))^, AFrame + SizeOf(Pointer));
+
+  while LState.MaxDepth > 0 do
+  begin
+    {Step 1:  Find the next frame.}
+    LNextFrame := PNativeUInt(LState.EntrySlot - SizeOf(Pointer))^;
+    if not LState.IsFrame(LNextFrame) then
+      LNextFrame := LState.FindNearestFrame;
+
+    {Step 2:  Look for the callers of functions without a stack frame below the next frame.  Without a next frame, look
+    for the next entry anywhere above the last entry.}
+    LNextFrameFunction := 0;
+    if LNextFrame <> 0 then
+    begin
+      LLimit := LNextFrame;
+      {The function that the next frame belongs to, if the call before its return address tells.}
+      if not LState.GetCallTarget(PNativeUInt(LNextFrame + SizeOf(Pointer))^, LNextFrameFunction) then
+        LNextFrameFunction := 0;
+      if (LNextFrameFunction <> 0)
+        and IsInFunction(LState.Entry, LNextFrameFunction, CMaxFramelessFunctionSize, 0) then
+      begin
+        LLimit := LState.EntrySlot;
       end;
     end
     else
-      Result := False;
+      LLimit := AStackTop;
+    LFound := False;
+    LSlot := LState.EntrySlot + SizeOf(Pointer);
+    while (LState.MaxDepth > 0)
+      and (LSlot < LLimit) do
+    begin
+      if LState.AddCallerOfLastEntry(LSlot) then
+      begin
+        LFound := True;
+        {Without a next frame, start again from the last entry:  A next frame may be found from it.}
+        if LNextFrame = 0 then
+          Break;
+      end;
+      Inc(LSlot, SizeOf(Pointer));
+    end;
+
+    {Step 3:  The next frame's return address is the next entry.  A candidate in the function that the next frame
+    belongs to is the return address of the call that function made, so it comes first.}
+    if LNextFrame <> 0 then
+    begin
+      if (LState.MaxDepth > 0)
+        and (LNextFrameFunction <> 0) then
+      begin
+        LState.AddCandidateInFunction(LNextFrameFunction);
+      end;
+      if LState.MaxDepth > 0 then
+        LState.AddEntry(PNativeUInt(LNextFrame + SizeOf(Pointer))^, LNextFrame + SizeOf(Pointer));
+    end
+    else if not LFound then
+      Break;
+  end;
+
+  {Clear the remaining entries}
+  while LState.MaxDepth > 0 do
+  begin
+    LState.ReturnAddresses^ := 0;
+    Inc(LState.ReturnAddresses);
+    Dec(LState.MaxDepth);
+  end;
+end;
+
+{Dumps the call stack trace to the given address.  Fills the list with the addresses where the called addresses can be
+found.  This is the "raw" stack tracing routine.  Unlike the frame based one, it also finds the callers of functions
+without a stack frame, and it works even if EBP does not point to a stack frame when it is called.}
+procedure GetRawStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
+var
+  LStackTop, LStackBottom: NativeUInt;
+  LLastOSError: Cardinal;
+begin
+  {Are exceptions being handled?  Can only do a raw stack trace if the possible access violations are going to be
+  handled.}
+  if Assigned(ExceptObjProc) then
+  begin
+    {Save the last Windows error code}
+    LLastOSError := GetLastError;
+    {Get the top of the stack and the stack frame of this routine.  The stack trace starts with the return address of
+    this routine.}
+    GetStackRange(LStackTop, LStackBottom);
+    TraceLiveReturnAddresses(LStackBottom, LStackTop - (SizeOf(Pointer) - 1), AReturnAddresses, AMaxDepth, ASkipFrames);
+    {Restore the last Windows error code, since a VirtualQuery call may have modified it.}
+    SetLastError(LLastOSError);
   end
   else
-    Result := False;
+  begin
+    {Exception handling is not available - do a frame based stack trace}
+    GetFrameBasedStackTrace(AReturnAddresses, AMaxDepth, ASkipFrames);
+  end;
+end;
+
+{$else}
+
+{$IFDEF MSWINDOWS}
+{Without raw stack tracing there is no memory page access map, so there is nothing to do.  The routine is still
+exported, so that all the DLLs have the same exports.}
+procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
+begin
 end;
 {$ENDIF}
 
-{Dumps the call stack trace to the given address.  Fills the list with the addresses where the called addresses can be
-found.  This is the "raw" stack tracing routine.}
+{$endif}
 
+{Under macOS the raw stack trace comes from backtrace, for both 32-bit and 64-bit code.}
 {$IFDEF MACOS}
 function backtrace(Result: PNativeUInt; size: Integer): Integer; cdecl; external libc name '_backtrace';
 function _NSGetExecutablePath(buf: PAnsiChar; BufSize: PCardinal): Integer; cdecl; external libc name '__NSGetExecutablePath';
-{$ENDIF}
 
+{Dumps the call stack trace to the given address.  Fills the list with the addresses where the called addresses can be
+found.  This is the "raw" stack tracing routine.}
 procedure GetRawStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
 var
-  LStackTop, LStackBottom, LCurrentFrame, LNextFrame, LReturnAddress, LStackAddress: NativeUInt;
-  LLastOSError: Cardinal;
-
-{$IFDEF MACOS}
   StackLog: PNativeUInt; //array[0..10] of Pointer;
   Cnt: Integer;
   I: Integer;
-{$ENDIF}
 begin
-  {$IFDEF MACOS}
   {$POINTERMATH ON}
   Cnt := AMaxDepth + ASkipFrames;
 
@@ -639,128 +1107,13 @@ begin
     FreeMem(StackLog);
   end;
   {$POINTERMATH OFF}
-  {$ENDIF}
-  {Are exceptions being handled? Can only do a raw stack trace if the possible access violations are going to be
-  handled.}
-{$IFDEF MSWINDOWS}
-  if Assigned(ExceptObjProc) then
-  begin
-    {Save the last Windows error code}
-    LLastOSError := GetLastError;
-    {Get the call stack top and current bottom}
-    GetStackRange(LStackTop, LStackBottom);
-    Dec(LStackTop, SizeOf(Pointer) - 1);
-    {Get the current frame start}
-    LCurrentFrame := LStackBottom;
-    {Fill the call stack}
-    while (AMaxDepth > 0)
-      and (LCurrentFrame < LStackTop) do
-    begin
-      {Get the next frame}
-      LNextFrame := PNativeUInt(LCurrentFrame)^;
-      {Is it a valid stack frame address?}
-      if (LNextFrame < LStackTop)
-        and (LNextFrame > LCurrentFrame) then
-      begin
-        {The pointer to the next stack frame appears valid:  Get the return address of the current frame}
-        LReturnAddress := PNativeUInt(LCurrentFrame + SizeOf(Pointer))^;
-        {Does this appear to be a valid return address}
-        if LReturnAddress > $ffff then
-        begin
-          {Is the map for this return address incorrect? It may be unknown or marked as non-executable because a library
-          was previously not yet loaded, or perhaps this is not a valid stack frame.}
-          if MemoryPageAccessMap[(LReturnAddress - 8) div 4096] <> mpaExecutable then
-            UpdateMemoryPageAccessMap(LReturnAddress - 8);
-          {Is this return address actually valid?}
-          if IsValidCallSite(LReturnAddress) then
-          begin
-            {Ignore the requested number of levels}
-            if ASkipFrames = 0 then
-            begin
-              AReturnAddresses^ := LReturnAddress;
-              Inc(AReturnAddresses);
-              Dec(AMaxDepth);
-            end;
-          end
-          else
-          begin
-            {If the return address is invalid it implies this stack frame is invalid after all.}
-            LNextFrame := LStackTop;
-          end;
-        end
-        else
-        begin
-          {The return address is bad - this is not a valid stack frame}
-          LNextFrame := LStackTop;
-        end;
-      end
-      else
-      begin
-        {This is not a valid stack frame}
-        LNextFrame := LStackTop;
-      end;
-      {Do not check intermediate entries if there are still frames to skip}
-      if ASkipFrames <> 0 then
-      begin
-        Dec(ASkipFrames);
-      end
-      else
-      begin
-        {Check all stack entries up to the next stack frame}
-        LStackAddress := LCurrentFrame + 2 * SizeOf(Pointer);
-        while (AMaxDepth > 0)
-          and (LStackAddress < LNextFrame) do
-        begin
-          {Get the return address}
-          LReturnAddress := PNativeUInt(LStackAddress)^;
-          {Is this a valid call site?}
-          if IsValidCallSite(LReturnAddress) then
-          begin
-            AReturnAddresses^ := LReturnAddress;
-            Inc(AReturnAddresses);
-            Dec(AMaxDepth);
-          end;
-          {Check the next stack address}
-          Inc(LStackAddress, SizeOf(Pointer));
-        end;
-      end;
-      {Do the next stack frame}
-      LCurrentFrame := LNextFrame;
-    end;
-    {Clear the remaining entries}
-    while AMaxDepth > 0 do
-    begin
-      AReturnAddresses^ := 0;
-      Inc(AReturnAddresses);
-      Dec(AMaxDepth);
-    end;
-    {Restore the last Windows error code, since a VirtualQuery call may have modified it.}
-    SetLastError(LLastOSError);
-  end
-  else
-  begin
-    {Exception handling is not available - do a frame based stack trace}
-    GetFrameBasedStackTrace(AReturnAddresses, AMaxDepth, ASkipFrames);
-  end;
-  {$ENDIF}
-end;
-
-{$else}
-
-{$IFDEF MSWINDOWS}
-{There is no memory page access map without raw stack tracing.  This routine is still exported, so that all the DLLs
-have the same exports.}
-procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
-begin
 end;
 {$ENDIF}
-
-{$endif}
 
 {--------------------------DLL load and unload notifications--------------------------}
 
 {The memory page access map used by raw stack tracing is invalidated whenever a DLL is loaded or unloaded.}
-{$if defined(MSWINDOWS) and defined(RawStackTraces)}
+{$ifdef Win32RawStackTraces}
 
 type
 
@@ -840,7 +1193,7 @@ begin
     UnregisterDLLLoadAndUnloadNotifications;
 end;
 
-{$ifend}
+{$endif}
 
 {-----------------------------Stack Trace Logging----------------------------}
 
@@ -850,9 +1203,10 @@ last character.}
 {Converts an unsigned integer to a hexadecimal string at the buffer location, returning the new buffer position.}
 function NativeUIntToHexBuf(ANum: NativeUInt; APBuffer: PAnsiChar): PAnsiChar;
 const
-  MaxDigits = 16;
+  CHexTable: array[0..15] of AnsiChar = '0123456789ABCDEF';
+  CMaxDigits = 16;
 var
-  LDigitBuffer: array[0..MaxDigits - 1] of AnsiChar;
+  LDigitBuffer: array[0..CMaxDigits - 1] of AnsiChar;
   LCount: Cardinal;
   LDigit: NativeUInt;
 begin
@@ -863,16 +1217,16 @@ begin
     ANum := ANum div 16;
     LDigit := LDigit - ANum * 16;
     Inc(LCount);
-    LDigitBuffer[MaxDigits - LCount] := HexTable[LDigit];
+    LDigitBuffer[CMaxDigits - LCount] := CHexTable[LDigit];
   until ANum = 0;
   {Add leading zeros}
   while LCount < SizeOf(NativeUInt) * 2 do
   begin
     Inc(LCount);
-    LDigitBuffer[MaxDigits - LCount] := '0';
+    LDigitBuffer[CMaxDigits - LCount] := '0';
   end;
   {Copy the digits to the output buffer and advance it}
-  System.Move(LDigitBuffer[MaxDigits - LCount], APBuffer^, LCount);
+  System.Move(LDigitBuffer[CMaxDigits - LCount], APBuffer^, LCount);
   Result := APBuffer + LCount;
 end;
 {$ifend}
@@ -1124,11 +1478,11 @@ end;
 
 exports
   GetFrameBasedStackTrace,
-{$ifdef RawStackTraces}
+{$if defined(Win32RawStackTraces) or defined(MACOS)}
   GetRawStackTrace,
 {$else}
   GetFrameBasedStackTrace name 'GetRawStackTrace',
-{$endif}
+{$ifend}
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
 {$ENDIF}
@@ -1139,7 +1493,7 @@ begin
   JclStackTrackingOptions := JclStackTrackingOptions + [stAllModules];
 {$endif}
 
-{$if defined(MSWINDOWS) and defined(RawStackTraces)}
+{$ifdef Win32RawStackTraces}
 
   {When this DLL is unloaded we need to unregister DLL load and unload notifications.}
   DLLProc := DllMain;
@@ -1147,6 +1501,6 @@ begin
   {The memory map used by the stack tracing code must be updated whenever a DLL is loaded or unloaded.}
   RegisterDLLLoadAndUnloadNotifications;
 
-{$ifend}
+{$endif}
 
 end.
