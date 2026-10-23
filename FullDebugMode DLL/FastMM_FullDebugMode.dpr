@@ -827,8 +827,10 @@ function TTraceLiveReturnAddressesState.IsFrame(AAddress: NativeUInt): Boolean;
 var
   LSavedFrame: NativeUInt;
 begin
+  {The address is any value that was found on the stack, so the check against the top of the stack must not add to
+  it:  For $FFFFFFFC the sum would wrap around to 0.}
   if (AAddress <= EntrySlot)
-    or (AAddress + SizeOf(Pointer) >= StackTop)
+    or (AAddress >= StackTop - SizeOf(Pointer))
     or (AAddress and (SizeOf(Pointer) - 1) <> 0) then
   begin
     Exit(False);

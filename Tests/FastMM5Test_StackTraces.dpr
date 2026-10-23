@@ -29,6 +29,11 @@
  has to confirm such a return address from the one above it.  See
  RunCallChainThroughIndirectCalls.
 
+ Under 32-bit a stack trace is also taken with -4 in EBP.  FastMM5's routines
+ without a stack frame use EBP for other values, and the raw stack trace used to
+ read from the address in EBP if it was -4.  See
+ CaptureStackTraceWithEbpMinus4.
+
  Under 64-bit the call chain is also run where the stack has to grow while the
  stack trace is taken.  RtlCaptureStackBackTrace returns no frames at all in
  that case.  See RunCallChainOnGrowingStack.
@@ -456,6 +461,46 @@ end;
 
 {$ifend}
 
+{-------------------------- EBP holding -4 --------------------------}
+
+{$if SizeOf(Pointer) = 4}
+var
+  {The return address of the call to the stack trace in
+   CaptureStackTraceWithEbpMinus4.}
+  GReturnAddressWithEbpMinus4: NativeUInt;
+
+{$StackFrames off}
+{Takes a stack trace with -4 in EBP.  The raw stack trace looks for the first
+ stack frame at the address in EBP, which is not a frame pointer when FastMM5
+ asks for a stack trace.}
+procedure CaptureStackTraceWithEbpMinus4;
+asm
+  push ebp
+  mov ebp, -4
+  mov eax, offset GTrace
+  mov edx, CMaxDepth
+  xor ecx, ecx
+  call GGetStackTrace
+@ReturnAddress:
+  pop ebp
+  mov GReturnAddressWithEbpMinus4, offset @ReturnAddress
+end;
+{$StackFrames on}
+
+{Returns True if the stack trace with -4 in EBP did not raise an exception, and
+ starts with the return address of the call to it.}
+function IsStackTraceTakenWithEbpMinus4: Boolean;
+begin
+  FillChar(GTrace, SizeOf(GTrace), 0);
+  try
+    CaptureStackTraceWithEbpMinus4;
+    Result := GTrace[0] = GReturnAddressWithEbpMinus4;
+  except
+    Result := False;
+  end;
+end;
+{$ifend}
+
 {-------------------------- A growing stack --------------------------}
 
 {$if SizeOf(Pointer) = 8}
@@ -562,6 +607,11 @@ begin
     'over stale return addresses:  the call chain is followed by the caller of the routine that ran it');
   if FailureCount <> LFailures then
     DumpStackTrace(GTrace, GChain);
+
+{$if SizeOf(Pointer) = 4}
+  Check(IsStackTraceTakenWithEbpMinus4,
+    'with -4 in EBP:  the stack trace does not raise an exception, and starts with the return address');
+{$ifend}
 
 {$if SizeOf(Pointer) = 8}
   CheckEqualsInt(16, RunCallChainOnGrowingStack,
