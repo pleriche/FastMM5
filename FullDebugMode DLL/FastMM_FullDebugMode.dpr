@@ -996,6 +996,11 @@ var
   LNextFrame, LNextFrameFunction, LLimit, LSlot, LValue, LLastFound: NativeUInt;
   LFound: Boolean;
 begin
+  {The first entry is added unconditionally below, so with no room for any entry it would be written past the end of
+  the list, and MaxDepth would wrap around.}
+  if AMaxDepth = 0 then
+    Exit;
+
   LState.ReturnAddresses := AReturnAddresses;
   LState.MaxDepth := AMaxDepth;
   LState.SkipFrames := ASkipFrames;
@@ -1308,7 +1313,8 @@ begin
     Winapi.Windows.SwitchToThread;
 
   try
-    for LInd := 0 to AMaxDepth - 1 do
+    {Counted from 1:  With "0 to AMaxDepth - 1" the bound would wrap around for AMaxDepth = 0.}
+    for LInd := 1 to AMaxDepth do
     begin
       LAddress := AReturnAddresses^;
       if LAddress = 0 then
