@@ -113,6 +113,9 @@ type
     SmallBlockContentionCount: Int64;
     MediumBlockContentionCount: Int64;
     LargeBlockContentionCount: Int64;
+    {False if blocks were skipped because an arena could not be locked within the lock timeout, i.e. if the byte
+    counts and block counts of the sample are incomplete.}
+    AllBlocksWalked: Boolean;
   end;
 
   {A callback invoked for every sample.  It runs on the sampling thread, so it must be thread safe and must not block
@@ -277,7 +280,7 @@ begin
   FillChar(Result, SizeOf(Result), 0);
   Result.WallClock := Now;
   Result.MemoryManagerUsageBytes := Int64(FastMM_GetCurrentMemoryUsage);
-  FastMM_GetMemoryManagerState(LState, ALockTimeoutMilliseconds);
+  Result.AllBlocksWalked := FastMM_GetMemoryManagerState(LState, ALockTimeoutMilliseconds);
   PopulateSampleFromState(LState, Result);
 end;
 
@@ -355,6 +358,7 @@ begin
   LText := LText + ',' + IntToStr(ASample.SmallBlockContentionCount);
   LText := LText + ',' + IntToStr(ASample.MediumBlockContentionCount);
   LText := LText + ',' + IntToStr(ASample.LargeBlockContentionCount);
+  LText := LText + ',' + IntToStr(Ord(ASample.AllBlocksWalked));
   LText := LText + #13#10;
   Result := AnsiString(LText);
 end;
@@ -546,7 +550,7 @@ begin
     'sample_index,wall_clock,elapsed_ms,mm_usage_bytes,allocated_bytes,reserved_bytes,overhead_bytes,'
     + 'efficiency_pct,small_alloc_bytes,small_reserved_bytes,small_block_count,medium_alloc_bytes,'
     + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count,'
-    + 'small_contention,medium_contention,large_contention'#13#10);
+    + 'small_contention,medium_contention,large_contention,all_blocks_walked'#13#10);
 end;
 
 procedure TFastMM_SamplingProfiler.WriteDetailHeader;
@@ -569,7 +573,7 @@ begin
   else
     LSample.ElapsedMilliseconds := 0;
   LSample.MemoryManagerUsageBytes := Int64(FastMM_GetCurrentMemoryUsage);
-  FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
+  LSample.AllBlocksWalked := FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
   PopulateSampleFromState(LState, LSample);
 
   {Assign the sample index and advance it under the lock so SampleNow and the timer thread cannot collide.}
@@ -751,7 +755,7 @@ begin
     else
       Result.ElapsedMilliseconds := 0;
     Result.MemoryManagerUsageBytes := Int64(FastMM_GetCurrentMemoryUsage);
-    FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
+    Result.AllBlocksWalked := FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
     PopulateSampleFromState(LState, Result);
 
     EnterCriticalSection(FLock);
