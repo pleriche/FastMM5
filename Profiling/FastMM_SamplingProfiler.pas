@@ -116,14 +116,22 @@ type
   end;
 
   {A callback invoked for every sample.  It runs on the sampling thread, so it must be thread safe and must not block
-  for long.  AUserData is the value assigned to the profiler's CallbackUserData property.}
+  for long.  It may call Stop and SampleNow, but must not free the profiler.  AUserData is the value assigned to the
+  profiler's CallbackUserData property.}
   TFastMM_SampleCallback = procedure(const ASample: TFastMM_MemorySample; AUserData: Pointer);
 
   TFastMM_SamplingProfiler = class(TObject)
   private
     FThread: TThread;
+    {The ID of the sampling thread while it runs, otherwise 0.}
+    FSamplingThreadID: Cardinal;
     FStopEvent: TEvent;
+    {Protects the state that the sampling thread shares with other threads:  FRunning, FSampleIndex and
+    FLastErrorMessage.}
     FLock: TRTLCriticalSection;
+    {Serializes Start, Stop and the temporary summary file handle of SampleNow.  The sampling thread never enters it, so
+    Stop can hold it while it waits for the sampling thread to finish.}
+    FControlLock: TRTLCriticalSection;
 
     FIntervalMilliseconds: Cardinal;
     FSummaryFileName: string;
@@ -137,35 +145,53 @@ type
     FSampleIndex: Integer;
     FStartTickValid: Boolean;
 
+    {The output files.  They are opened by Start, and from then on only used by the sampling thread, which closes them
+    when it stops.}
     FSummaryHandle: THandle;
     FDetailHandle: THandle;
 
+    FLastErrorMessage: string;
+
     procedure SetIntervalMilliseconds(AValue: Cardinal);
     function GetRunning: Boolean;
+    function GetLastErrorMessage: string;
+    {True if the calling thread is the sampling thread, e.g. inside the callback.}
+    function IsSamplingThread: Boolean;
 
     procedure OpenOutputFiles;
     procedure CloseOutputFiles;
-    procedure WriteSummaryHeader;
+    procedure WriteSummaryHeader(AHandle: THandle);
     procedure WriteDetailHeader;
     {Takes a sample and writes it to the open files and/or the callback.  Runs on the sampling thread.}
     procedure DoSample;
+    {Called by the sampling thread when it stops, for whatever reason.}
+    procedure SamplingThreadStopped(const AErrorMessage: string);
+    {Waits for a sampling thread that has been asked to stop, or has stopped on its own, and frees it.  The caller must
+    hold FControlLock.}
+    procedure FreeSamplingThread;
   public
     constructor Create;
     destructor Destroy; override;
 
-    {Starts periodic sampling.  Has no effect if already running.}
+    {Starts periodic sampling.  Has no effect if already running.  If the sampling thread cannot be created, the
+    exception is raised and the profiler stays stopped.}
     procedure Start;
     {Stops periodic sampling and closes the output files.  Blocks until the sampling thread has stopped.  Has no
-    effect if not running.}
+    effect if not running.  If called from the callback, it only asks the sampling thread to stop, which it does once
+    the callback returns.}
     procedure Stop;
 
     {Takes a single sample immediately, independently of the timer.  Thread safe:  may be called whether or not the
-    timer is running.  If the timer is not running and no output file is open, a temporary file handle is opened for
-    the SummaryFileName (append) for the duration of the call.  Returns the sample that was taken.}
+    timer is running, including from the callback.  If the timer is not running, the sample is appended to the
+    SummaryFileName through a temporary file handle.  Returns the sample that was taken.}
     function SampleNow: TFastMM_MemorySample;
 
-    {True while the sampling thread is running.}
+    {True from Start until the sampling thread stops, either because Stop was called or because an exception was
+    raised while taking a sample (see LastErrorMessage).}
     property Running: Boolean read GetRunning;
+    {The message of the exception that stopped the sampling thread, or '' if it has not been stopped by an exception
+    since the last Start.}
+    property LastErrorMessage: string read GetLastErrorMessage;
 
     {The sampling interval in milliseconds.  May be changed while running;  the new interval takes effect after the
     current wait completes.  Default 1000.}
@@ -385,22 +411,40 @@ begin
 end;
 
 procedure TSamplingThread.Execute;
+var
+  LErrorMessage: string;
 begin
-  {Sampling is a background diagnostic;  keep it out of the way of the application threads.  Setting the priority from
-  within the thread body avoids any cross-version Start/Resume differences.}
-  Priority := tpLower;
+  {Record the thread ID before anything can call the callback, so that Start, Stop, SampleNow and the destructor can
+  tell when they are called from it.}
+  FProfiler.FSamplingThreadID := GetCurrentThreadId;
 
-  {Take an initial sample at t = 0 so the series starts at the moment Start was called.}
-  FProfiler.DoSample;
+  LErrorMessage := '';
+  try
+    try
+      {Sampling is a background diagnostic;  keep it out of the way of the application threads.  Setting the priority
+      from within the thread body avoids any cross-version Start/Resume differences.}
+      Priority := tpLower;
 
-  while not Terminated do
-  begin
-    {Wait for the interval, but wake immediately if a stop is requested.}
-    if FProfiler.FStopEvent.WaitFor(FProfiler.FIntervalMilliseconds) = wrSignaled then
-      Break;
-    if Terminated then
-      Break;
-    FProfiler.DoSample;
+      {Take an initial sample at t = 0 so the series starts at the moment Start was called.}
+      FProfiler.DoSample;
+
+      while not Terminated do
+      begin
+        {Wait for the interval, but wake immediately if a stop is requested.}
+        if FProfiler.FStopEvent.WaitFor(FProfiler.FIntervalMilliseconds) = wrSignaled then
+          Break;
+        if Terminated then
+          Break;
+        FProfiler.DoSample;
+      end;
+    except
+      {An exception ends the sampling.  TThread would only keep it in FatalException, which nothing reads, so keep the
+      message for LastErrorMessage instead.}
+      on E: Exception do
+        LErrorMessage := E.Message;
+    end;
+  finally
+    FProfiler.SamplingThreadStopped(LErrorMessage);
   end;
 end;
 
@@ -412,6 +456,7 @@ constructor TFastMM_SamplingProfiler.Create;
 begin
   inherited Create;
   InitializeCriticalSection(FLock);
+  InitializeCriticalSection(FControlLock);
   FStopEvent := TEvent.Create(nil, True, False, '');
   FIntervalMilliseconds := 1000;
   FLockTimeoutMilliseconds := 50;
@@ -421,8 +466,13 @@ end;
 
 destructor TFastMM_SamplingProfiler.Destroy;
 begin
+  {The sampling thread is still using the profiler while it runs the callback.}
+  if IsSamplingThread then
+    raise Exception.Create('A TFastMM_SamplingProfiler cannot be freed from its own callback.');
+
   Stop;
   FStopEvent.Free;
+  DeleteCriticalSection(FControlLock);
   DeleteCriticalSection(FLock);
   inherited Destroy;
 end;
@@ -444,13 +494,28 @@ begin
   end;
 end;
 
+function TFastMM_SamplingProfiler.GetLastErrorMessage: string;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Result := FLastErrorMessage;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TFastMM_SamplingProfiler.IsSamplingThread: Boolean;
+begin
+  Result := GetCurrentThreadId = FSamplingThreadID;
+end;
+
 procedure TFastMM_SamplingProfiler.OpenOutputFiles;
 begin
   if FSummaryFileName <> '' then
   begin
     FSummaryHandle := THandle(FileCreate(FSummaryFileName));
     if FSummaryHandle <> INVALID_HANDLE_VALUE then
-      WriteSummaryHeader;
+      WriteSummaryHeader(FSummaryHandle);
   end;
 
   if FDetailFileName <> '' then
@@ -475,9 +540,9 @@ begin
   end;
 end;
 
-procedure TFastMM_SamplingProfiler.WriteSummaryHeader;
+procedure TFastMM_SamplingProfiler.WriteSummaryHeader(AHandle: THandle);
 begin
-  WriteStringToHandle(FSummaryHandle,
+  WriteStringToHandle(AHandle,
     'sample_index,wall_clock,elapsed_ms,mm_usage_bytes,allocated_bytes,reserved_bytes,overhead_bytes,'
     + 'efficiency_pct,small_alloc_bytes,small_reserved_bytes,small_block_count,medium_alloc_bytes,'
     + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count,'
@@ -543,109 +608,167 @@ begin
     FCallback(LSample, FCallbackUserData);
 end;
 
-procedure TFastMM_SamplingProfiler.Start;
+procedure TFastMM_SamplingProfiler.SamplingThreadStopped(const AErrorMessage: string);
 begin
+  CloseOutputFiles;
+
   EnterCriticalSection(FLock);
   try
-    if FRunning then
-      Exit;
-    FRunning := True;
+    FRunning := False;
+    FStartTickValid := False;
+    FLastErrorMessage := AErrorMessage;
   finally
     LeaveCriticalSection(FLock);
   end;
 
-  FSampleIndex := 0;
-  FStartTickCount := GetTickCount;
-  FStartTickValid := True;
-  FStopEvent.ResetEvent;
-  OpenOutputFiles;
-
-  {The thread starts running immediately;  everything it needs is already in place.}
-  FThread := TSamplingThread.Create(Self);
+  {Thread IDs are reused, so another thread could get this ID once this thread has ended.}
+  FSamplingThreadID := 0;
 end;
 
-procedure TFastMM_SamplingProfiler.Stop;
-var
-  LWasRunning: Boolean;
+procedure TFastMM_SamplingProfiler.FreeSamplingThread;
 begin
-  EnterCriticalSection(FLock);
-  try
-    LWasRunning := FRunning;
-    FRunning := False;
-  finally
-    LeaveCriticalSection(FLock);
-  end;
-
-  if not LWasRunning then
+  if FThread = nil then
     Exit;
 
-  {Signal the thread to wake and terminate, then wait for it.}
-  FThread.Terminate;
-  FStopEvent.SetEvent;
   FThread.WaitFor;
   FThread.Free;
   FThread := nil;
+end;
 
-  CloseOutputFiles;
-  FStartTickValid := False;
+procedure TFastMM_SamplingProfiler.Start;
+begin
+  {Called from the callback:  The sampling thread is running, so there is nothing to do.  (The sampling thread must
+  not wait for FControlLock, since Stop may be holding it while it waits for the sampling thread.)}
+  if IsSamplingThread then
+    Exit;
+
+  EnterCriticalSection(FControlLock);
+  try
+    if GetRunning then
+      Exit;
+
+    {Free the thread of a previous run that stopped on its own:  Because Stop was called from the callback, or because
+    a sample raised an exception.}
+    FreeSamplingThread;
+
+    {Running is set before the thread is created, since a thread that fails right away resets it.}
+    EnterCriticalSection(FLock);
+    try
+      FRunning := True;
+      FSampleIndex := 0;
+      FStartTickCount := GetTickCount;
+      FStartTickValid := True;
+      FLastErrorMessage := '';
+    finally
+      LeaveCriticalSection(FLock);
+    end;
+
+    try
+      FStopEvent.ResetEvent;
+      OpenOutputFiles;
+
+      {The thread starts running immediately;  everything it needs is already in place.}
+      FThread := TSamplingThread.Create(Self);
+    except
+      {Undo the start, so that the profiler is not left running without a sampling thread.}
+      CloseOutputFiles;
+      EnterCriticalSection(FLock);
+      try
+        FRunning := False;
+        FStartTickValid := False;
+      finally
+        LeaveCriticalSection(FLock);
+      end;
+      raise;
+    end;
+  finally
+    LeaveCriticalSection(FControlLock);
+  end;
+end;
+
+procedure TFastMM_SamplingProfiler.Stop;
+begin
+  {Called from the callback:  The sampling thread cannot wait for itself, so it is only asked to stop, which it does
+  once the callback returns.  The next Start or Stop, or the destructor, frees it.  (FThread may not be assigned yet if
+  this is the first sample, so only the event is used.)}
+  if IsSamplingThread then
+  begin
+    FStopEvent.SetEvent;
+    Exit;
+  end;
+
+  EnterCriticalSection(FControlLock);
+  try
+    if FThread = nil then
+      Exit;
+
+    {Signal the thread to wake and terminate, then wait for it.  It closes the output files when it stops.}
+    FThread.Terminate;
+    FStopEvent.SetEvent;
+    FreeSamplingThread;
+  finally
+    LeaveCriticalSection(FControlLock);
+  end;
 end;
 
 function TFastMM_SamplingProfiler.SampleNow: TFastMM_MemorySample;
 var
   LState: TFastMM_MemoryManagerState;
-  LTemporarilyOpened: Boolean;
+  LOnSamplingThread: Boolean;
+  LHandle: THandle;
 begin
-  {If the timer is running the sampling thread owns the file handles;  route through DoSample on THIS thread is not
-  safe for the file handle, so for a manual call while running we only compute and return the sample plus invoke the
-  callback, without touching the timer-owned files.  When not running we may open the summary file in append mode for
-  the duration of the call.}
-  LTemporarilyOpened := False;
+  {While the timer is running the sampling thread owns the output files, so a manual sample is only returned and
+  passed to the callback.  When the timer is not running, the sample is appended to the summary file through a
+  temporary handle, and FControlLock keeps Start from opening the file at the same time.  The sampling thread must not
+  wait for FControlLock (Stop may hold it while waiting for the sampling thread), but if SampleNow is called from the
+  callback then the timer is running, so the lock is not needed.}
+  LOnSamplingThread := IsSamplingThread;
+  LHandle := INVALID_HANDLE_VALUE;
 
-  if not GetRunning then
-  begin
-    if (FSummaryFileName <> '') and (FSummaryHandle = INVALID_HANDLE_VALUE) then
+  if not LOnSamplingThread then
+    EnterCriticalSection(FControlLock);
+  try
+    if (not LOnSamplingThread) and (not GetRunning) and (FSummaryFileName <> '') then
     begin
       {Open for append (create if missing).}
       if FileExists(FSummaryFileName) then
-        FSummaryHandle := THandle(FileOpen(FSummaryFileName, fmOpenReadWrite or fmShareDenyWrite))
+        LHandle := THandle(FileOpen(FSummaryFileName, fmOpenReadWrite or fmShareDenyWrite))
       else
       begin
-        FSummaryHandle := THandle(FileCreate(FSummaryFileName));
-        if FSummaryHandle <> INVALID_HANDLE_VALUE then
-          WriteSummaryHeader;
+        LHandle := THandle(FileCreate(FSummaryFileName));
+        if LHandle <> INVALID_HANDLE_VALUE then
+          WriteSummaryHeader(LHandle);
       end;
 
-      if FSummaryHandle <> INVALID_HANDLE_VALUE then
-      begin
-        FileSeek(FSummaryHandle, 0, 2 {soFromEnd});
-        LTemporarilyOpened := True;
-      end;
+      if LHandle <> INVALID_HANDLE_VALUE then
+        FileSeek(LHandle, 0, 2 {soFromEnd});
     end;
-  end;
 
-  FillChar(Result, SizeOf(Result), 0);
-  Result.WallClock := Now;
-  if FStartTickValid then
-    Result.ElapsedMilliseconds := GetTickCount - FStartTickCount
-  else
-    Result.ElapsedMilliseconds := 0;
-  Result.MemoryManagerUsageBytes := Int64(FastMM_GetCurrentMemoryUsage);
-  FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
-  PopulateSampleFromState(LState, Result);
+    FillChar(Result, SizeOf(Result), 0);
+    Result.WallClock := Now;
+    if FStartTickValid then
+      Result.ElapsedMilliseconds := GetTickCount - FStartTickCount
+    else
+      Result.ElapsedMilliseconds := 0;
+    Result.MemoryManagerUsageBytes := Int64(FastMM_GetCurrentMemoryUsage);
+    FastMM_GetMemoryManagerState(LState, FLockTimeoutMilliseconds);
+    PopulateSampleFromState(LState, Result);
 
-  EnterCriticalSection(FLock);
-  try
-    Result.SampleIndex := FSampleIndex;
-    Inc(FSampleIndex);
+    EnterCriticalSection(FLock);
+    try
+      Result.SampleIndex := FSampleIndex;
+      Inc(FSampleIndex);
+    finally
+      LeaveCriticalSection(FLock);
+    end;
+
+    if LHandle <> INVALID_HANDLE_VALUE then
+      WriteStringToHandle(LHandle, BuildSummaryRow(Result));
   finally
-    LeaveCriticalSection(FLock);
-  end;
-
-  if LTemporarilyOpened then
-  begin
-    WriteStringToHandle(FSummaryHandle, BuildSummaryRow(Result));
-    FileClose(FSummaryHandle);
-    FSummaryHandle := INVALID_HANDLE_VALUE;
+    if LHandle <> INVALID_HANDLE_VALUE then
+      FileClose(LHandle);
+    if not LOnSamplingThread then
+      LeaveCriticalSection(FControlLock);
   end;
 
   if Assigned(FCallback) then
