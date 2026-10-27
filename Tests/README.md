@@ -16,7 +16,12 @@ pwsh -File RunTests.ps1 -Platforms Win32 # one platform only
 pwsh -File RunTests.ps1 -Quick           # shorter stress runs (for a quick check)
 pwsh -File RunTests.ps1 -VerboseOutput   # print the full output of every test
 pwsh -File RunTests.ps1 -ListCompilers   # only report what was found, run nothing
+pwsh -File RunTests.ps1 -TimeoutSeconds 600  # time limit per test run (default 300, 0 = none)
 ```
+
+A test run that does not finish within the time limit is killed and counted as
+failed, with the last lines of its output, so a deadlock or a crash dialog fails
+the run instead of hanging it.
 
 Nothing needs to be configured: the installed Delphi versions are read from the
 registry (and from `%EmbarcaderoRoot%` if that is set), and the newest one is
@@ -70,11 +75,11 @@ loads the library by its default name.
 | `FastMM5Test_UsagePerSizeClass.dpr` | Churns each size class in turn and asserts that nothing stays allocated and that the committed address space does not keep growing from phase to phase. |
 | `FastMM5Test_ModeTransition.dpr` | The contract of the debug and erase mode switches (issue #85): the nesting counter follows the calls, not their success, so a failed Begin still has to be balanced with an End. Guards against the "roll back on failure" idea, which drives the counter negative under correct usage. |
 | `FastMM5Test_EraseModes.dpr` | The erase modes: while active, every block handed out is filled with $90 and every block given back with $80, including the blocks ReallocMem allocates and frees when it moves a block. Also checks that in place resizes stay in place, and runs random reallocations across all size classes with both modes active, verifying that no data is lost. Parameter: the number of iterations of the random reallocations. |
-| `FastMM5Test_DoubleFree.dpr` | Double free handling (issue #73): the second free must be rejected *and* must leave the pending free list intact, in particular without the block ending up pointing at itself. Uses a walker thread that sleeps on the block under test to force the pending free path deterministically. |
+| `FastMM5Test_DoubleFree.dpr` | Double free handling (issue #73): the second free must be rejected *and* must leave the pending free list intact, in particular without the block ending up pointing at itself. Uses a walker thread that sleeps on the block under test to force the pending free path deterministically, and checks that both frees did take that path. Parameter: the block size. The script runs it with a small (2000), a medium (50000) and a large (1000000) block, since each size class has its own double free guard. |
 | `FastMM5Test_ScanCoverage.dpr` | `FastMM_ScanDebugBlocksForCorruption` must detect a corrupted header checksum, an overrun into the debug footer and a write into a freed block - for small, medium and large blocks (issue #102, where the small block cases silently stopped being detected). |
 | `FastMM5Test_ScanRace.dpr` | The other direction: while threads churn small debug blocks, a scanning thread must not report corruption that is not there, and must not crash. |
 | `FastMM5Test_ScanHeaderBounds.dpr` | Corrupts the size fields in the debug header (`UserSize`, `StackTraceEntryCount`), which is what decides where the scan reads. Each case must produce a clean corruption report rather than an access violation. |
-| `FastMM5Test_MultiThreadStress.dpr` | Multithreaded allocation stress with optional cross thread frees through a lock free mailbox; asserts content integrity and the closing balance. Parameters: `Threads Iterations MaxBlockSize DebugMode CrossThreadFree`. |
+| `FastMM5Test_MultiThreadStress.dpr` | Multithreaded allocation stress with optional cross thread frees through a lock free mailbox; asserts content integrity (also of the blocks that are freed by another thread, which are checked before they are freed) and the closing balance. Parameters: `Threads Iterations MaxBlockSize DebugMode CrossThreadFree`. The script runs it in debug mode, in normal mode, and in normal mode with blocks of up to 1 MB, so that large blocks (larger than about 546 KB) are included. |
 | `FastMM5Test_StackTraces.dpr` | The raw and frame based stack traces of the debug support library must report a known call chain in order, and FastMM5 must record it in the allocation and free stack traces of a debug block. Run from a callback of a system library and from a routine whose local buffer still holds the return addresses of earlier calls, the call chain must be followed by exactly its callers, both in the library's stack traces and in FastMM5's (the 32-bit raw stack trace used to report the stale return addresses too). The 64-bit build is based above 4GB and also checks that the stack trace includes the system library frames, both of which the 64-bit raw stack trace used to miss. Parameter: the path of the debug support library. |
 
 `FastMM_TestUtils.pas` holds the shared scaffolding: the assertions, the failure

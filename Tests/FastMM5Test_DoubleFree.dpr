@@ -14,10 +14,16 @@
  that block is locked when both FreeMem calls arrive.  Sleeping on any block
  would not do - as soon as anything else is allocated (SysUtils alone is
  enough), the walker would fall asleep on the wrong manager and both frees would
- quietly take the normal path, which looks exactly like a passing test.
+ quietly take the normal path, which looks exactly like a passing test.  So the
+ test also checks that the walker still holds the lock after the second free.
+
+ The waits for the walker are bounded:  if the walk never reaches the block (a
+ lock timeout, or a walk regression such as issue #102), the test fails instead
+ of waiting forever.
 
  Optional parameter:  the block size, to steer the test at a size class.
- Default 2000 (small);  50000 selects a medium block, 500000 a large one.}
+ Default 2000 (small);  50000 selects a medium block, 1000000 a large one
+ (blocks larger than about 546 KB are large blocks).}
 
 program FastMM5Test_DoubleFree;
 
@@ -27,6 +33,11 @@ uses
   FastMM5,
   {$if CompilerVersion >= 23}Winapi.Windows, System.SysUtils{$else}Windows, SysUtils{$ifend},
   FastMM_TestUtils in 'FastMM_TestUtils.pas';
+
+const
+  {How long to wait for the walker to reach the block under test, and to finish.
+   Each normally takes about 2 seconds, since the walker sleeps on the block.}
+  CWalkerTimeoutMilliseconds = 30000;
 
 var
   GTarget: Pointer;
@@ -53,9 +64,10 @@ var
   GPointer: Pointer;
   GThread: THandle;
   GThreadId: DWORD;
-  GSecondFreeRaised: Boolean;
+  GSecondFreeRaised, GFreesWerePending: Boolean;
   GLinkAfterFirstFree, GLinkAfterSecondFree: NativeUInt;
   GBlockSize: Integer;
+  GWaitStart: Cardinal;
 
 begin
   TestsBegin('FastMM5 double free handling (issue #73)');
@@ -68,31 +80,63 @@ begin
 
   GThread := CreateThread(nil, 0, @LockerThread, nil, 0, GThreadId);
   Check(GThread <> 0, 'the walker thread starts');
-  while GWalkerIsOnTarget = 0 do
-    Sleep(1);
-  Info('the walker is holding the lock on the block under test');
 
-  FreeMem(GPointer);
-  GLinkAfterFirstFree := PNativeUInt(GPointer)^;
-
-  GSecondFreeRaised := False;
-  try
-    FreeMem(GPointer);
-  except
-    GSecondFreeRaised := True;
+  {Wait for the walker to reach the block, but stop waiting if the walker has
+   finished without reaching it, or after the time limit.}
+  GWaitStart := GetTickCount;
+  while (GWalkerIsOnTarget = 0) and (GThread <> 0)
+    and (WaitForSingleObject(GThread, 1) = WAIT_TIMEOUT)
+    and (GetTickCount - GWaitStart < CWalkerTimeoutMilliseconds) do
+  begin
   end;
-  GLinkAfterSecondFree := PNativeUInt(GPointer)^;
+  Check(GWalkerIsOnTarget <> 0, 'the walker reaches the block under test');
 
-  WaitForSingleObject(GThread, INFINITE);
-  CloseHandle(GThread);
+  if GWalkerIsOnTarget <> 0 then
+  begin
+    Info('the walker is holding the lock on the block under test');
 
-  Check(GSecondFreeRaised, 'the second FreeMem raises an error');
-  {The regression:  the pending free link must be exactly what it was before the
-   rejected second free, and in particular must not point at the block itself.}
-  Check(GLinkAfterSecondFree <> NativeUInt(GPointer),
-    'the block does not end up pointing at itself (no self cycle)');
-  CheckEqualsInt(Int64(GLinkAfterFirstFree), Int64(GLinkAfterSecondFree),
-    'the rejected free leaves the pending free link untouched');
+    FreeMem(GPointer);
+    GLinkAfterFirstFree := PNativeUInt(GPointer)^;
+
+    GSecondFreeRaised := False;
+    try
+      FreeMem(GPointer);
+    except
+      GSecondFreeRaised := True;
+    end;
+    GLinkAfterSecondFree := PNativeUInt(GPointer)^;
+
+    {The walker sleeps on the block while it holds the lock, so if it is still
+     running, both frees arrived while the manager was locked.}
+    GFreesWerePending := WaitForSingleObject(GThread, 0) = WAIT_TIMEOUT;
+  end
+  else
+  begin
+    {Without the walker holding the lock the test cannot do what it is for.}
+    FreeMem(GPointer);
+    GSecondFreeRaised := False;
+    GFreesWerePending := False;
+    GLinkAfterFirstFree := 0;
+    GLinkAfterSecondFree := 0;
+  end;
+
+  if GThread <> 0 then
+  begin
+    Check(WaitForSingleObject(GThread, CWalkerTimeoutMilliseconds) = WAIT_OBJECT_0, 'the walker thread finishes');
+    CloseHandle(GThread);
+  end;
+
+  if GWalkerIsOnTarget <> 0 then
+  begin
+    Check(GFreesWerePending, 'both frees arrive while the walker holds the lock (the pending free path)');
+    Check(GSecondFreeRaised, 'the second FreeMem raises an error');
+    {The regression:  the pending free link must be exactly what it was before the
+     rejected second free, and in particular must not point at the block itself.}
+    Check(GLinkAfterSecondFree <> NativeUInt(GPointer),
+      'the block does not end up pointing at itself (no self cycle)');
+    CheckEqualsInt(Int64(GLinkAfterFirstFree), Int64(GLinkAfterSecondFree),
+      'the rejected free leaves the pending free link untouched');
+  end;
 
   TestsEnd;
 end.

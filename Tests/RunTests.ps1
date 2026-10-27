@@ -5,7 +5,9 @@
   checks passed, so this script only has to build it, run it and look at the exit
   code.  The summary at the end lists one line per test per target, and the exit
   code of the script is the number of failed runs, so it can serve as a CI step
-  as it is.
+  as it is.  A test that does not finish within -TimeoutSeconds is killed and
+  counted as failed, so a deadlock or a crash dialog fails the run instead of
+  hanging it.
 
   Which compilers are used:
 
@@ -25,6 +27,7 @@
       pwsh -File RunTests.ps1 -Quick               # shorter stress runs
       pwsh -File RunTests.ps1 -VerboseOutput       # full output of every test
       pwsh -File RunTests.ps1 -ListCompilers       # only report what was found
+      pwsh -File RunTests.ps1 -TimeoutSeconds 600  # time limit per test run (default 300, 0 = none)
 #>
 
 param(
@@ -33,7 +36,8 @@ param(
   [switch]$AllCompilers,
   [switch]$Quick,
   [switch]$VerboseOutput,
-  [switch]$ListCompilers
+  [switch]$ListCompilers,
+  [int]$TimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,7 +49,13 @@ $compilerPathsFile = Join-Path $srcDir 'CompilerPaths.txt'
 # The tests, with the arguments to run them with.  The stress tests take a while,
 # so -Quick shortens them;  the others ignore their arguments.  A test with
 # debugLibrary set gets the path of the debug support library as its first
-# argument.
+# argument.  A test that is listed more than once is built once and run once per
+# entry.
+#
+# DoubleFree runs once per block size class (small, medium and large), since
+# each class has its own double free guard.  MultiThreadStress runs in debug
+# mode, in normal mode, and in normal mode with blocks of up to 1 MB, so that
+# large blocks are included (blocks larger than about 546 KB are large blocks).
 $Tests = @(
   @{ name = 'FastMM5Test_DebugMode';          args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_SizeClasses';        args = @();            quickArgs = @() }
@@ -53,13 +63,23 @@ $Tests = @(
   @{ name = 'FastMM5Test_ModeTransition';     args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_EraseModes';         args = @('20000');     quickArgs = @('5000') }
   @{ name = 'FastMM5Test_DoubleFree';         args = @('2000');      quickArgs = @('2000') }
+  @{ name = 'FastMM5Test_DoubleFree';         args = @('50000');     quickArgs = @('50000') }
+  @{ name = 'FastMM5Test_DoubleFree';         args = @('1000000');   quickArgs = @('1000000') }
   @{ name = 'FastMM5Test_ScanCoverage';       args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanHeaderBounds';   args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanRace';           args = @('10', '4');   quickArgs = @('3', '4') }
   @{ name = 'FastMM5Test_MultiThreadStress';  args = @('4', '20000', '70000', '1', '1')
                                               quickArgs = @('4', '5000', '70000', '1', '1') }
+  @{ name = 'FastMM5Test_MultiThreadStress';  args = @('4', '20000', '70000', '0', '1')
+                                              quickArgs = @('4', '5000', '70000', '0', '1') }
+  @{ name = 'FastMM5Test_MultiThreadStress';  args = @('4', '2000', '1000000', '0', '1')
+                                              quickArgs = @('4', '500', '1000000', '0', '1') }
   @{ name = 'FastMM5Test_StackTraces';        args = @();            quickArgs = @(); debugLibrary = $true }
 )
+
+# The runs of a test that is listed more than once are told apart by their
+# arguments in the output.
+$repeatedTests = @($Tests | Group-Object { $_.name } | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
 
 $debugLibrarySource = Join-Path $rootDir 'FullDebugMode DLL\FastMM_FullDebugMode.dpr'
 # The debug support library source includes "{$R *.res}", but the .res file is
@@ -191,6 +211,49 @@ function Format-Installation($install) {
   return "$text  $($install.Root)"
 }
 
+# Runs a test program and returns its output lines and exit code.  If it does not
+# finish within the time limit it is killed, and TimedOut is set instead.
+function Invoke-TestProgram([string]$exe, [string[]]$arguments, [int]$timeoutSeconds) {
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $exe
+  # Quote every argument, since the paths may contain spaces.  None of the
+  # arguments contains a double quote or ends with a backslash.
+  $quoted = @()
+  foreach ($argument in $arguments) { $quoted += '"' + $argument + '"' }
+  $startInfo.Arguments = $quoted -join ' '
+  # The same working directory that "& $exe" would use.
+  $startInfo.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+
+  $process = [System.Diagnostics.Process]::Start($startInfo)
+  try {
+    # Read both streams while the test runs:  a test that filled a pipe buffer
+    # would otherwise block, and never finish.
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+
+    if ($timeoutSeconds -gt 0) { $limit = $timeoutSeconds * 1000 } else { $limit = -1 }
+    $timedOut = -not $process.WaitForExit($limit)
+    if ($timedOut) {
+      try { $process.Kill() } catch { }
+      [void]$process.WaitForExit(10000)
+    }
+
+    $text = ($stdout.Result + $stderr.Result).TrimEnd("`r", "`n")
+    if ($timedOut) { $exitCode = $null } else { $exitCode = $process.ExitCode }
+    return [pscustomobject]@{
+      Output   = @($text -split "`r?`n")
+      ExitCode = $exitCode
+      TimedOut = $timedOut
+    }
+  } finally {
+    $process.Dispose()
+  }
+}
+
 # --------------------------------------------------------- select the compilers
 
 $fromFile = Test-Path $compilerPathsFile
@@ -266,20 +329,31 @@ foreach ($install in $selected) {
     $dllBuildOutput = & $info.exe -B -Q -DModuleAndOffsetOnly "-U$($info.lib)" "-O$($info.lib)" "-R$dllDir" `
       '-NSSystem;System.Win;Winapi' "-N$dllDir" "-E$dllDir" $debugLibrarySource 2>&1
 
+    $buildOutputs = @{}
     foreach ($test in $Tests) {
       $dpr = Join-Path $srcDir "$($test.name).dpr"
       $exe = Join-Path $outDir "$($test.name).exe"
 
-      # Compile from the source directory:  the "in 'FastMM_TestUtils.pas'"
-      # clause is resolved relative to the current directory, not to the .dpr.
-      # -O gives the object file search path.  Nothing here links an .obj, but it
-      # costs nothing and lets the same command line serve compilers whose RTL
-      # declares external routines from .obj files.
-      Push-Location $srcDir
-      try {
-        $buildOutput = & $info.exe -B -Q "-U$($srcDir);$($rootDir);$($info.lib)" `
-          "-O$($info.lib)" '-NSSystem;System.Win;Winapi;Vcl' "-N$outDir" "-E$outDir" $dpr 2>&1
-      } finally { Pop-Location }
+      # @() keeps a single argument an array:  splatting a plain string would pass
+      # each of its characters as a separate argument.
+      $testArgs = @(if ($Quick) { $test.quickArgs } else { $test.args })
+      $label = $test.name
+      if ($repeatedTests -contains $test.name) { $label = "$label $($testArgs -join ' ')" }
+
+      # A test that is listed more than once is only built for its first entry.
+      if (-not $buildOutputs.ContainsKey($test.name)) {
+        # Compile from the source directory:  the "in 'FastMM_TestUtils.pas'"
+        # clause is resolved relative to the current directory, not to the .dpr.
+        # -O gives the object file search path.  Nothing here links an .obj, but it
+        # costs nothing and lets the same command line serve compilers whose RTL
+        # declares external routines from .obj files.
+        Push-Location $srcDir
+        try {
+          $buildOutputs[$test.name] = & $info.exe -B -Q "-U$($srcDir);$($rootDir);$($info.lib)" `
+            "-O$($info.lib)" '-NSSystem;System.Win;Winapi;Vcl' "-N$outDir" "-E$outDir" $dpr 2>&1
+        } finally { Pop-Location }
+      }
+      $buildOutput = $buildOutputs[$test.name]
 
       $built = Test-Path $exe
       if ($built -and $test.debugLibrary -and (-not (Test-Path $dllPath))) {
@@ -287,29 +361,32 @@ foreach ($install in $selected) {
         $buildOutput = $dllBuildOutput
       }
       if (-not $built) {
-        Write-Host ("  {0,-34} BUILD FAILED" -f $test.name)
+        Write-Host ("  {0,-50} BUILD FAILED" -f $label)
         $buildOutput | Select-Object -Last 5 | ForEach-Object { Write-Host "      $_" }
-        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $test.name; Outcome = 'build failed' })
+        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $label; Outcome = 'build failed' })
         continue
       }
 
-      # @() keeps a single argument an array:  splatting a plain string would pass
-      # each of its characters as a separate argument.
-      $testArgs = @(if ($Quick) { $test.quickArgs } else { $test.args })
       if ($test.debugLibrary) { $testArgs = @($dllPath) + $testArgs }
-      $output = & $exe @testArgs 2>&1
-      $code = $LASTEXITCODE
+      $run = Invoke-TestProgram $exe $testArgs $TimeoutSeconds
+      $output = $run.Output
+      $code = $run.ExitCode
       if ($VerboseOutput) { $output | ForEach-Object { Write-Host "      $_" } }
 
-      if ($code -eq 0) {
+      if ($run.TimedOut) {
+        Write-Host ("  {0,-50} TIMED OUT after {1} s" -f $label, $TimeoutSeconds)
+        # The last lines show how far the test got before it hung.
+        $output | Select-Object -Last 10 | ForEach-Object { Write-Host "      $_" }
+        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $label; Outcome = 'timed out' })
+      } elseif ($code -eq 0) {
         $summary = ($output | Select-String -Pattern '^PASSED' | Select-Object -Last 1)
-        Write-Host ("  {0,-34} ok    {1}" -f $test.name, $summary)
-        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $test.name; Outcome = 'passed' })
+        Write-Host ("  {0,-50} ok    {1}" -f $label, $summary)
+        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $label; Outcome = 'passed' })
       } else {
-        Write-Host ("  {0,-34} FAILED (exit code {1})" -f $test.name, $code)
+        Write-Host ("  {0,-50} FAILED (exit code {1})" -f $label, $code)
         # Show what failed, so a red run is diagnosable without rerunning it.
         $output | Select-String -Pattern 'FAIL' | ForEach-Object { Write-Host "      $_" }
-        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $test.name; Outcome = "failed ($code)" })
+        $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $label; Outcome = "failed ($code)" })
       }
     }
   }

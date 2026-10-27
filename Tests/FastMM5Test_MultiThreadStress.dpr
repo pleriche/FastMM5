@@ -6,8 +6,10 @@
  which exercises the cross thread free path (the pending free lists).
 
  What is asserted at the end:  every block that was handed out came back with
- its content intact, and the allocated byte count returns to where it started -
- so nothing was leaked, double counted or handed out twice.
+ its content intact - including the blocks that went through the mailbox,
+ which are checked by the thread that frees them - and the allocated byte count
+ returns to where it started, within 64K in either direction - so nothing was
+ leaked, double counted, freed twice or handed out twice.
 
  Parameters:  Threads Iterations MaxBlockSize DebugMode(0/1) CrossThreadFree(0/1)
  Defaults:    4 20000 70000 1 1}
@@ -24,6 +26,10 @@ uses
 const
   CMailboxSlots = 64;
   CMaxThreads = 32;
+  {A block that goes through the mailbox carries its size in its first bytes, so
+   that the thread that frees it can check its content.  Smaller blocks are
+   always freed by the thread that allocated them.}
+  CSizeFieldSize = SizeOf(Integer);
 
 var
   GIterations, GMaxBlockSize: Integer;
@@ -33,6 +39,8 @@ var
    read after they have all finished.}
   GContentErrors: Integer;
   GBlocksHandled: Integer;
+  {The number of blocks that were checked after going through the mailbox.}
+  GMailboxBlocksChecked: Integer;
 
 {Pointer wide atomic exchange.  Plain InterlockedExchange takes a 32 bit value,
  which would silently truncate the upper half of a pointer on Win64, so use the
@@ -47,20 +55,44 @@ begin
 {$ifend}
 end;
 
-{Verifies the pattern that was written into a block.  The size is recovered from
- the first byte, so a block that came back from another thread can be checked
- without carrying its size along.}
+{Fills a block with a size dependent pattern:  the size in the first bytes (if
+ the block is big enough), and the low byte of the size in the rest.}
+procedure FillBlock(APointer: Pointer; ASize: Integer);
+begin
+  FillChar(APointer^, ASize, Byte(ASize));
+  if ASize >= CSizeFieldSize then
+    PInteger(APointer)^ := ASize;
+end;
+
+{Verifies the pattern that FillBlock wrote into a block.}
 function ContentIsIntact(APointer: Pointer; ASize: Integer): Boolean;
 var
-  i: Integer;
+  i, LFirstPatternByte: Integer;
 begin
   Result := False;
-  for i := 0 to ASize - 1 do
+  LFirstPatternByte := 0;
+  if ASize >= CSizeFieldSize then
+  begin
+    if PInteger(APointer)^ <> ASize then
+      Exit;
+    LFirstPatternByte := CSizeFieldSize;
+  end;
+  for i := LFirstPatternByte to ASize - 1 do
   begin
     if PByte(PAnsiChar(APointer) + i)^ <> Byte(ASize) then
       Exit;
   end;
   Result := True;
+end;
+
+{Verifies a block that went through the mailbox, reading its size from the
+ block itself.  A corrupted size must not make the check read past the block.}
+function MailboxBlockIsIntact(APointer: Pointer): Boolean;
+var
+  LSize: Integer;
+begin
+  LSize := PInteger(APointer)^;
+  Result := (LSize >= CSizeFieldSize) and (LSize <= GMaxBlockSize) and ContentIsIntact(APointer, LSize);
 end;
 
 function StressThread(AParameter: Pointer): Integer; stdcall;
@@ -80,19 +112,24 @@ begin
     LSize := Integer(LSeed mod Cardinal(GMaxBlockSize)) + 1;
 
     GetMem(LPointer, LSize);
-    FillChar(LPointer^, LSize, Byte(LSize));
+    FillBlock(LPointer, LSize);
     if not ContentIsIntact(LPointer, LSize) then
       InterlockedIncrement(GContentErrors);
     InterlockedIncrement(GBlocksHandled);
 
-    if GCrossThreadFree and (LSeed and 7 = 0) then
+    if GCrossThreadFree and (LSeed and 7 = 0) and (LSize >= CSizeFieldSize) then
     begin
-      {Hand the block to whichever thread comes past this slot next, and free
-       whatever was in the slot before.}
+      {Hand the block to whichever thread comes past this slot next, and check
+       and free whatever was in the slot before.}
       LSlot := (LSeed shr 16) and (CMailboxSlots - 1);
       LSwapped := ExchangePointer(GMailbox[LSlot], LPointer);
       if LSwapped <> nil then
+      begin
+        if not MailboxBlockIsIntact(LSwapped) then
+          InterlockedIncrement(GContentErrors);
+        InterlockedIncrement(GMailboxBlocksChecked);
         FreeMem(LSwapped);
+      end;
     end
     else
       FreeMem(LPointer);
@@ -128,6 +165,7 @@ begin
 
   GContentErrors := 0;
   GBlocksHandled := 0;
+  GMailboxBlocksChecked := 0;
   for i := 0 to GThreadCount - 1 do
     GThreads[i] := CreateThread(nil, 0, @StressThread, Pointer(i + 1), 0, GThreadId);
   for i := 0 to GThreadCount - 1 do
@@ -139,11 +177,19 @@ begin
   {Drain the mailbox:  whatever is still parked there was never freed.}
   for i := 0 to CMailboxSlots - 1 do
     if GMailbox[i] <> nil then
+    begin
+      if not MailboxBlockIsIntact(GMailbox[i]) then
+        Inc(GContentErrors);
+      Inc(GMailboxBlocksChecked);
       FreeMem(GMailbox[i]);
+    end;
 
   Section('Results');
-  Info(Format('%d blocks handled', [GBlocksHandled]));
+  Info(Format('%d blocks handled, %d of them checked after going through the mailbox',
+    [GBlocksHandled, GMailboxBlocksChecked]));
   CheckEqualsInt(GThreadCount * GIterations, GBlocksHandled, 'every iteration ran');
+  if GCrossThreadFree then
+    Check(GMailboxBlocksChecked > 0, 'blocks went through the mailbox and were checked');
   CheckEqualsInt(0, GContentErrors, 'every block kept its content');
 
   {Cross thread frees may still be sitting in the pending free lists of arenas
@@ -154,7 +200,9 @@ begin
   Info(Format('allocated before %d, after %d, overhead after %d',
     [Int64(GUsageBefore.AllocatedBytes), Int64(GUsageAfter.AllocatedBytes),
      Int64(GUsageAfter.OverheadBytes)]));
-  Check(Int64(GUsageAfter.AllocatedBytes) - Int64(GUsageBefore.AllocatedBytes) < 65536,
+  {Both directions:  a count that is lower afterwards means that blocks that were
+   in use before the test were freed by it.}
+  Check(Abs(Int64(GUsageAfter.AllocatedBytes) - Int64(GUsageBefore.AllocatedBytes)) < 65536,
     'the allocated byte count returns to its starting value');
 
   if GDebugMode then
