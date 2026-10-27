@@ -3,7 +3,8 @@
  For each block size class the program allocates a debug block, corrupts one
  field, runs the scan and checks that the scan reported it.  The corruption is
  repaired again afterwards and a clean scan confirms that the heap is back to
- normal, so one run covers every case.
+ normal, so one run covers every case.  An access violation in the scan is a
+ failure, not a report:  it means the scan read memory it should not have.
 
  Regression test for issue #102:  between cad1f04 and a9526b2 the walk only
  reported debug info for a small block whose header AND footer checksums were
@@ -26,13 +27,20 @@ begin
   Result := PFastMM_DebugBlockHeader(PAnsiChar(APointer) - SizeOf(TFastMM_DebugBlockHeader));
 end;
 
-{Runs the scan.  True means it reported a corruption.}
-function ScanDetects: Boolean;
+{Runs the scan.  True means it reported a corruption.  An access violation is
+ recorded as a failure of its own, whatever the caller expects the scan to find.}
+function ScanDetects(const AWhat: string): Boolean;
 begin
   try
     FastMM_ScanDebugBlocksForCorruption(1000);
     Result := False;
   except
+    on E: EAccessViolation do
+    begin
+      Fail('the scan raised an access violation:  ' + AWhat + ' (' + E.Message + ')');
+      Result := False;
+    end;
+  else
     Result := True;
   end;
 end;
@@ -48,10 +56,10 @@ begin
   try
     LOriginal := Header(LPointer).HeaderCheckSum;
     Header(LPointer).HeaderCheckSum := LOriginal xor $DEADBEEF;
-    LDetected := ScanDetects;
+    LDetected := ScanDetects(AWhat);
     Header(LPointer).HeaderCheckSum := LOriginal;
     Check(LDetected, 'corrupted header checksum is detected:  ' + AWhat);
-    Check(not ScanDetects, 'the heap is clean again after repairing the header:  ' + AWhat);
+    Check(not ScanDetects(AWhat), 'the heap is clean again after repairing the header:  ' + AWhat);
   finally
     FreeMem(LPointer);
   end;
@@ -69,9 +77,10 @@ begin
   try
     LOriginal := Header(LPointer).DebugFooterPtr^;
     PByte(PAnsiChar(LPointer) + ASize)^ := PByte(PAnsiChar(LPointer) + ASize)^ xor $FF;
-    LDetected := ScanDetects;
+    LDetected := ScanDetects(AWhat);
     Header(LPointer).DebugFooterPtr^ := LOriginal;
     Check(LDetected, 'overrun into the debug footer is detected:  ' + AWhat);
+    Check(not ScanDetects(AWhat), 'the heap is clean again after repairing the footer:  ' + AWhat);
   finally
     FreeMem(LPointer);
   end;
@@ -90,9 +99,10 @@ begin
   {The block is now in the debug free queue and still committed.}
   LOriginal := PByte(PAnsiChar(LPointer) + ASize - 1)^;
   PByte(PAnsiChar(LPointer) + ASize - 1)^ := LOriginal xor $FF;
-  LDetected := ScanDetects;
+  LDetected := ScanDetects(AWhat);
   PByte(PAnsiChar(LPointer) + ASize - 1)^ := LOriginal;
   Check(LDetected, 'write into a freed block is detected:  ' + AWhat);
+  Check(not ScanDetects(AWhat), 'the heap is clean again after repairing the freed block:  ' + AWhat);
 end;
 
 begin
