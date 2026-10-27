@@ -853,7 +853,7 @@ var
   FastMM_TextFileEncoding: TFastMM_TextFileEncoding;
 
   {Messages contain numeric tokens that will be substituted.  The available tokens are:
-    0: A blank string (invalid token IDs will also translate to this)
+    0: A blank string (invalid token IDs, and tokens containing anything other than digits, will also translate to this)
     1: The current date in yyyy-mm-dd format.
     2: The current time in HH:nn:ss format.
     3: Block size in bytes
@@ -3818,7 +3818,12 @@ begin
     begin
       if LInputChar <> CTokenEndChar then
       begin
-        LTokenNumber := LTokenNumber * 10 + Ord(LInputChar) - Ord('0');
+        {Anything other than a digit makes the token invalid, and so does a number above the maximum token ID.  Once the
+        number is out of range no further digits are added, so that it cannot wrap around to a valid token ID.}
+        if (LInputChar >= '0') and (LInputChar <= '9') and (LTokenNumber <= CEventLogMaxTokenID) then
+          LTokenNumber := LTokenNumber * 10 + Cardinal(Ord(LInputChar) - Ord('0'))
+        else
+          LTokenNumber := CEventLogMaxTokenID + 1;
       end
       else
       begin
