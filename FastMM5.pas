@@ -601,8 +601,11 @@ function FastMM_GetCurrentMemoryUsage: NativeUInt;
 
 {Returns a THeapStatus structure with information about the current memory usage.  Note that this call requires walking
 of the entire memory pool and is thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for another
-thread to release a lock on a block before the block is skipped (0 = no waiting).}
-function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal = 50): THeapStatus;
+thread to release a lock on a block before the block is skipped (0 = no waiting).  The second version also sets
+AAllBlocksWalked to True if all blocks were walked, or False if blocks were skipped due to a lock timeout, i.e. if the
+result is incomplete.}
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal = 50): THeapStatus; overload;
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal; var AAllBlocksWalked: Boolean): THeapStatus; overload;
 
 {Returns the number of allocated bytes, the number of overhead bytes (wastage due to management structures and internal
 fragmentation), as well as the efficiency percentage.  The efficiency percentage is the total allocated bytes divided
@@ -610,16 +613,21 @@ by the total address space committed (whether in use or reserved for future use)
 blocks not yet released to the operating system are included in the overhead, which differs from FastMM_GetHeapStatus
 that exposes freed blocks in separate fields.  Note that this call requires walking of the entire memory pool and is
 thus very expensive.  ALockTimeoutMilliseconds is the maximum wait time for another thread to release a lock on a block
-before the block is skipped (0 = no waiting).}
-function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastMM_UsageSummary;
+before the block is skipped (0 = no waiting).  The second version also sets AAllBlocksWalked to True if all blocks were
+walked, or False if blocks were skipped due to a lock timeout, i.e. if the result is incomplete.}
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal = 50): TFastMM_UsageSummary; overload;
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal;
+  var AAllBlocksWalked: Boolean): TFastMM_UsageSummary; overload;
 
-{Returns a detailed breakdown of the memory usage by block sze.}
-procedure FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
-  ALockTimeoutMilliseconds: Cardinal = 50);
+{Returns a detailed breakdown of the memory usage by block sze.  Returns True if all blocks were walked, False if
+blocks were skipped due to a lock timeout, i.e. if the breakdown is incomplete.}
+function FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
+  ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
 
 {Gets the state of every 64K block in lower 4GB of the address space.  (This covers the entire address space under
-32-bit.)}
-procedure FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal = 50);
+32-bit.)  Returns True if all blocks were walked, False if blocks were skipped due to a lock timeout, i.e. if the map
+is incomplete.}
+function FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
 
 {Writes a log file containing a summary of the memory manager state and a list of allocated blocks grouped by class,
 returning True on success.  The file will be saved in the encoding specified by FastMM_TextFileEncoding.  If
@@ -631,7 +639,8 @@ FastMM_CurrentAllocationGroup).  In order to log the difference in usage between
 valid range for ASubtractUsageInAllocationGroupsFrom and ASubtractUsageInAllocationGroupsUpTo - this will cause the
 memory pool to be walked a second time, with all usage in this allocation group range subtracted from the usage logged
 during the first pass.  Note that only blocks that were allocated in debug mode are linked to an allocation group, other
-blocks are treated as having an allocation group of 0.}
+blocks are treated as having an allocation group of 0.  If blocks were skipped due to a lock timeout, the log starts
+with FastMM_LogStateToFileTemplate_IncompleteWarning, since the usage it shows is then incomplete.}
 function FastMM_LogStateToFile(APFilename: PWideChar; APAdditionalDetails: PWideChar = nil;
   ATruncateFile: Boolean = True; ASortOrder: TFastMM_LogStateToFile_SortOrder = soDescendingTotalMemoryUsage;
   ALockTimeoutMilliseconds: Cardinal = 50; AAddUsageInAllocationGroupsFrom: Cardinal = 0;
@@ -971,6 +980,8 @@ var
     + '{20}% Efficiency'#13#10#13#10
     + 'Usage Detail:'#13#10;
   FastMM_LogStateToFileTemplate_UsageDetail: PWideChar = '{21} bytes: {8} x {22} ({23} bytes avg.)'#13#10;
+  FastMM_LogStateToFileTemplate_IncompleteWarning: PWideChar = '*** Warning:  Some blocks could not be locked within the '
+    + 'lock timeout and were skipped, so the usage below is incomplete. ***'#13#10#13#10;
 
 {$ifndef FastMM_DebugLibraryStaticDependency}
   {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
@@ -9305,11 +9316,11 @@ begin
 end;
 
 {Returns a THeapStatus structure with information about the current memory usage.}
-function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal; var AAllBlocksWalked: Boolean): THeapStatus;
 begin
   Result := Default(THeapStatus);
 
-  FastMM_WalkBlocks(FastMM_GetHeapStatus_CallBack,
+  AAllBlocksWalked := FastMM_WalkBlocks(FastMM_GetHeapStatus_CallBack,
     [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result,
     ALockTimeoutMilliseconds);
 
@@ -9318,11 +9329,18 @@ begin
   Result.Overhead := Result.TotalAddrSpace - Result.TotalAllocated - Result.TotalFree;
 end;
 
-function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal): TFastMM_UsageSummary;
+function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
+var
+  LAllBlocksWalked: Boolean;
+begin
+  Result := FastMM_GetHeapStatus(ALockTimeoutMilliseconds, LAllBlocksWalked);
+end;
+
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal; var AAllBlocksWalked: Boolean): TFastMM_UsageSummary;
 var
   LHeapStatus: THeapStatus;
 begin
-  LHeapStatus := FastMM_GetHeapStatus(ALockTimeoutMilliseconds);
+  LHeapStatus := FastMM_GetHeapStatus(ALockTimeoutMilliseconds, AAllBlocksWalked);
 
   Result.AllocatedBytes := LHeapStatus.TotalAllocated;
   Result.OverheadBytes := LHeapStatus.TotalAddrSpace - LHeapStatus.TotalAllocated;
@@ -9331,6 +9349,13 @@ begin
     Result.EfficiencyPercentage := Result.AllocatedBytes / LHeapStatus.TotalAddrSpace * 100
   else
     Result.EfficiencyPercentage := 100;
+end;
+
+function FastMM_GetUsageSummary(ALockTimeoutMilliseconds: Cardinal): TFastMM_UsageSummary;
+var
+  LAllBlocksWalked: Boolean;
+begin
+  Result := FastMM_GetUsageSummary(ALockTimeoutMilliseconds, LAllBlocksWalked);
 end;
 
 procedure FastMM_GetMemoryManagerState_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
@@ -9388,8 +9413,8 @@ begin
 end;
 
 {Returns a detailed breakdown of the memory usage by block sze.}
-procedure FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
-  ALockTimeoutMilliseconds: Cardinal = 50);
+function FastMM_GetMemoryManagerState(var AMemoryManagerState: TFastMM_MemoryManagerState;
+  ALockTimeoutMilliseconds: Cardinal = 50): Boolean;
 var
   i, j: Integer;
   LCurrentSmallBlockType: TSmallBlockTypeState;
@@ -9403,7 +9428,7 @@ begin
     AMemoryManagerState.SmallBlockTypeStates[i].UseableBlockSize := SmallBlockManagers[0][i].BlockSize - CSmallBlockHeaderSize;
   end;
 
-  FastMM_WalkBlocks(FastMM_GetMemoryManagerState_CallBack,
+  Result := FastMM_WalkBlocks(FastMM_GetMemoryManagerState_CallBack,
     [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @AMemoryManagerState,
     ALockTimeoutMilliseconds);
 
@@ -9446,7 +9471,7 @@ end;
 
 {Gets the state of every 64K block in lower 4GB of the address space.  (This covers the entire address space under
 32-bit.)}
-procedure FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal);
+function FastMM_GetMemoryMap(var AMemoryMap: TMemoryMap; ALockTimeoutMilliseconds: Cardinal): Boolean;
 var
   LChunkIndex, LNextChunkIndex: NativeUInt;
   LMemoryRegionInfo: TMemoryRegionInfo;
@@ -9455,7 +9480,7 @@ begin
   FillChar(AMemoryMap, SizeOf(AMemoryMap), Ord(csUnallocated));
 
   {Walk all large blocks and medium block spans}
-  FastMM_WalkBlocks(FastMM_GetMemoryMap_CallBack, [btLargeBlock, btMediumBlockSpan], False, @AMemoryMap,
+  Result := FastMM_WalkBlocks(FastMM_GetMemoryMap_CallBack, [btLargeBlock, btMediumBlockSpan], False, @AMemoryMap,
     ALockTimeoutMilliseconds);
 
   {Fill in the rest of the map}
@@ -9804,9 +9829,10 @@ var
   LFileHandle: THandle;
   LSortCompare: TMemoryLogNode_SortCompare;
   LExistingFileAction: TTextFileAlreadyExistsAction;
+  LAllBlocksWalked: Boolean;
 begin
   {Get the current memory manager usage summary.}
-  LMemoryManagerUsageSummary := FastMM_GetUsageSummary(ALockTimeoutMilliseconds);
+  LMemoryManagerUsageSummary := FastMM_GetUsageSummary(ALockTimeoutMilliseconds, LAllBlocksWalked);
 
   {Allocate the memory required to store the token buffer, log text, as well as the detailed allocation information.}
   LBufferSize := SizeOf(TMemoryLogInfo) + (CTokenBufferMaxWideChars + CStateLogMaxChars) * SizeOf(Char);
@@ -9815,16 +9841,23 @@ begin
   begin
     try
       {Obtain the list of classes, together with the total memory usage and block count for each.}
-      FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
-        ALockTimeoutMilliseconds, AAddUsageInAllocationGroupsFrom, AAddUsageInAllocationGroupsUpTo);
+      if not FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True,
+        LPLogInfo, ALockTimeoutMilliseconds, AAddUsageInAllocationGroupsFrom, AAddUsageInAllocationGroupsUpTo) then
+      begin
+        LAllBlocksWalked := False;
+      end;
 
       {If a diff is required then walk the memory pool a second time, subtracting the usage from the second allocation
       group range.}
       if ASubtractUsageInAllocationGroupsFrom <= ASubtractUsageInAllocationGroupsUpTo then
       begin
         LPLogInfo.SubtractUsage := True;
-        FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True, LPLogInfo,
-          ALockTimeoutMilliseconds, ASubtractUsageInAllocationGroupsFrom, ASubtractUsageInAllocationGroupsUpTo);
+        if not FastMM_WalkBlocks(FastMM_LogStateToFile_Callback, [btLargeBlock, btMediumBlock, btSmallBlock], True,
+          LPLogInfo, ALockTimeoutMilliseconds, ASubtractUsageInAllocationGroupsFrom,
+          ASubtractUsageInAllocationGroupsUpTo) then
+        begin
+          LAllBlocksWalked := False;
+        end;
 
         {Cull nodes that have both a 0 count and a 0 total usage.}
         LNewCount := 0;
@@ -9866,8 +9899,14 @@ begin
         LMemoryManagerUsageSummary.OverheadBytes div 1024, LPTokenPos, LPStateLogBufferStart);
       AddTokenValue_NativeInt(LTokenValues, CStateLogTokenEfficiencyPercentage,
         NativeInt(Round(LMemoryManagerUsageSummary.EfficiencyPercentage)), LPTokenPos, LPStateLogBufferStart);
-      LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate, LTokenValues, LPStateLogBufferStart,
-        LPBufferEnd);
+      {A log with skipped blocks would otherwise look complete.}
+      LPStateLogPos := LPStateLogBufferStart;
+      if not LAllBlocksWalked then
+      begin
+        LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate_IncompleteWarning, LTokenValues,
+          LPStateLogPos, LPBufferEnd);
+      end;
+      LPStateLogPos := SubstituteTokenValues(FastMM_LogStateToFileTemplate, LTokenValues, LPStateLogPos, LPBufferEnd);
 
       {Add the usage information for each class}
       LTokenValues := Default(TEventLogTokenValues);
