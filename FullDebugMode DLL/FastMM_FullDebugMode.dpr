@@ -1,6 +1,6 @@
 {
 
-Fast Memory Manager: FullDebugMode Support DLL 1.73
+Fast Memory Manager: FullDebugMode Support DLL 1.74
 
 Description:
  Support DLL for FastMM. With this DLL available, FastMM will report debug info (unit name, line numbers, etc.) for
@@ -78,6 +78,11 @@ Change log:
     instructions are no longer taken for complete 2 and 3 byte calls.  Calls through a table that is indexed by a
     register (CALL [EAX*4+$12345678]) are now recognized.  A call that ends where executable memory ends is no longer
     rejected.  Direct far calls, which 32-bit Windows code does not use, are no longer recognized.
+ Version 1.74 (27 October 2026)
+  - Added LogStackTraceW, which converts a stack trace to Unicode text and is given the end of the buffer.  With
+    LogStackTrace, which produces ANSI text, characters that are not in the system code page are lost, e.g. in the names
+    of source files.  FastMM5 uses LogStackTraceW if the DLL has it, and LogStackTrace otherwise.  The madExcept and
+    EurekaLog builds only have LogStackTrace, since those libraries only produce ANSI text.
 
 }
 
@@ -171,19 +176,20 @@ type
     ChildEntries: array[0..1] of PReturnAddressInfo;
     ReturnAddress: NativeUInt;
     InfoTextLength: Integer;
-    InfoText: array[0..CMaxInfoTextLength - 1] of AnsiChar;
+    {The info text is kept as Unicode text for LogStackTraceW, and converted to ANSI text for LogStackTrace.}
+    InfoText: array[0..CMaxInfoTextLength - 1] of Char;
   end;
 
   TReturnAddressInfoCache = record
     {Entry 0 is the root of the tree.}
     Entries: array[0..CReturnAddressCacheSize] of TReturnAddressInfo;
     NextNewEntryIndex: Integer;
-    function AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: AnsiString): PReturnAddressInfo;
+    function AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: string): PReturnAddressInfo;
     procedure DeleteEntry(AEntry: PReturnAddressInfo);
     function FindEntry(AReturnAddress: NativeUInt): PReturnAddressInfo;
   end;
 
-function TReturnAddressInfoCache.AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: AnsiString): PReturnAddressInfo;
+function TReturnAddressInfoCache.AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: string): PReturnAddressInfo;
 var
   LParentItem, LChildItem: PReturnAddressInfo;
   LAddressBits: NativeUInt;
@@ -224,7 +230,7 @@ begin
   Result.InfoTextLength := Length(AReturnAddressInfoText);
   if Result.InfoTextLength > CMaxInfoTextLength then
     Result.InfoTextLength := CMaxInfoTextLength;
-  System.Move(Pointer(AReturnAddressInfoText)^, Result.InfoText, Result.InfoTextLength * SizeOf(AnsiChar));
+  System.Move(Pointer(AReturnAddressInfoText)^, Result.InfoText, Result.InfoTextLength * SizeOf(Char));
 end;
 
 procedure TReturnAddressInfoCache.DeleteEntry(AEntry: PReturnAddressInfo);
@@ -1280,6 +1286,52 @@ begin
   System.Move(LDigitBuffer[CMaxDigits - LCount], APBuffer^, LCount);
   Result := APBuffer + LCount;
 end;
+
+{Appends the info text for a return address to the output of LogStackTrace, converted to ANSI text.  It is cut off at
+CMaxInfoTextLength bytes, since FastMM's buffer only has room for 256 characters per stack trace entry.}
+function AppendInfoTextA(APInfoText: PChar; AInfoTextLength: Integer; APBuffer: PAnsiChar): PAnsiChar;
+var
+  LInfoText: string;
+  LAnsiInfoText: AnsiString;
+  LLength: Integer;
+begin
+  SetString(LInfoText, APInfoText, AInfoTextLength);
+  LAnsiInfoText := AnsiString(LInfoText);
+  LLength := Length(LAnsiInfoText);
+  if LLength > CMaxInfoTextLength then
+    LLength := CMaxInfoTextLength;
+  System.Move(Pointer(LAnsiInfoText)^, APBuffer^, LLength);
+  Result := APBuffer + LLength;
+end;
+
+{Appends as much of the text as fits into the output buffer of LogStackTraceW, returning the new buffer position.}
+function AppendToBufferW(APText: PWideChar; ALength: Integer; APBuffer, APBufferEnd: PWideChar): PWideChar;
+begin
+  if ALength > APBufferEnd - APBuffer then
+    ALength := Integer(APBufferEnd - APBuffer);
+  if ALength > 0 then
+  begin
+    System.Move(APText^, APBuffer^, ALength * SizeOf(WideChar));
+    Inc(APBuffer, ALength);
+  end;
+  Result := APBuffer;
+end;
+
+{Appends the line break and the return address in hexadecimal that start every stack trace entry to the output buffer
+of LogStackTraceW, returning the new buffer position.}
+function AppendAddressW(AAddress: NativeUInt; APBuffer, APBufferEnd: PWideChar): PWideChar;
+var
+  LAnsiText: array[0..SizeOf(NativeUInt) * 2 + 1] of AnsiChar;
+  LText: array[0..SizeOf(NativeUInt) * 2 + 1] of WideChar;
+  LLength, i: Integer;
+begin
+  LAnsiText[0] := #13;
+  LAnsiText[1] := #10;
+  LLength := Integer(NativeUIntToHexBuf(AAddress, @LAnsiText[2]) - PAnsiChar(@LAnsiText));
+  for i := 0 to LLength - 1 do
+    LText[i] := WideChar(LAnsiText[i]);
+  Result := AppendToBufferW(@LText, LLength, APBuffer, APBufferEnd);
+end;
 {$ifend}
 
 {$ifdef JCLDebug}
@@ -1294,13 +1346,69 @@ var
   LReturnAddressInfoCache: TReturnAddressInfoCache;
   LLogStackTrace_Locked: Integer; //0 = unlocked, 1 = locked
 
+{LogStackTrace and LogStackTraceW are protected by a lock - only one thread can be inside them at any given time.}
+procedure BeginLogStackTrace;
+begin
+  while AtomicCmpExchange(LLogStackTrace_Locked, 1, 0) <> 0 do
+    Winapi.Windows.SwitchToThread;
+end;
+
+{Releases the JCL's location info cache if GetReturnAddressInfo used it, and the lock.}
+procedure EndLogStackTrace(ALocationCacheInitialized: Boolean);
+begin
+  if ALocationCacheInitialized then
+  begin
+    {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
+    EndGetLocationInfoCache;
+    {$endif}
+  end;
+
+  LLogStackTrace_Locked := 0;
+end;
+
+{Returns the cache entry with the info text for the return address, adding it to the cache if it is not there yet.
+The caller must hold the lock (BeginLogStackTrace).}
+function GetReturnAddressInfo(AAddress: NativeUInt; var ALocationCacheInitialized: Boolean): PReturnAddressInfo;
+var
+  LInfo: TJCLLocationInfo;
+  LTempStr: string;
+  P: PChar;
+begin
+  Result := LReturnAddressInfoCache.FindEntry(AAddress);
+  if Result <> nil then
+    Exit;
+
+  if not ALocationCacheInitialized then
+  begin
+    {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
+    BeginGetLocationInfoCache;
+    {$endif}
+    ALocationCacheInitialized := True;
+  end;
+  {Get location info for the caller (at least one byte before the return address).}
+  GetLocationInfo(Pointer(AAddress - 1), LInfo);
+  {Build the result string}
+  LTempStr := ' ';
+  AppendInfoToString(LTempStr, LInfo.SourceName);
+  AppendInfoToString(LTempStr, LInfo.UnitName);
+
+  {Remove UnitName from ProcedureName, no need to output it twice}
+  P := PChar(LInfo.ProcedureName);
+  if (StrLComp(P, PChar(LInfo.UnitName), Length(LInfo.UnitName)) = 0) and (P[Length(LInfo.UnitName)] = '.') then
+    AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2))
+  else
+    AppendInfoToString(LTempStr, LInfo.ProcedureName);
+
+  if LInfo.LineNumber <> 0 then
+    AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
+
+  Result := LReturnAddressInfoCache.AddEntry(AAddress, LTempStr);
+end;
+
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
 var
   LInd: Cardinal;
   LAddress: NativeUInt;
-  LInfo: TJCLLocationInfo;
-  LTempStr: string;
-  P: PChar;
   LLocationCacheInitialized: Boolean;
   LPInfo: PReturnAddressInfo;
 begin
@@ -1308,10 +1416,7 @@ begin
 
   Result := ABuffer;
 
-  {This routine is protected by a lock - only one thread can be inside it at any given time.}
-  while AtomicCmpExchange(LLogStackTrace_Locked, 1, 0) <> 0 do
-    Winapi.Windows.SwitchToThread;
-
+  BeginLogStackTrace;
   try
     {Counted from 1:  With "0 to AMaxDepth - 1" the bound would wrap around for AMaxDepth = 0.}
     for LInd := 1 to AMaxDepth do
@@ -1325,66 +1430,79 @@ begin
       Inc(Result);
       Result := NativeUIntToHexBuf(LAddress, Result);
 
-      {If the info for the return address is not yet in the cache, add it.}
-      LPInfo := LReturnAddressInfoCache.FindEntry(LAddress);
-      if LPInfo = nil then
-      begin
-        if not LLocationCacheInitialized then
-        begin
-          {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
-          BeginGetLocationInfoCache;
-          {$endif}
-          LLocationCacheInitialized := True;
-        end;
-        {Get location info for the caller (at least one byte before the return address).}
-        GetLocationInfo(Pointer(LAddress - 1), LInfo);
-        {Build the result string}
-        LTempStr := ' ';
-        AppendInfoToString(LTempStr, LInfo.SourceName);
-        AppendInfoToString(LTempStr, LInfo.UnitName);
-
-        {Remove UnitName from ProcedureName, no need to output it twice}
-        P := PChar(LInfo.ProcedureName);
-        if (StrLComp(P, PChar(LInfo.UnitName), Length(LInfo.UnitName)) = 0) and (P[Length(LInfo.UnitName)] = '.') then
-          AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2))
-        else
-          AppendInfoToString(LTempStr, LInfo.ProcedureName);
-
-        if LInfo.LineNumber <> 0 then
-          AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
-
-        LPInfo := LReturnAddressInfoCache.AddEntry(LAddress, AnsiString(LTempStr));
-      end;
-
-      System.Move(LPInfo.InfoText, Result^, LPInfo.InfoTextLength);
-      Inc(Result, LPInfo.InfoTextLength);
+      LPInfo := GetReturnAddressInfo(LAddress, LLocationCacheInitialized);
+      Result := AppendInfoTextA(@LPInfo.InfoText, LPInfo.InfoTextLength, Result);
 
       Inc(AReturnAddresses);
     end;
   finally
-    if LLocationCacheInitialized then
-    begin
-      {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
-      EndGetLocationInfoCache;
-      {$endif}
-    end;
+    EndLogStackTrace(LLocationCacheInitialized);
+  end;
+end;
 
-    LLogStackTrace_Locked := 0;
+{The same as LogStackTrace, but the text is Unicode text, and it is cut off at APBufferEnd.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer, APBufferEnd: PWideChar): PWideChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LLocationCacheInitialized: Boolean;
+  LPInfo: PReturnAddressInfo;
+begin
+  LLocationCacheInitialized := False;
+
+  Result := APBuffer;
+
+  BeginLogStackTrace;
+  try
+    for LInd := 1 to AMaxDepth do
+    begin
+      LAddress := AReturnAddresses^;
+      if (LAddress = 0) or (Result >= APBufferEnd) then
+        Exit;
+      Result := AppendAddressW(LAddress, Result, APBufferEnd);
+
+      LPInfo := GetReturnAddressInfo(LAddress, LLocationCacheInitialized);
+      Result := AppendToBufferW(@LPInfo.InfoText, LPInfo.InfoTextLength, Result, APBufferEnd);
+
+      Inc(AReturnAddresses);
+    end;
+  finally
+    EndLogStackTrace(LLocationCacheInitialized);
   end;
 end;
 {$endif}
 
 {$ifdef ModuleAndOffsetOnly}
-{Describes each return address by the name of the module containing it and its offset in that module, e.g.
-"MyApp.exe+1A2B3C".  The offset can be looked up in the map file of the module, after subtracting the address of the
-code section (usually $1000).}
+{Describes the return address by the name of the module containing it and its offset in that module, e.g.
+" [MyApp.exe+1A2B3C]", or returns '' if it is not in a loaded module.  The offset can be looked up in the map file of
+the module, after subtracting the address of the code section (usually $1000).}
+function GetModuleAndOffsetInfoText(AAddress: NativeUInt): string;
+var
+  LMemInfo: TMemoryBasicInformation;
+  LModuleFileName: array[0..MAX_PATH] of Char;
+begin
+  {Find the module containing the call instruction, which is at least one byte before the return address.  The image
+  of a module is a single allocation, so the allocation base is the module handle.  The memory must be part of a
+  loaded image:  For the address of a DLL that has since been unloaded, VirtualQuery returns MEM_FREE with an
+  AllocationBase of nil, and GetModuleFileName(0) would return the name of the executable.}
+  if (VirtualQuery(Pointer(AAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
+    and (LMemInfo.State = MEM_COMMIT)
+    and (LMemInfo.Type_9 = MEM_IMAGE)
+    and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
+  begin
+    Result := Format(' [%s+%x]', [ExtractFileName(LModuleFileName), AAddress - NativeUInt(LMemInfo.AllocationBase)]);
+  end
+  else
+    Result := '';
+end;
+
+{Describes each return address by module and offset (see GetModuleAndOffsetInfoText).}
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
 var
   LInd: Cardinal;
   LAddress: NativeUInt;
-  LMemInfo: TMemoryBasicInformation;
-  LModuleFileName: array[0..MAX_PATH] of Char;
-  LInfoText: AnsiString;
+  LInfoText: string;
 begin
   Result := ABuffer;
 
@@ -1399,22 +1517,32 @@ begin
     Inc(Result);
     Result := NativeUIntToHexBuf(LAddress, Result);
 
-    {Find the module containing the call instruction, which is at least one byte before the return address.  The image
-    of a module is a single allocation, so the allocation base is the module handle.  The memory must be part of a
-    loaded image:  For the address of a DLL that has since been unloaded, VirtualQuery returns MEM_FREE with an
-    AllocationBase of nil, and GetModuleFileName(0) would return the name of the executable.}
-    if (VirtualQuery(Pointer(LAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
-      and (LMemInfo.State = MEM_COMMIT)
-      and (LMemInfo.Type_9 = MEM_IMAGE)
-      and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
-    begin
-      LInfoText := AnsiString(Format(' [%s+%x]', [ExtractFileName(LModuleFileName),
-        LAddress - NativeUInt(LMemInfo.AllocationBase)]));
-      if Length(LInfoText) > CMaxInfoTextLength then
-        SetLength(LInfoText, CMaxInfoTextLength);
-      System.Move(Pointer(LInfoText)^, Result^, Length(LInfoText));
-      Inc(Result, Length(LInfoText));
-    end;
+    LInfoText := GetModuleAndOffsetInfoText(LAddress);
+    Result := AppendInfoTextA(PChar(LInfoText), Length(LInfoText), Result);
+
+    Inc(AReturnAddresses);
+  end;
+end;
+
+{The same as LogStackTrace, but the text is Unicode text, and it is cut off at APBufferEnd.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer, APBufferEnd: PWideChar): PWideChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LInfoText: string;
+begin
+  Result := APBuffer;
+
+  for LInd := 1 to AMaxDepth do
+  begin
+    LAddress := AReturnAddresses^;
+    if (LAddress = 0) or (Result >= APBufferEnd) then
+      Exit;
+    Result := AppendAddressW(LAddress, Result, APBufferEnd);
+
+    LInfoText := GetModuleAndOffsetInfoText(LAddress);
+    Result := AppendToBufferW(PChar(LInfoText), Length(LInfoText), Result, APBufferEnd);
 
     Inc(AReturnAddresses);
   end;
@@ -1543,6 +1671,10 @@ exports
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
 {$ENDIF}
+{The other stack tracing libraries only produce ANSI text, so for them FastMM converts the text of LogStackTrace.}
+{$if defined(JCLDebug) or defined(ModuleAndOffsetOnly)}
+  LogStackTraceW,
+{$ifend}
   LogStackTrace;
 
 begin

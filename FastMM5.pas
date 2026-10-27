@@ -703,10 +703,13 @@ function FastMM_GetMemoryUsageLimit: NativeUInt;
 
 {Attempts to load the debug support library specified by FastMM_DebugSupportLibraryName.  On success it will set the
 FastMM_GetStackTrace and FastMM_ConvertStackTraceToText handlers to point to the routines in the debug library, provided
-alternate handlers have not yet been assigned by the application.  Returns True if the library was loaded successfully,
-or was already loaded successfully prior to this call.  FastMM_EnterDebugMode will call FastMM_LoadDebugSupportLibrary
-the first time it is called, unless the debug support library has already been loaded or handlers for both
-FastMM_GetStackTrace and FastMM_ConvertStackTraceToText have been set by the application.}
+alternate handlers have not yet been assigned by the application.  The stack trace text comes from the library's
+LogStackTraceW routine, which produces Unicode text, if it has one (version 1.74 and later).  Otherwise it comes from
+its legacy LogStackTrace routine, whose ANSI text is converted from the system code page, so that characters outside
+the code page are lost.  Returns True if the library was loaded successfully, or was already loaded successfully prior
+to this call.  FastMM_EnterDebugMode will call FastMM_LoadDebugSupportLibrary the first time it is called, unless the
+debug support library has already been loaded or handlers for both FastMM_GetStackTrace and
+FastMM_ConvertStackTraceToText have been set by the application.}
 function FastMM_LoadDebugSupportLibrary: Boolean;
 {Frees the debug support library, pointing the stack trace handlers currently using the debug support library back to
 the default no-op handlers.  Calls into the library that are already in progress are not waited for, so this must not
@@ -983,13 +986,20 @@ var
   FastMM_LogStateToFileTemplate_IncompleteWarning: PWideChar = '*** Warning:  Some blocks could not be locked within the '
     + 'lock timeout and were skipped, so the usage below is incomplete. ***'#13#10#13#10;
 
+  {The Unicode stack trace to text conversion routine (LogStackTraceW) from the FastMM_FullDebugMode support DLL.  This
+  will only be set if the support DLL is loaded and has it (version 1.74 and later):  Older versions only have the
+  legacy routine, which produces ANSI text.  It is looked up at runtime even with
+  FastMM_DebugLibraryStaticDependency, so that an older support DLL can still be used.}
+  DebugLibrary_LogStackTraceW: TFastMM_ConvertStackTraceToText;
+
 {$ifndef FastMM_DebugLibraryStaticDependency}
   {The stack trace routines from the FastMM_FullDebugMode support DLL.  These will only be set if the support DLL is
   loaded.}
   DebugLibrary_GetRawStackTrace: TFastMM_GetStackTrace;
   DebugLibrary_GetFrameBasedStackTrace: TFastMM_GetStackTrace;
   {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
-  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
+  if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function, if the
+  support DLL does not have LogStackTraceW.}
   DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
 {$else}
 procedure DebugLibrary_GetRawStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
@@ -8603,23 +8613,25 @@ begin
   Result := APBufferPosition;
 end;
 
+{Converts the stack trace to text with the legacy routine of a support DLL that does not have LogStackTraceW.}
 function FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
   APBufferPosition, APBufferEnd: PWideChar): PWideChar;
 var
   LAnsiBuffer: array[0..CFastMM_StackTrace_MaximumEntryCount * 256] of AnsiChar;
-  LPEnd, LPCurPos: PAnsiChar;
+  LPEnd: PAnsiChar;
+  LCount: Integer;
 begin
   Result := APBufferPosition;
 
   LPEnd := DebugLibrary_LogStackTrace_Legacy(APReturnAddresses, AMaxDepth, @LAnsiBuffer);
-  LPCurPos := @LAnsiBuffer;
-  while (LPCurPos < LPEnd)
-    and (Result < APBufferEnd) do
-  begin
-    Result^ := WideChar(LPCurPos^); //Assume it is Latin-1 text
-    Inc(Result);
-    Inc(LPCurPos);
-  end;
+
+  {The legacy routine produces text in the system code page.  A character never takes up more UTF-16 code units than
+  bytes, so the output fits if the input is cut off at the space left in the buffer.}
+  LCount := Integer(NativeInt(LPEnd) - NativeInt(@LAnsiBuffer));
+  if LCount > CharCount(APBufferEnd, Result) then
+    LCount := CharCount(APBufferEnd, Result);
+  if LCount > 0 then
+    Inc(Result, Winapi.Windows.MultiByteToWideChar(CP_ACP, 0, @LAnsiBuffer, LCount, Result, LCount));
 end;
 
 {--------------------------------------------------------}
@@ -11242,6 +11254,7 @@ begin
     DebugLibrary_GetRawStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
     DebugLibrary_GetFrameBasedStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
     DebugLibrary_LogStackTrace_Legacy := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+    DebugLibrary_LogStackTraceW := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTraceW'));
 
     {Try to use the stack trace routines from the debug support library, if available.}
     if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
@@ -11250,10 +11263,14 @@ begin
       FastMM_GetStackTrace := DebugLibrary_GetRawStackTrace;
     end;
 
-    if (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText)
-      and Assigned(DebugLibrary_LogStackTrace_Legacy) then
+    {LogStackTraceW is preferred:  The legacy routine produces ANSI text, which loses the characters that are not in
+    the system code page.}
+    if @FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText then
     begin
-      FastMM_ConvertStackTraceToText := FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
+      if Assigned(DebugLibrary_LogStackTraceW) then
+        FastMM_ConvertStackTraceToText := DebugLibrary_LogStackTraceW
+      else if Assigned(DebugLibrary_LogStackTrace_Legacy) then
+        FastMM_ConvertStackTraceToText := FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
     end;
 
     Result := True;
@@ -11261,12 +11278,22 @@ begin
   else
     Result := False;
 {$else}
+  {LogStackTraceW is looked up rather than imported, since older versions of the debug support library do not have
+  it.}
+  DebugLibrary_LogStackTraceW := Winapi.Windows.GetProcAddress(
+    Winapi.Windows.GetModuleHandle(CFastMM_DefaultDebugSupportLibraryName), PAnsiChar('LogStackTraceW'));
+
   {Use the stack trace routines from the debug support library.}
   if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace) then
     FastMM_GetStackTrace := @DebugLibrary_GetRawStackTrace;
 
   if (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText) then
-    FastMM_ConvertStackTraceToText := @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
+  begin
+    if Assigned(DebugLibrary_LogStackTraceW) then
+      FastMM_ConvertStackTraceToText := DebugLibrary_LogStackTraceW
+    else
+      FastMM_ConvertStackTraceToText := @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
+  end;
 
   Result := True;
 {$endif}
@@ -11285,10 +11312,13 @@ begin
     FastMM_GetStackTrace := @FastMM_NoOpGetStackTrace;
   end;
 
-  if @FastMM_ConvertStackTraceToText = @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper then
+  if (@FastMM_ConvertStackTraceToText = @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper)
+    or (@FastMM_ConvertStackTraceToText = @DebugLibrary_LogStackTraceW) then
   begin
     FastMM_ConvertStackTraceToText := @FastMM_NoOpConvertStackTraceToText;
   end;
+
+  DebugLibrary_LogStackTraceW := nil;
 
 {$ifndef FastMM_DebugLibraryStaticDependency}
   Winapi.Windows.FreeLibrary(DebugSupportLibraryHandle);
