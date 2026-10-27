@@ -51,12 +51,12 @@
     <PropertyGroup Condition="'$(Base)'!=''">
         <Manifest_File>None</Manifest_File>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
-        <VerInfo_MinorVer>73</VerInfo_MinorVer>
+        <VerInfo_MinorVer>74</VerInfo_MinorVer>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Winapi;$(DCC_Namespace)</DCC_Namespace>
-        <VerInfo_Build>11</VerInfo_Build>
+        <VerInfo_Build>12</VerInfo_Build>
         <GenDll>true</GenDll>
         <VerInfo_Locale>1033</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.73.0.11;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.73;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.74.0.12;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.74;Comments=</VerInfo_Keys>
         <SanitizedProjectName>FastMM_FullDebugMode</SanitizedProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
@@ -67,7 +67,7 @@
     <PropertyGroup Condition="'$(Base_Win64)'!=''">
         <DCC_Namespace>System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;$(DCC_Namespace)</DCC_Namespace>
         <AppDPIAwarenessMode>none</AppDPIAwarenessMode>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.73.0.11;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.73;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.74.0.12;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.74;Comments=</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
         <Version>7.0</Version>
@@ -78,7 +78,7 @@
         <DCC_Define>RELEASE;$(DCC_Define)</DCC_Define>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1_Win64)'!=''">
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.73.0.11;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.73;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.74.0.12;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.74;Comments=</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2)'!=''">
         <Version>7.0</Version>
@@ -88,7 +88,7 @@
     <PropertyGroup Condition="'$(Cfg_2_Win64)'!=''">
         <DCC_RemoteDebug>true</DCC_RemoteDebug>
         <Debugger_HostApplication>FullDebugMode_DLL_TestApp.exe</Debugger_HostApplication>
-        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.73.0.11;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.73;Comments=</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Pierre le Riche;FileDescription=FastMM Debug Support Library;FileVersion=1.74.0.12;InternalName=;LegalCopyright=(c) 2004-2026 Pierre le Riche;LegalTrademarks=;OriginalFilename=FastMM_FullDebugMode64.dll;ProductName=FastMM Debug Support Library;ProductVersion=1.74;Comments=</VerInfo_Keys>
     </PropertyGroup>
     <ProjectExtensions>
         <Borland.Personality>Delphi.Personality.12</Borland.Personality>
