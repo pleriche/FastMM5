@@ -432,6 +432,10 @@ type
 var
   {There are a total of 1M x 4K pages in the (low) 4GB address space}
   MemoryPageAccessMap: array[0..1024 * 1024 - 1] of TMemoryPageAccess;
+  {Incremented by InvalidateMemoryPageAccessMap before it resets the pages of a DLL that is loaded or unloaded.
+  UpdateMemoryPageAccessMap uses it to detect that this happened while it was querying a region, in which case the
+  access it found may already be out of date.}
+  MemoryPageAccessMapGeneration: Integer;
 
 procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
 const
@@ -450,18 +454,27 @@ begin
 
   LPageCount := LEndPage - LStartPage + 1;
   if LPageCount > 0 then
+  begin
+    {Increment the counter before resetting the pages, so that an UpdateMemoryPageAccessMap call that queried the
+    region before the DLL was loaded cannot leave what it found in the map after the reset.}
+    AtomicIncrement(MemoryPageAccessMapGeneration);
     FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
+  end;
 end;
 
 {Queries the region of memory that contains the address, and records in the memory page access map whether its pages
-are executable, or readable data in the image of a module.  Returns the address of the last byte of the region.  Only
-supports the low 4GB of address space.}
+are executable, or readable data in the image of a module.  If a DLL is loaded or unloaded while the region is being
+queried, the pages are left as mpaUnknown instead, so that they are queried again when next needed.  Returns the
+address of the last byte of the region.  Only supports the low 4GB of address space.}
 function UpdateMemoryPageAccessMap(AAddress: NativeUInt): NativeUInt;
 var
   LMemInfo: TMemoryBasicInformation;
   LAccess: TMemoryPageAccess;
   LStartPage, LPageCount: NativeUInt;
+  LGeneration: Integer;
 begin
+  LGeneration := MemoryPageAccessMapGeneration;
+
   {Query the page}
   if VirtualQuery(Pointer(AAddress), LMemInfo, SizeOf(LMemInfo)) <> 0 then
   begin
@@ -486,6 +499,14 @@ begin
       if (LStartPage + LPageCount) >= NativeUInt(Length(MemoryPageAccessMap)) then
         LPageCount := NativeUInt(Length(MemoryPageAccessMap)) - LStartPage;
       FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(LAccess));
+
+      {If a DLL was loaded or unloaded since the region was queried, what was just recorded may be out of date, e.g.
+      the pages of a DLL that was loaded into a free region would be marked as not executable, and since such pages are
+      never queried again, the DLL's return addresses would be missing from all later stack traces.  Reset the pages
+      instead.  The locked compare also ensures that the counter is not read before the writes above are visible to
+      other threads.}
+      if AtomicCmpExchange(MemoryPageAccessMapGeneration, LGeneration, LGeneration) <> LGeneration then
+        FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
     end;
     Result := NativeUInt(LMemInfo.BaseAddress) + (LMemInfo.RegionSize - 1);
   end
