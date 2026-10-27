@@ -34,10 +34,53 @@ begin
   end;
 end;
 
+{Fills a block with a pattern that depends on the position in the block and on
+ ASeed.  A different seed is used after every reallocation, so content that was
+ not copied, was copied from the wrong offset or is left over from an earlier
+ step does not match.}
+procedure FillPattern(APointer: Pointer; ASize: Integer; ASeed: Byte);
+var
+  i: Integer;
+begin
+  for i := 0 to ASize - 1 do
+    PByte(PAnsiChar(APointer) + i)^ := Byte((i xor (i shr 8)) xor ASeed);
+end;
+
+{Checks the pattern written by FillPattern.}
+function PatternIsIntact(APointer: Pointer; ASize: Integer; ASeed: Byte): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 0 to ASize - 1 do
+  begin
+    if PByte(PAnsiChar(APointer) + i)^ <> Byte((i xor (i shr 8)) xor ASeed) then
+      Exit;
+  end;
+  Result := True;
+end;
+
+{Reallocates a block that holds the pattern for ASeed, checks that every byte the
+ old and the new size have in common was kept, and fills the block with the
+ pattern for the next seed.  Returns False if content was lost.}
+function ReallocAndVerify(var APointer: Pointer; var ASize: Integer; ANewSize: Integer; ASeed: Byte): Boolean;
+var
+  LCommonSize: Integer;
+begin
+  ReallocMem(APointer, ANewSize);
+  if ANewSize < ASize then
+    LCommonSize := ANewSize
+  else
+    LCommonSize := ASize;
+  Result := PatternIsIntact(APointer, LCommonSize, ASeed);
+  ASize := ANewSize;
+  FillPattern(APointer, ASize, Byte(ASeed + 1));
+end;
+
 var
   GPointer: Pointer;
   GSecond: Pointer;
-  i: Integer;
+  i, GSize: Integer;
   GAllContentIntact: Boolean;
   GUsageBefore, GUsageAfter: TFastMM_UsageSummary;
   GDebugHeaderSize: Integer;
@@ -99,17 +142,18 @@ begin
   Check(GAllContentIntact, 'every size from 1 to 2000 allocates, holds its content and frees');
 
   Section('Realloc chain');
-  GetMem(GPointer, 10);
-  PByte(GPointer)^ := $5A;
+  GSize := 10;
+  GetMem(GPointer, GSize);
+  FillPattern(GPointer, GSize, 0);
   GAllContentIntact := True;
   for i := 1 to 200 do
   begin
-    ReallocMem(GPointer, (i * 37) mod 5000 + 1);
-    {The first byte has to survive every move.}
-    if PByte(GPointer)^ <> $5A then
+    {Every byte that the old and the new size have in common has to survive every
+     move.}
+    if not ReallocAndVerify(GPointer, GSize, (i * 37) mod 5000 + 1, Byte(i - 1)) then
       GAllContentIntact := False;
   end;
-  Check(GAllContentIntact, 'the first byte survives 200 reallocations');
+  Check(GAllContentIntact, 'the content survives 200 reallocations');
   FreeMem(GPointer);
 
   Check(FastMM_ExitDebugMode, 'FastMM_ExitDebugMode succeeds');

@@ -63,6 +63,21 @@ begin
   Result := Integer((FSeed shr 16) mod Cardinal(ALimit));
 end;
 
+{Checks that every byte of a block still holds the low byte of its size, which
+ is what the worker filled it with.}
+function BlockIsIntact(APointer: Pointer; ASize: Integer): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 0 to ASize - 1 do
+  begin
+    if PByte(PAnsiChar(APointer) + i)^ <> Byte(ASize) then
+      Exit;
+  end;
+  Result := True;
+end;
+
 procedure TWorker.Execute;
 const
   CLiveBlocks = 64;
@@ -84,7 +99,7 @@ begin
       begin
         {Verify the block still holds what was written into it:  corruption of
          user data would show up here rather than in the scanner.}
-        if PByte(LBlocks[LIndex])^ <> Byte(LSizes[LIndex]) then
+        if not BlockIsIntact(LBlocks[LIndex], LSizes[LIndex]) then
           InterlockedIncrement(GWorkerErrors);
         FreeMem(LBlocks[LIndex]);
         LBlocks[LIndex] := nil;

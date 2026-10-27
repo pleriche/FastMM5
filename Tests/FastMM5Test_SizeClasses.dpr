@@ -33,6 +33,49 @@ begin
   Result := True;
 end;
 
+{Fills a block with a pattern that depends on the position in the block and on
+ ASeed.  A different seed is used after every reallocation, so content that was
+ not copied, was copied from the wrong offset or is left over from an earlier
+ step does not match.}
+procedure FillPattern(APointer: Pointer; ASize: Integer; ASeed: Byte);
+var
+  i: Integer;
+begin
+  for i := 0 to ASize - 1 do
+    PByte(PAnsiChar(APointer) + i)^ := Byte((i xor (i shr 8)) xor ASeed);
+end;
+
+{Checks the pattern written by FillPattern.}
+function PatternIsIntact(APointer: Pointer; ASize: Integer; ASeed: Byte): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 0 to ASize - 1 do
+  begin
+    if PByte(PAnsiChar(APointer) + i)^ <> Byte((i xor (i shr 8)) xor ASeed) then
+      Exit;
+  end;
+  Result := True;
+end;
+
+{Reallocates a block that holds the pattern for ASeed, checks that every byte the
+ old and the new size have in common was kept, and fills the block with the
+ pattern for the next seed.  Returns False if content was lost.}
+function ReallocAndVerify(var APointer: Pointer; var ASize: Integer; ANewSize: Integer; ASeed: Byte): Boolean;
+var
+  LCommonSize: Integer;
+begin
+  ReallocMem(APointer, ANewSize);
+  if ANewSize < ASize then
+    LCommonSize := ANewSize
+  else
+    LCommonSize := ASize;
+  Result := PatternIsIntact(APointer, LCommonSize, ASeed);
+  ASize := ANewSize;
+  FillPattern(APointer, ASize, Byte(ASeed + 1));
+end;
+
 var
   GPointer: Pointer;
   GSize, i: Integer;
@@ -90,14 +133,15 @@ begin
 
   Section('Reallocations across the class boundaries');
   {A reallocation may move the block between size classes in either direction.
-   The leading bytes have to survive every move.}
-  GetMem(GPointer, 10);
-  FillChar(GPointer^, 10, $A5);
+   Every byte that the old and the new size have in common has to survive every
+   move.}
+  GSize := 10;
+  GetMem(GPointer, GSize);
+  FillPattern(GPointer, GSize, 0);
   GOk := True;
   for i := 1 to 60 do
   begin
-    ReallocMem(GPointer, (i * 12345) mod 300000 + 1);
-    if PByte(GPointer)^ <> $A5 then
+    if not ReallocAndVerify(GPointer, GSize, (i * 12345) mod 300000 + 1, Byte(i - 1)) then
       GOk := False;
   end;
   Check(GOk, 'the block content survives 60 reallocations across all classes');
@@ -105,13 +149,13 @@ begin
 
   {Growing one byte at a time across the small/medium boundary is the case where
    an off-by-one in the class lookup table would surface.}
-  GetMem(GPointer, 2000);
-  FillChar(GPointer^, 2000, $3C);
+  GSize := 2000;
+  GetMem(GPointer, GSize);
+  FillPattern(GPointer, GSize, 0);
   GOk := True;
-  for GSize := 2001 to 2400 do
+  for i := 1 to 400 do
   begin
-    ReallocMem(GPointer, GSize);
-    if PByte(GPointer)^ <> $3C then
+    if not ReallocAndVerify(GPointer, GSize, 2000 + i, Byte(i - 1)) then
       GOk := False;
   end;
   Check(GOk, 'growing byte by byte across the small block boundary keeps the content');
