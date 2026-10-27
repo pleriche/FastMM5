@@ -1394,8 +1394,12 @@ begin
     Result := NativeUIntToHexBuf(LAddress, Result);
 
     {Find the module containing the call instruction, which is at least one byte before the return address.  The image
-    of a module is a single allocation, so the allocation base is the module handle.}
+    of a module is a single allocation, so the allocation base is the module handle.  The memory must be part of a
+    loaded image:  For the address of a DLL that has since been unloaded, VirtualQuery returns MEM_FREE with an
+    AllocationBase of nil, and GetModuleFileName(0) would return the name of the executable.}
     if (VirtualQuery(Pointer(LAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
+      and (LMemInfo.State = MEM_COMMIT)
+      and (LMemInfo.Type_9 = MEM_IMAGE)
       and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
     begin
       LInfoText := AnsiString(Format(' [%s+%x]', [ExtractFileName(LModuleFileName),
