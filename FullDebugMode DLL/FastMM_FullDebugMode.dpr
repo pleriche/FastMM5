@@ -1460,8 +1460,9 @@ end;
 {$ifdef EurekaLog_V7}
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
 begin
-  {Needs EurekaLog 7 or later}
-  Result := EFastMM4Support.FastMM_LogStackTrace(PPointer(AReturnAddresses), AMaxDepth, ABuffer, 10 * 256,
+  {Needs EurekaLog 7 or later.  FastMM's buffer has room for 256 characters per stack trace entry, so the size is
+  based on the number of entries:  A fixed size would cut off the text of deeper stack traces.}
+  Result := EFastMM4Support.FastMM_LogStackTrace(PPointer(AReturnAddresses), AMaxDepth, ABuffer, AMaxDepth * 256,
     [ddUnit, ddProcedure, ddSourceCode], True, False, False, True, False, True);
 end;
 {$endif}
