@@ -129,8 +129,7 @@ function FastMM_SaveSnapshotDiffToFile(const ADiff: TFastMM_SnapshotDiff; const 
 implementation
 
 const
-  {Pseudo content types for non-class block content.  Real class content types are the class pointer itself, which is
-  always > 65535 and pointer aligned, so these values can never collide with a class.}
+  {Pseudo content types for block content that is not a class instance (the indexes of the direct accumulators).}
   CContentTypeUnknown = 0;
   CContentTypeAnsiString = 1;
   CContentTypeUnicodeString = 2;
@@ -145,14 +144,18 @@ const
   CEntryNameUnknown = '(unknown)';
 
 type
-  {One entry of the capture hash table.  The table is keyed on the first native word of the block content:  for class
-  instances that word is the class pointer, so expensive content detection (which involves VirtualQuery) runs only
-  once per distinct first word - the same optimization FastMM_LogStateToFile uses.}
+  {One entry of the capture hash table.  The table is keyed on the first native word of the block content, and records
+  whether blocks starting with that word are class instances:  for class instances that word is the class pointer, so
+  the expensive class detection (which involves VirtualQuery) runs only once per distinct first word - the same
+  optimization FastMM_LogStateToFile uses.  Only the class verdict may be cached:  whether a block contains string data
+  also depends on the rest of the block (the reference count and the characters), so blocks that are not class
+  instances are classified one by one.}
   TRawContentEntry = record
     {The first native word of the block content.  0 = slot unused (0 never passes the plausibility check).}
     RawFirstWord: NativeUInt;
-    {The resolved content type:  a class pointer, or one of the CContentType* pseudo types.}
-    ContentType: NativeUInt;
+    {The class of the blocks starting with RawFirstWord, or nil if RawFirstWord is not a class pointer.}
+    DetectedClass: TClass;
+    {The number and total size of the class instances.  Always 0 if DetectedClass = nil.}
     InstanceCount: Int64;
     TotalBytes: Int64;
   end;
@@ -163,6 +166,9 @@ type
   TCaptureState = record
     {Length(Slots) - 1.  Length(Slots) is a power of two.}
     SlotMask: NativeUInt;
+    {The number of bits in a NativeUInt minus log2(Length(Slots)):  shifting a hash right by this amount leaves the top
+    bits as the slot index.}
+    SlotShift: Integer;
     UsedEntryCount: Integer;
     {The maximum number of used entries (half the slot count, to keep open addressing probes short).}
     MaxUsedEntryCount: Integer;
@@ -171,8 +177,7 @@ type
     WalkComplete: Boolean;
     TotalBlockCount: Int64;
     TotalUserBytes: Int64;
-    {Blocks whose first word cannot be a class reference are classified directly into these accumulators, bypassing
-    the hash table.}
+    {Blocks that are not class instances are classified directly into these accumulators.}
     DirectCounts: array[CContentTypeUnknown..CContentTypeUnicodeString] of Int64;
     DirectBytes: array[CContentTypeUnknown..CContentTypeUnicodeString] of Int64;
     {The open addressing (linear probing) hash table.}
@@ -183,10 +188,20 @@ type
 {---------------------Snapshot capture-------------------}
 {--------------------------------------------------------}
 
-function HashFirstWord(AValue: NativeUInt): NativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
+const
+  {The Fibonacci hashing multiplier:  2^N divided by the golden ratio, where N is the number of bits in a NativeUInt.}
+{$if defined(CPU64BITS) or defined(CPUX64) or defined(CPU64)}
+  CHashMultiplier = NativeUInt($9E3779B97F4A7C15);
+{$else}
+  CHashMultiplier = NativeUInt($9E3779B9);
+{$ifend}
+
+function HashFirstWord(AValue: NativeUInt; ASlotShift: Integer): NativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  {The low bits of a pointer are zero due to alignment, so shift them out before mixing.}
-  Result := (AValue shr 3) * NativeUInt($9E3779B1);
+  {Fibonacci hashing:  the slot index is taken from the top bits of the product, since those depend on all the bits of
+  the key.  The low bits of a product depend only on the low bits of the key, so e.g. all keys with a zero low dword
+  (64-bit string headers, Doubles holding whole numbers) would land in the same slot.}
+  Result := NativeUInt(AValue * CHashMultiplier) shr ASlotShift;
 end;
 
 {Classifies block content that has already been checked to not be a class instance.}
@@ -200,19 +215,6 @@ begin
   else
     Result := CContentTypeUnknown;
   end;
-end;
-
-{Fully classifies block content.  This is the expensive path (FastMM_DetectClassInstance calls VirtualQuery), so it
-runs only once per distinct first word.}
-function DetectContentType(APBlock: Pointer; AUsableSize: NativeInt): NativeUInt;
-var
-  LClass: TClass;
-begin
-  LClass := FastMM_DetectClassInstance(APBlock);
-  if LClass <> nil then
-    Result := NativeUInt(LClass)
-  else
-    Result := DetectNonClassContentType(APBlock, AUsableSize);
 end;
 
 {The FastMM_WalkBlocks callback.  IMPORTANT:  arenas are locked while this executes, so this routine (and everything
@@ -234,18 +236,14 @@ begin
   LFirstWord := PNativeUInt(ABlockInfo.BlockAddress)^;
   if (LFirstWord > 65535) and (LFirstWord and NativeUInt(SizeOf(Pointer) - 1) = 0) then
   begin
-    LSlotIndex := HashFirstWord(LFirstWord) and LPState.SlotMask;
+    LSlotIndex := HashFirstWord(LFirstWord, LPState.SlotShift);
     while True do
     begin
       LPEntry := @LPState.Slots[LSlotIndex];
 
+      {Known first word?}
       if LPEntry.RawFirstWord = LFirstWord then
-      begin
-        {Known first word:  just accumulate.}
-        Inc(LPEntry.InstanceCount);
-        Inc(LPEntry.TotalBytes, ABlockInfo.UsableSize);
-        Exit;
-      end;
+        Break;
 
       if LPEntry.RawFirstWord = 0 then
       begin
@@ -255,33 +253,38 @@ begin
           {Table full:  flag the overflow (the capture will be retried with a bigger table if possible) and fall back
           to the direct accumulators so the totals stay correct even if no retry is possible.}
           LPState.Overflowed := True;
-          LContentType := DetectNonClassContentType(ABlockInfo.BlockAddress, ABlockInfo.UsableSize);
-          Inc(LPState.DirectCounts[LContentType]);
-          Inc(LPState.DirectBytes[LContentType], ABlockInfo.UsableSize);
-          Exit;
+          LPEntry := nil;
+          Break;
         end;
 
         Inc(LPState.UsedEntryCount);
         LPEntry.RawFirstWord := LFirstWord;
-        LPEntry.ContentType := DetectContentType(ABlockInfo.BlockAddress, ABlockInfo.UsableSize);
-        LPEntry.InstanceCount := 1;
-        LPEntry.TotalBytes := ABlockInfo.UsableSize;
-        Exit;
+        LPEntry.DetectedClass := FastMM_DetectClassInstance(ABlockInfo.BlockAddress);
+        Break;
       end;
 
       LSlotIndex := (LSlotIndex + 1) and LPState.SlotMask;
     end;
-  end
-  else
-  begin
-    {The first word cannot be a class reference:  classify directly.}
-    LContentType := DetectNonClassContentType(ABlockInfo.BlockAddress, ABlockInfo.UsableSize);
-    Inc(LPState.DirectCounts[LContentType]);
-    Inc(LPState.DirectBytes[LContentType], ABlockInfo.UsableSize);
+
+    if (LPEntry <> nil) and (LPEntry.DetectedClass <> nil) then
+    begin
+      {A class instance:  just accumulate.}
+      Inc(LPEntry.InstanceCount);
+      Inc(LPEntry.TotalBytes, ABlockInfo.UsableSize);
+      Exit;
+    end;
   end;
+
+  {Not a class instance (or the table is full):  classify this block on its own.  String detection does not call
+  VirtualQuery, so this is cheap.}
+  LContentType := DetectNonClassContentType(ABlockInfo.BlockAddress, ABlockInfo.UsableSize);
+  Inc(LPState.DirectCounts[LContentType]);
+  Inc(LPState.DirectBytes[LContentType], ABlockInfo.UsableSize);
 end;
 
 procedure InitializeCaptureState(var AState: TCaptureState; AEntryCapacity: Integer);
+var
+  LSlotCount: Integer;
 begin
   {Release a previous table (retry pass) before wiping the record, otherwise the array reference would leak.}
   AState.Slots := nil;
@@ -289,6 +292,13 @@ begin
   SetLength(AState.Slots, AEntryCapacity * 2);
   FillChar(AState.Slots[0], Length(AState.Slots) * SizeOf(TRawContentEntry), 0);
   AState.SlotMask := NativeUInt(Length(AState.Slots) - 1);
+  AState.SlotShift := SizeOf(NativeUInt) * 8;
+  LSlotCount := Length(AState.Slots);
+  while LSlotCount > 1 do
+  begin
+    Dec(AState.SlotShift);
+    LSlotCount := LSlotCount shr 1;
+  end;
   AState.MaxUsedEntryCount := AEntryCapacity;
 end;
 
@@ -326,25 +336,17 @@ begin
   end;
 end;
 
-{Builds the final name-keyed snapshot entries from the capture state:  resolve class names, merge the string/unknown
+{Builds the final name-keyed snapshot entries from the capture state:  resolve class names, add the string/unknown
 pseudo types, sort by name and merge duplicate names (distinct classes may share a name across packages).}
 procedure BuildSnapshotFromState(const AState: TCaptureState; var ASnapshot: TFastMM_HeapSnapshot);
 var
   LRawIndex, LOutCount, i: Integer;
   LPRawEntry: PRawContentEntry;
-  LPseudoCounts: array[CContentTypeUnknown..CContentTypeUnicodeString] of Int64;
-  LPseudoBytes: array[CContentTypeUnknown..CContentTypeUnicodeString] of Int64;
   LContentType: NativeUInt;
 begin
   ASnapshot.ContentTypeTableOverflowed := AState.Overflowed;
   ASnapshot.TotalBlockCount := AState.TotalBlockCount;
   ASnapshot.TotalUserBytes := AState.TotalUserBytes;
-
-  for LContentType := CContentTypeUnknown to CContentTypeUnicodeString do
-  begin
-    LPseudoCounts[LContentType] := AState.DirectCounts[LContentType];
-    LPseudoBytes[LContentType] := AState.DirectBytes[LContentType];
-  end;
 
   {Worst case:  every used hash entry is a distinct class, plus the three pseudo entries.}
   SetLength(ASnapshot.Entries, AState.UsedEntryCount + 3);
@@ -352,29 +354,22 @@ begin
 
   for LRawIndex := 0 to Length(AState.Slots) - 1 do
   begin
+    {Skip unused slots, and first words that are not class pointers (those blocks were counted in the direct
+    accumulators).}
     LPRawEntry := @AState.Slots[LRawIndex];
-    if LPRawEntry.RawFirstWord = 0 then
+    if LPRawEntry.DetectedClass = nil then
       Continue;
 
-    if LPRawEntry.ContentType > CContentTypeUnicodeString then
-    begin
-      {A class:  resolve the name now (string allocation is safe here, the walk is over).}
-      ASnapshot.Entries[LOutCount].Name := string(TClass(LPRawEntry.ContentType).ClassName);
-      ASnapshot.Entries[LOutCount].InstanceCount := LPRawEntry.InstanceCount;
-      ASnapshot.Entries[LOutCount].TotalBytes := LPRawEntry.TotalBytes;
-      Inc(LOutCount);
-    end
-    else
-    begin
-      {A first word that passed the plausibility check but turned out to be string/unknown content.}
-      Inc(LPseudoCounts[LPRawEntry.ContentType], LPRawEntry.InstanceCount);
-      Inc(LPseudoBytes[LPRawEntry.ContentType], LPRawEntry.TotalBytes);
-    end;
+    {A class:  resolve the name now (string allocation is safe here, the walk is over).}
+    ASnapshot.Entries[LOutCount].Name := string(LPRawEntry.DetectedClass.ClassName);
+    ASnapshot.Entries[LOutCount].InstanceCount := LPRawEntry.InstanceCount;
+    ASnapshot.Entries[LOutCount].TotalBytes := LPRawEntry.TotalBytes;
+    Inc(LOutCount);
   end;
 
   for LContentType := CContentTypeUnknown to CContentTypeUnicodeString do
   begin
-    if LPseudoCounts[LContentType] <> 0 then
+    if AState.DirectCounts[LContentType] <> 0 then
     begin
       case LContentType of
         CContentTypeAnsiString:
@@ -384,8 +379,8 @@ begin
       else
         ASnapshot.Entries[LOutCount].Name := CEntryNameUnknown;
       end;
-      ASnapshot.Entries[LOutCount].InstanceCount := LPseudoCounts[LContentType];
-      ASnapshot.Entries[LOutCount].TotalBytes := LPseudoBytes[LContentType];
+      ASnapshot.Entries[LOutCount].InstanceCount := AState.DirectCounts[LContentType];
+      ASnapshot.Entries[LOutCount].TotalBytes := AState.DirectBytes[LContentType];
       Inc(LOutCount);
     end;
   end;
