@@ -570,8 +570,8 @@ frees if this is a concern.  ALockTimeoutMilliseconds is the maximum number of m
 wait to acquire a lock on an arena, skipping the arena if it is unable to do so.  Specify AMinimumAllocationGroup and
 AMaximumAllocationGroup to walk only blocks in the specified allocation group range (see FastMM_CurrentAllocationGroup).
 Note that only blocks that were allocated in debug mode are linked to an allocation group, other blocks are treated as
-having an allocation group of 0.  Returns True if all blocks were walked successfully, False if one or more arenas were
-skipped due to a lock timeout.}
+having an allocation group of 0.  Returns True if all blocks were walked successfully, False if one or more arenas or
+small block spans were skipped due to a lock timeout.}
 function FastMM_WalkBlocks(ACallBack: TFastMM_WalkBlocksCallback; AWalkBlockTypes: TFastMM_WalkBlocksBlockTypes = [];
   AWalkUsedBlocksOnly: Boolean = True; AUserData: Pointer = nil; ALockTimeoutMilliseconds: Cardinal = 1000;
   AMinimumAllocationGroup: Cardinal = 0; AMaximumAllocationGroup: Cardinal = $ffffffff): Boolean;
@@ -9031,12 +9031,12 @@ begin
 
                   if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
                   begin
-                    {A timeout while attempting to lock the small block manager will cause the span to be reported as a
-                    medium block instead.  This should happen very infrequently, and since small block spans are
-                    relatively small it should not skew results materially.}
+                    {Skip the span if the small block manager could not be locked in time:  Its blocks cannot be walked
+                    without the lock, and reporting the span as a medium block instead would report a used block that
+                    does not exist.}
                     Result := False;
-                    LPSmallBlockManager := nil;
-                    LSmallBlockOffset := 0;
+                    Inc(LBlockOffsetFromMediumSpanStart, LMediumBlockSize);
+                    Continue;
                   end
                   else
                   begin
