@@ -2872,7 +2872,13 @@ begin
 
   while NativeUInt(LPIn) < NativeUInt(LPEnd) do
   begin
-    LCode := PCardinal(LPIn)^;
+    {Two characters are read at a time, except for the last character:  Reading a dword there would read past the end
+    of the text.  The missing second character then reads as #0, which is treated like any other single byte
+    character, and the output for it is removed again below.}
+    if NativeUInt(LPIn) + SizeOf(Word) < NativeUInt(LPEnd) then
+      LCode := PCardinal(LPIn)^
+    else
+      LCode := LPIn^;
     if Word(LCode) <= $7f then
     begin
       if LCode <= $7fffff then
