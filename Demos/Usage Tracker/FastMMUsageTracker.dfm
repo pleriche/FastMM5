@@ -80,7 +80,7 @@ object fFastMMUsageTracker: TfFastMMUsageTracker
     Align = alTop
     TabOrder = 3
     object tsAllocation: TTabSheet
-      Caption = 'FastMM4 Allocation'
+      Caption = 'FastMM Allocation'
       object sgBlockStatistics: TStringGrid
         Left = 4
         Top = 4

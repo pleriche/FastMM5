@@ -167,7 +167,9 @@ type
   TP_GlobalMemoryStatusEx = function(
     var PR_MemStatusEx: TMemoryStatusEx): LongBool; stdcall;
 
-  TSystem_Basic_Information = packed record
+  {SYSTEM_BASIC_INFORMATION.  NtQuerySystemInformation fails unless the size is exact, so this is not packed:  Under
+  64-bit the pointer sized fields are aligned to 8 bytes and the record is 64 bytes long (44 bytes under 32-bit).}
+  TSystem_Basic_Information = record
     dwUnknown1: DWORD;
     uKeMaximumIncrement: ULONG;
     uPageSize: ULONG;
@@ -177,7 +179,8 @@ type
     uAllocationGranularity: ULONG;
     pLowestUserAddress: Pointer;
     pMmHighestUserAddress: Pointer;
-    uKeActiveProcessors: ULONG;
+    {The affinity mask of the active processors (ULONG_PTR).}
+    uKeActiveProcessors: NativeUInt;
     bKeNumberProcessors: Byte;
     bUnknown2: Byte;
     wUnknown3: Word;
@@ -303,8 +306,10 @@ begin
   begin
     Cells[0, 0] := 'VM Block';
     Cells[1, 0] := 'Size';
-    Cells[2, 0] := 'Type';
-    Cells[3, 0] := 'State';
+    {Column 2 holds the state of the region (free, reserved, committed, or the image of the EXE or a DLL), and
+    column 3 the page protection flags.}
+    Cells[2, 0] := 'State';
+    Cells[3, 0] := 'Protection';
     Cells[4, 0] := 'EXE/DLL';
   end;
 end;
@@ -318,11 +323,12 @@ procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Numeric: Boolean; 
 
   function CompareNumeric(const S1, S2: string): Integer;
   var
-    LVal1, LVal2: Integer;
+    LVal1, LVal2: Int64;
   begin
     begin
-      LVal1 := StrToInt(S1);
-      LVal2 := StrToInt(S2);
+      {Int64, since region sizes can be 2GB or more (the free regions under 64-bit are terabytes).}
+      LVal1 := StrToInt64(S1);
+      LVal2 := StrToInt64(S2);
       if LVal1 = LVal2 then
       begin
         Result := 0;
@@ -499,6 +505,7 @@ var
     CRegionSize = 1 shl 16;
   var
     LRegionStartIndex, LRegionEndIndex, i: Integer;
+    LRegionEnd: NativeUInt;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;
@@ -523,7 +530,12 @@ var
           begin
             LChunkState := csExSysAllocated;
           end;
-          LRegionEndIndex := (NativeUInt(LMBI.BaseAddress) + LMBI.RegionSize - 1) div CRegionSize;
+          {The map only covers the low 4GB of the address space, and under 64-bit a region may extend beyond it.}
+          LRegionEnd := (NativeUInt(LMBI.BaseAddress) + LMBI.RegionSize - 1) div CRegionSize;
+          if LRegionEnd >= NativeUInt(AddressSpacePageCount) then
+            LRegionEndIndex := AddressSpacePageCount - 1
+          else
+            LRegionEndIndex := Integer(LRegionEnd);
           for i := LRegionStartIndex to LRegionEndIndex do
             AMemoryMap[i] := LChunkState;
           LRegionStartIndex := LRegionEndIndex;
@@ -601,7 +613,8 @@ var
     LInd: Integer;
     LPrevSBState, LSBState: ^TSmallBlockTypeState;
 
-    procedure UpdateBlockStatistics(c, r, current, prev: Integer);
+    {The values are Int64, since the totals can exceed the range of an Integer (2GB).}
+    procedure UpdateBlockStatistics(c, r: Integer; current, prev: Int64);
     var
       s : string;
     begin
@@ -611,7 +624,14 @@ var
       else if current < prev then
         s := s + ' (-' + IntToStr(prev - current) + ')';
       sgBlockStatistics.Cells[c, r] := s;
-      sgBlockStatistics.Objects[c, r] := Pointer(current - prev);
+      {Only the sign of the change is stored, since it decides the colour of the cell:  The change itself may not fit
+      into a pointer under 32-bit.}
+      if current > prev then
+        sgBlockStatistics.Objects[c, r] := Pointer(1)
+      else if current < prev then
+        sgBlockStatistics.Objects[c, r] := Pointer(-1)
+      else
+        sgBlockStatistics.Objects[c, r] := nil;
     end;
 
   begin
@@ -768,11 +788,13 @@ var
           begin
             with LR_SysBaseInfo do 
             begin
-              Add('Maximum Increment                 = ' + CardinalToKStringFormatted(uKeMaximumIncrement));
+              {Only the page size is a number of bytes:  The others are counts (the maximum increment is in units of
+              100 nanoseconds), so they are not shown in K.}
+              Add('Maximum Increment                 = ' + CardinalToStringFormatted(uKeMaximumIncrement));
               Add('Page Size                         = ' + CardinalToKStringFormatted(uPageSize));
-              Add('Number of Physical Pages          = ' + CardinalToKStringFormatted(uMmNumberOfPhysicalPages));
+              Add('Number of Physical Pages          = ' + CardinalToStringFormatted(uMmNumberOfPhysicalPages));
               Add('Lowest Physical Page              = ' + CardinalToStringFormatted(uMmLowestPhysicalPage));
-              Add('Highest Physical Page             = ' + CardinalToKStringFormatted(uMmHighestPhysicalPage));
+              Add('Highest Physical Page             = ' + CardinalToStringFormatted(uMmHighestPhysicalPage));
             end;
           end;
         end;
@@ -793,7 +815,7 @@ var
         begin
           with LR_ProcessMemoryCounters do
           begin
-            Add('Page Fault Count                  = ' + CardinalToKStringFormatted(PageFaultCount));
+            Add('Page Fault Count                  = ' + CardinalToStringFormatted(PageFaultCount));
             Add('Peak Working Set Size             = ' + Int64ToKStringFormatted(PeakWorkingSetSize));
             Add('Working Set Size                  = ' + Int64ToKStringFormatted(WorkingSetSize));
             Add('Quota Peak Paged Pool Usage       = ' + Int64ToKStringFormatted(QuotaPeakPagedPoolUsage));
@@ -836,7 +858,7 @@ var
         Add('');
         Add('FastMM Info:');
         Add('-------------');
-        Add('Total Blocks                      = ' + Int64ToKStringFormatted(LTotalBlocks));
+        Add('Total Blocks                      = ' + Int64ToStringFormatted(LTotalBlocks));
         Add('Total Allocated                   = ' + Int64ToKStringFormatted(LTotalAllocated));
         Add('Total Reserved                    = ' + Int64ToKStringFormatted(LTotalReserved));
       end;
@@ -930,9 +952,13 @@ begin
   tTimer.Enabled := False;
   try
     RefreshSnapShot;
-  finally
-    tTimer.Enabled := True;
+  except
+    {Stop updating automatically:  Otherwise the timer fires again while the error is being shown, and every refresh
+    adds another error dialog.  Unchecking the box also leaves the timer disabled.}
+    ChkAutoUpdate.Checked := False;
+    raise;
   end;
+  tTimer.Enabled := True;
 end;
 
 procedure TfFastMMUsageTracker.bCloseClick(Sender: TObject);
