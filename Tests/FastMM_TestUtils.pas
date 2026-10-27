@@ -7,8 +7,9 @@
   failure counter, and the exit code convention the test runner relies on.
 
     - Every test program calls TestsBegin at the start and TestsEnd at the very
-      end.  TestsEnd sets ExitCode to the number of failed checks, so the runner
-      (and any CI) only has to look at the exit code:  0 = passed.
+      end.  TestsEnd sets ExitCode to the number of failed checks (or to 1 if no
+      check ran at all), so the runner (and any CI) only has to look at the exit
+      code:  0 = passed.
     - Check / CheckEquals print one line per assertion, so a failing run says
       which case failed and with which values, not just that something failed.
     - TestsBegin also silences the message boxes and the event log file:  several
@@ -35,7 +36,8 @@ uses
  on-disk error reporting for the duration of the run.}
 procedure TestsBegin(const ATitle: string);
 
-{Prints the summary and sets ExitCode to the number of failures.}
+{Prints the summary and sets ExitCode to the number of failures, or to 1 if no
+ check ran at all.}
 procedure TestsEnd;
 
 {Starts a named group of checks.  Purely cosmetic, but it makes a failing run
@@ -149,6 +151,15 @@ end;
 procedure TestsEnd;
 begin
   WriteLn;
+  {A run without a single check has not shown anything, e.g. after a change to a
+   test that skips all of its checks, so it must not pass.}
+  if GChecks = 0 then
+  begin
+    WriteLn('FAILED - no checks ran');
+    Flush;
+    ExitCode := 1;
+    Exit;
+  end;
   if GFailures = 0 then
     WriteLn(Format('PASSED - %d check(s)', [GChecks]))
   else

@@ -1,13 +1,13 @@
 {Leak and address space growth detector:  hammers GetMem/FreeMem in each size
  class in turn and checks that the memory manager gives everything back.
 
- Two things are asserted after every phase:
+ Two things are asserted:
 
-   - the allocated byte count returns to where it was, which catches a block
-     that is never accounted as freed, and
+   - after every phase, the allocated byte count returns to where it was, which
+     catches a block that is never accounted as freed, and
    - the overhead (committed address space that is not allocated to the
      application) does not keep growing from phase to phase, which catches spans
-     that are never released.
+     that are never released.  Its peak over all phases is checked at the end.
 
  The second one is why this test exists:  in debug mode FastMM deliberately
  keeps freed blocks around as use-after-free tripwires, and a version of that
@@ -89,14 +89,15 @@ begin
   Hammer(500000, 1000);
 
   Section('Address space');
-  GSummary := FastMM_GetUsageSummary;
   {Every phase frees everything it allocates, so the committed address space
    must not keep climbing phase after phase.  Some growth is expected (each size
    class needs its own spans), hence the generous factor;  what this catches is
-   the unbounded case, where the overhead is orders of magnitude larger.}
-  Check(Int64(GSummary.OverheadBytes) < Int64(GOverheadAfterFirstPhase) * 4 + 16 * 1024 * 1024,
-    Format('the overhead stays bounded across the phases (%d -> %d bytes)',
-      [Int64(GOverheadAfterFirstPhase), Int64(GSummary.OverheadBytes)]));
+   the unbounded case, where the overhead is orders of magnitude larger.  The
+   peak is checked rather than the overhead after the last phase, so that a
+   phase that grew it and a later one that released it again is not missed.}
+  Check(Int64(GPeakOverhead) < Int64(GOverheadAfterFirstPhase) * 4 + 16 * 1024 * 1024,
+    Format('the overhead stays bounded across the phases (%d after the first phase, peak %d bytes)',
+      [Int64(GOverheadAfterFirstPhase), Int64(GPeakOverhead)]));
 
   Check(FastMM_ExitDebugMode, 'FastMM_ExitDebugMode succeeds');
   ReportUsage('after FastMM_ExitDebugMode');

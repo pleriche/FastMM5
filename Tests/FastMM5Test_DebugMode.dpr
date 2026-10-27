@@ -93,7 +93,6 @@ begin
    here means every debug block moved.}
   GDebugHeaderSize := SizeOf(TFastMM_DebugBlockHeader);
   Info(Format('SizeOf(TFastMM_DebugBlockHeader) = %d', [GDebugHeaderSize]));
-  Check(GDebugHeaderSize > 0, 'the debug block header has a size');
   Check(GDebugHeaderSize mod 16 = 0, 'the debug block header keeps 16 byte alignment');
 
   Section('Normal mode');
@@ -108,7 +107,6 @@ begin
   Check(FastMM_BlockMaximumUserBytes(GPointer) >= FastMM_BlockCurrentUserBytes(GPointer),
     'the maximum user size is not below the current user size');
   FreeMem(GPointer);
-  Check(True, 'FreeMem returns without error');
 
   Section('Debug mode');
   GUsageBefore := FastMM_GetUsageSummary;
